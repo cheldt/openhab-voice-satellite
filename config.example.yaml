@@ -1,0 +1,52 @@
+# stt-proxy configuration. Copy to config.yaml and adjust.
+# Relative paths are resolved against this file's directory.
+
+audio:
+  input_device: null        # substring of device name (see: stt-proxy --list-devices); null = default
+  output_device: null
+  sample_rate: 16000
+  frame_ms: 80              # 1280 samples = one openWakeWord chunk
+
+wakeword:
+  model: "hey_jarvis"       # openWakeWord pretrained name or path to a custom .onnx
+  threshold: 0.5
+  threshold_speaking: 0.7   # raised while TTS is audible (echo mitigation)
+  stop_model: null          # optional: path to a custom-trained "stop" model (.onnx)
+  stop_threshold: 0.5
+
+vad:
+  threshold: 0.5
+  silence_ms: 700           # trailing silence that ends the utterance
+  no_speech_timeout_s: 8    # LISTENING -> IDLE if nothing is said
+  max_utterance_s: 15
+
+stt:
+  model: "small"            # faster-whisper model name or local path ("base" = faster, less accurate)
+  compute_type: "int8"
+  cpu_threads: 4
+  languages: ["de", "en"]   # auto-detect restricted to these
+
+openhab:
+  url: "http://openhab.local:8080"
+  api_token: null           # or set env var OPENHAB_TOKEN (env wins)
+  llm_tools: "item-send-command"   # ?llmTools= param for /rest/voice/interpreters; null = omit
+  response_timeout_s: 30
+  verify_ssl: true          # false accepts self-signed certificates
+
+tts:
+  voices:
+    de: "models/piper/de_DE-thorsten-medium.onnx"
+    en: "models/piper/en_US-lessac-medium.onnx"
+  default_language: "de"
+
+barge_in:
+  resume_listening: true    # wakeword during playback -> straight back to LISTENING
+
+earcons:
+  enabled: true
+  wake: "sounds/wake.wav"
+  ack: "sounds/ack.wav"
+  error: "sounds/error.wav"
+
+logging:
+  level: "INFO"

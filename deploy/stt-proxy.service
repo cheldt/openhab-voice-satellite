@@ -1,0 +1,28 @@
+# systemd USER unit (recommended, required when using PipeWire echo cancellation).
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/stt-proxy.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now stt-proxy
+#   sudo loginctl enable-linger $USER     # keep it running without an open session
+#
+# For a SYSTEM unit with plain ALSA instead: copy to /etc/systemd/system/,
+# add  User=pi  and  SupplementaryGroups=audio  under [Service], and change
+# WantedBy to multi-user.target.
+
+[Unit]
+Description=stt-proxy voice assistant (wakeword -> STT -> openHAB -> TTS)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/stt_proxy
+ExecStart=/opt/stt_proxy/.venv/bin/stt-proxy --config /opt/stt_proxy/config.yaml
+Environment=HF_HOME=/opt/stt_proxy/models/hf
+# Environment=OPENHAB_TOKEN=oh.stt.XXXX   # or keep the token in config.yaml
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
