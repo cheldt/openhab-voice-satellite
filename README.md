@@ -51,11 +51,22 @@ Pi installation + systemd service: see [deploy/install.md](deploy/install.md).
 
 1. Configure a voice interpreter (human language interpreter) in openHAB
    that answers free-text questions — e.g. an LLM-backed interpreter.
-   `openhab.llm_tools` is passed through as the `llmTools` query parameter
-   (default `item-send-command`); set it to `null` to omit.
+   `openhab.llm_tools` is passed through as the `llmTools` query parameter;
+   set it to `null` to omit. openHAB 5.2 ships `item-send-command`,
+   `item-get-state` and `get-date-time`; unknown tool ids are ignored with
+   a server-side warning.
 
 2. Create an API token (profile → API tokens) and put it in `config.yaml`
    (`openhab.api_token`) or the `OPENHAB_TOKEN` env var.
+
+3. Optional — web search: the `web-search` tool id is provided by the
+   separate [openhab-llmtool-websearch](../openhab-llmtool-websearch)
+   add-on. Build it (`mvn package`), drop the jar into openHAB's `addons/`
+   folder and configure the SearxNG base URL in MainUI under
+   Settings → Other Services → Web Search LLM Tool. The SearxNG instance
+   must have the JSON output format enabled (`settings.yml`:
+   `search.formats` includes `json`). The LLM then decides per request
+   whether to answer from item states or search the web.
 
 The service posts the transcript as `text/plain` to
 `/rest/voice/interpreters?llmTools=...` and speaks the plain-text response.
@@ -73,6 +84,9 @@ Everything lives in one YAML file — see the extensively commented
 | `stt.model` | `small` (default) or `base` for lower latency |
 | `openhab.verify_ssl` | set `false` for self-signed HTTPS certificates |
 | `barge_in.resume_listening` | wakeword during playback → listen for new command |
+| `dialog.enabled` | interpreter answer containing `?` re-opens the mic for a follow-up (no wakeword) |
+| `dialog.max_turns` | max follow-up rounds per interaction |
+| `dialog.context_mode` | `verbatim` sends the follow-up as-is; `stitch` sends the full dialogue transcript (for stateless interpreters) |
 | `tts.voices` | Piper voice per language code |
 
 ## Barge-in and echo

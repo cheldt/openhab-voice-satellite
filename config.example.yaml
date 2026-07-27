@@ -29,7 +29,9 @@ stt:
 openhab:
   url: "http://openhab.local:8080"
   api_token: null           # or set env var OPENHAB_TOKEN (env wins)
-  llm_tools: "item-send-command"   # ?llmTools= param for /rest/voice/interpreters; null = omit
+  # ?llmTools= param for /rest/voice/interpreters; null = omit.
+  # "web-search" needs the org.openhab.voice.websearch add-on + a SearxNG instance.
+  llm_tools: "item-send-command,item-get-state,get-date-time,web-search"
   response_timeout_s: 30
   verify_ssl: true          # false accepts self-signed certificates
 
@@ -41,6 +43,12 @@ tts:
 
 barge_in:
   resume_listening: true    # wakeword during playback -> straight back to LISTENING
+
+dialog:
+  enabled: true             # answer containing "?" re-opens the mic (no wakeword)
+  max_turns: 3              # max follow-up rounds per interaction
+  context_mode: "verbatim"  # "verbatim" = send answer as-is; "stitch" = send full dialogue transcript (stateless interpreters)
+  earcon: "wake"            # earcon when the follow-up mic opens ("wake" or "ack")
 
 earcons:
   enabled: true
