@@ -37,8 +37,18 @@ openhab:
 
 tts:
   voices:
-    de: "models/piper/de_DE-thorsten-medium.onnx"
-    en: "models/piper/en_US-lessac-medium.onnx"
+    de:
+      model: "models/kokoro/kokoro-martin.onnx"
+      voices: "models/kokoro/voices-martin.npz"
+      voice: "martin"          # only voice in this file
+      lang: "de"               # espeak phonemizer language
+      speed: 1.0
+    en:
+      model: "models/kokoro/kokoro-v1.0.onnx"   # or kokoro-v1.0.int8.onnx (smaller/faster)
+      voices: "models/kokoro/voices-v1.0.bin"
+      voice: "bf_emma"         # any voice from voices-v1.0.bin
+      lang: "en-gb"
+      speed: 1.0
   default_language: "de"
 
 barge_in:

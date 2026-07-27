@@ -1,6 +1,7 @@
 # Installing stt-proxy on a Raspberry Pi 5
 
-Target: Raspberry Pi OS Bookworm 64-bit, Python 3.11+.
+Target: Raspberry Pi OS Bookworm 64-bit, Python 3.11–3.13 (kokoro-onnx does
+not support 3.14 yet).
 
 ## 1. System packages
 
@@ -23,13 +24,23 @@ python3 -m venv .venv
 .venv/bin/pip install --no-deps openwakeword
 ```
 
-## 3. Download models (~1 GB total)
+## 3. Download models (~1.6 GB total)
 
 ```bash
 export HF_HOME=/opt/stt_proxy/models/hf
 .venv/bin/python scripts/download_models.py
 .venv/bin/python scripts/make_earcons.py   # generates sounds/*.wav
 ```
+
+The two Kokoro TTS models are ~326 MB each. espeak-ng (used for
+phonemization) ships inside the `espeakng-loader` Python wheel — no apt
+package needed. When upgrading from a Piper-based install, the old voices
+can be removed with `rm -rf models/piper`.
+
+Note: espeak-ng silently ignores data paths longer than ~147 characters
+(fixed internal buffer) and falls back to a non-existent build path. Keep
+the install prefix short (`/opt/stt_proxy` is fine); a deeply nested venv
+will make TTS fail with `Error processing file '...phontab'`.
 
 ## 4. Configure
 
@@ -49,7 +60,7 @@ profile -> API tokens).
 OPENHAB_TOKEN=... HF_HOME=/opt/stt_proxy/models/hf .venv/bin/stt-proxy --check
 ```
 
-All six checks (audio devices, wakeword, VAD, whisper, piper, openHAB REST)
+All six checks (audio devices, wakeword, VAD, whisper, kokoro, openHAB REST)
 must print `ok`. The whisper line also warms the model cache, so the first
 real interaction is not slow.
 

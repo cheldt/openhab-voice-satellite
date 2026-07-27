@@ -68,11 +68,29 @@ class OpenHABConfig(BaseModel):
         return os.environ.get("OPENHAB_TOKEN") or self.api_token
 
 
+class TtsVoiceConfig(BaseModel):
+    model: str  # Kokoro .onnx model path
+    voices: str  # voice-styles file (.bin / .npz)
+    voice: str  # voice name inside the styles file, e.g. "bf_emma", "martin"
+    lang: str  # espeak phonemizer code: "en-gb", "de"
+    speed: float = Field(1.0, gt=0.5, le=2.0)
+
+
 class TtsConfig(BaseModel):
-    voices: dict[str, str] = Field(
+    voices: dict[str, TtsVoiceConfig] = Field(
         default_factory=lambda: {
-            "de": "models/piper/de_DE-thorsten-medium.onnx",
-            "en": "models/piper/en_US-lessac-medium.onnx",
+            "de": TtsVoiceConfig(
+                model="models/kokoro/kokoro-martin.onnx",
+                voices="models/kokoro/voices-martin.npz",
+                voice="martin",
+                lang="de",
+            ),
+            "en": TtsVoiceConfig(
+                model="models/kokoro/kokoro-v1.0.onnx",
+                voices="models/kokoro/voices-v1.0.bin",
+                voice="bf_emma",
+                lang="en-gb",
+            ),
         }
     )
     default_language: str = "de"

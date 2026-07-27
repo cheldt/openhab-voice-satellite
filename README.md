@@ -7,15 +7,19 @@ processing: wakeword → speech-to-text → openHAB chat → text-to-speech.
  mic ──▶ openWakeWord ──▶ record (Silero VAD) ──▶ faster-whisper (de/en auto)
                                                         │ transcript
                                                         ▼
- speaker ◀── Piper TTS ◀── answer text ◀── openHAB voice interpreter (HLI)
+ speaker ◀── Kokoro TTS ◀── answer text ◀── openHAB voice interpreter (HLI)
 ```
 
 - **Wakeword**: openWakeWord (`hey_jarvis` by default), always listening.
 - **STT**: faster-whisper `small` int8, auto-detects German/English.
 - **Chat**: posts the transcript to openHAB's voice interpreter endpoint
   (`/rest/voice/interpreters`) and speaks the plain-text answer.
-- **TTS**: Piper, per-language voice, sentence-streamed (starts speaking
-  while the rest is still synthesizing).
+- **TTS**: Kokoro-82M (via kokoro-onnx), per-language model + voice,
+  sentence-streamed (starts speaking while the rest is still synthesizing).
+  English uses the official model (`bf_emma` by default); German uses the
+  community [Kokoro-82M-ONNX-German-Martin](https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin)
+  model (Apache 2.0, single voice `martin`). Synthesis on a Pi 5 runs at
+  roughly real-time speed, so expect a short delay before the first sentence.
 - **Barge-in**: saying the wakeword during processing or playback cancels the
   current interaction immediately (and by default listens for a new command).
   A custom-trained "stop" model can be added via `wakeword.stop_model`.
@@ -87,7 +91,7 @@ Everything lives in one YAML file — see the extensively commented
 | `dialog.enabled` | interpreter answer containing `?` re-opens the mic for a follow-up (no wakeword) |
 | `dialog.max_turns` | max follow-up rounds per interaction |
 | `dialog.context_mode` | `verbatim` sends the follow-up as-is; `stitch` sends the full dialogue transcript (for stateless interpreters) |
-| `tts.voices` | Piper voice per language code |
+| `tts.voices` | Kokoro model/voices/voice/lang/speed per language code |
 
 ## Barge-in and echo
 

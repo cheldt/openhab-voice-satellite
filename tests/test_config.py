@@ -43,7 +43,29 @@ def test_env_token_wins(monkeypatch):
 
 def test_default_language_must_have_voice():
     with pytest.raises(ValueError):
-        Config.model_validate({"tts": {"voices": {"en": "x.onnx"}, "default_language": "de"}})
+        Config.model_validate(
+            {
+                "tts": {
+                    "voices": {
+                        "en": {
+                            "model": "x.onnx",
+                            "voices": "v.bin",
+                            "voice": "bf_emma",
+                            "lang": "en-gb",
+                        }
+                    },
+                    "default_language": "de",
+                }
+            }
+        )
+
+
+def test_tts_voice_defaults():
+    config = Config()
+    assert config.tts.voices["de"].voice == "martin"
+    assert config.tts.voices["de"].lang == "de"
+    assert config.tts.voices["en"].voice == "bf_emma"
+    assert config.tts.voices["en"].speed == 1.0
 
 
 def test_empty_languages_rejected():

@@ -71,11 +71,15 @@ def _check(config_path: Path) -> int:
         transcriber._transcribe_sync(np.zeros(16000, dtype=np.int16))
 
     def check_tts() -> None:
-        from piper import PiperVoice
+        from kokoro_onnx import Kokoro
 
-        for lang, model_path in config.tts.voices.items():
-            path = Path(model_path) if Path(model_path).is_absolute() else base_dir / model_path
-            PiperVoice.load(str(path))
+        def resolve(p: str) -> Path:
+            return Path(p) if Path(p).is_absolute() else base_dir / p
+
+        for lang, vc in config.tts.voices.items():
+            kokoro = Kokoro(str(resolve(vc.model)), str(resolve(vc.voices)))
+            if vc.voice not in kokoro.get_voices():
+                raise ValueError(f"{lang}: voice {vc.voice!r} not in {Path(vc.voices).name}")
 
     def check_openhab() -> None:
         from .openhab import OpenHABClient, make_session
@@ -90,7 +94,7 @@ def _check(config_path: Path) -> int:
     step("wakeword model", check_wakeword)
     step("vad model", check_vad)
     step("whisper model (incl. warmup)", check_stt)
-    step("piper voices", check_tts)
+    step("kokoro voices", check_tts)
     step("openHAB REST", check_openhab)
 
     print("all checks passed" if not failures else f"{failures} check(s) failed")
@@ -116,6 +120,9 @@ def main() -> None:
         level=config.logging.level,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
+    # phonemizer warns about word-count mismatches (numbers expand to words);
+    # irrelevant for TTS, which only uses the whole phoneme string
+    logging.getLogger("phonemizer").setLevel(logging.ERROR)
 
     from .app import App
 
