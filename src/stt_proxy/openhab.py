@@ -51,5 +51,9 @@ class OpenHABClient:
         async with self._session.post(
             url, data=text.encode(), params=params, headers=headers, timeout=timeout
         ) as resp:
+            body = (await resp.text()).strip()
+            if resp.status >= 400:
+                # the interpreter puts the actual error message in the body
+                log.error("interpreter returned HTTP %d: %s", resp.status, body[:500])
             resp.raise_for_status()
-            return (await resp.text()).strip()
+            return body

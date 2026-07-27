@@ -96,6 +96,7 @@ class FakeOpenHAB:
         self.responses: list[str] = []  # FIFO script; falls back to `response`
         self.response_delay_s = response_delay_s
         self.status = 200  # set e.g. 500 to test error handling
+        self.error_body = ""  # body sent along with a non-200 status
 
     def build_app(self) -> web.Application:
         app = web.Application()
@@ -112,6 +113,6 @@ class FakeOpenHAB:
         self.headers.append(dict(request.headers))
         await asyncio.sleep(self.response_delay_s)
         if self.status != 200:
-            return web.Response(status=self.status)
+            return web.Response(status=self.status, text=self.error_body)
         text = self.responses.pop(0) if self.responses else self.response
         return web.Response(text=text, content_type="text/plain")

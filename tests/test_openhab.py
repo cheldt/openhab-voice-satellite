@@ -78,6 +78,19 @@ async def test_http_error_raises(fake_openhab):
         await session.close()
 
 
+async def test_http_error_logs_body(fake_openhab, caplog):
+    fake, server = fake_openhab
+    fake.status = 400
+    fake.error_body = '{"error":{"message":"Cannot interpret due to a technical problem."}}'
+    client, session = await _make_client(server)
+    try:
+        with pytest.raises(aiohttp.ClientResponseError):
+            await client.send_command("hallo")
+        assert "Cannot interpret" in caplog.text
+    finally:
+        await session.close()
+
+
 async def test_response_timeout(fake_openhab):
     fake, server = fake_openhab
     fake.response_delay_s = 10
