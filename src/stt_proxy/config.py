@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
@@ -89,6 +90,13 @@ class BargeInConfig(BaseModel):
     resume_listening: bool = True
 
 
+class DialogConfig(BaseModel):
+    enabled: bool = True
+    max_turns: int = Field(3, ge=1, le=10)  # max follow-up rounds after the initial command
+    context_mode: Literal["verbatim", "stitch"] = "verbatim"
+    earcon: Literal["wake", "ack"] = "wake"  # cue when re-opening the mic
+
+
 class EarconsConfig(BaseModel):
     enabled: bool = True
     wake: str = "sounds/wake.wav"
@@ -108,6 +116,7 @@ class Config(BaseModel):
     openhab: OpenHABConfig = Field(default_factory=OpenHABConfig)
     tts: TtsConfig = Field(default_factory=TtsConfig)
     barge_in: BargeInConfig = Field(default_factory=BargeInConfig)
+    dialog: DialogConfig = Field(default_factory=DialogConfig)
     earcons: EarconsConfig = Field(default_factory=EarconsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 

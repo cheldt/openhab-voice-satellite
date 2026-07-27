@@ -18,6 +18,7 @@ class Event(Enum):
     NO_SPEECH = auto()        # listening timed out without speech
     RESPONSE = auto()         # openHAB answered
     PLAYBACK_DONE = auto()    # TTS finished
+    FOLLOW_UP = auto()        # answer contained a question; mic re-opens
     STOP = auto()             # stop/barge-in trigger
     ERROR = auto()            # any pipeline failure
 
@@ -34,6 +35,7 @@ TRANSITIONS: dict[tuple[State, Event], State] = {
     (State.THINKING, Event.STOP): State.IDLE,
     (State.THINKING, Event.ERROR): State.IDLE,
     (State.SPEAKING, Event.PLAYBACK_DONE): State.IDLE,
+    (State.SPEAKING, Event.FOLLOW_UP): State.LISTENING,
     (State.SPEAKING, Event.STOP): State.IDLE,
     (State.SPEAKING, Event.ERROR): State.IDLE,
 }

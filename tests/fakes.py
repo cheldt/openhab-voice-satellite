@@ -93,6 +93,7 @@ class FakeOpenHAB:
         self.llm_tools: list[str | None] = []  # ?llmTools= value per call
         self.headers: list[dict[str, str]] = []
         self.response = response
+        self.responses: list[str] = []  # FIFO script; falls back to `response`
         self.response_delay_s = response_delay_s
         self.status = 200  # set e.g. 500 to test error handling
 
@@ -112,4 +113,5 @@ class FakeOpenHAB:
         await asyncio.sleep(self.response_delay_s)
         if self.status != 200:
             return web.Response(status=self.status)
-        return web.Response(text=self.response, content_type="text/plain")
+        text = self.responses.pop(0) if self.responses else self.response
+        return web.Response(text=text, content_type="text/plain")

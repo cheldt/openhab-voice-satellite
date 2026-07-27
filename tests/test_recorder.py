@@ -10,14 +10,27 @@ FRAME = 1280  # 80 ms at 16 kHz
 
 
 class FakeEndpointer:
-    """Scripted endpointer: speech starts at frame `speech_at`, ends at `endpoint_at`."""
+    """Scripted endpointer: speech starts at frame `speech_at`, ends at `endpoint_at`.
 
-    def __init__(self, speech_at: int | None, endpoint_at: int | None) -> None:
-        self._speech_at = speech_at
-        self._endpoint_at = endpoint_at
+    `later` holds (speech_at, endpoint_at) scripts for follow-up recordings;
+    each `record_utterance` reset advances to the next one (last repeats).
+    """
+
+    def __init__(
+        self,
+        speech_at: int | None,
+        endpoint_at: int | None,
+        later: list[tuple[int | None, int | None]] | None = None,
+    ) -> None:
+        self._scripts = [(speech_at, endpoint_at)] + list(later or [])
+        self._resets = 0
         self.reset()
 
     def reset(self) -> None:
+        # __init__ and the first recording both use scripts[0].
+        idx = min(max(self._resets - 1, 0), len(self._scripts) - 1)
+        self._speech_at, self._endpoint_at = self._scripts[idx]
+        self._resets += 1
         self._frames = 0
         self.speech_started = False
 

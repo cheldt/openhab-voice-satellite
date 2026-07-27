@@ -13,6 +13,22 @@ def test_happy_path():
         assert state is expected
 
 
+def test_follow_up_reopens_listening():
+    assert next_state(State.SPEAKING, Event.FOLLOW_UP) is State.LISTENING
+
+
+def test_dialog_round_trip():
+    state = State.SPEAKING
+    for event, expected in [
+        (Event.FOLLOW_UP, State.LISTENING),
+        (Event.VAD_ENDPOINT, State.THINKING),
+        (Event.RESPONSE, State.SPEAKING),
+        (Event.PLAYBACK_DONE, State.IDLE),
+    ]:
+        state = next_state(state, event)
+        assert state is expected
+
+
 def test_stop_from_every_active_state():
     for state in (State.LISTENING, State.THINKING, State.SPEAKING):
         assert next_state(state, Event.STOP) is State.IDLE
