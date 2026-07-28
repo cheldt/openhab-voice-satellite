@@ -16,7 +16,7 @@ wakeword:
 
 vad:
   threshold: 0.5
-  silence_ms: 700           # trailing silence that ends the utterance
+  silence_ms: 1200          # trailing silence that ends the utterance
   no_speech_timeout_s: 8    # LISTENING -> IDLE if nothing is said
   max_utterance_s: 15
 

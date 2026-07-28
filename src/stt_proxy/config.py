@@ -31,7 +31,7 @@ class WakewordConfig(BaseModel):
 
 class VadConfig(BaseModel):
     threshold: float = Field(0.5, ge=0.0, le=1.0)
-    silence_ms: int = 700
+    silence_ms: int = 1200
     no_speech_timeout_s: float = 8.0
     max_utterance_s: float = 15.0
 
