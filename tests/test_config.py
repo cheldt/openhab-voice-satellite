@@ -40,6 +40,58 @@ def test_env_token_wins(monkeypatch):
     assert config.openhab.token == "env-token"
 
 
+def test_engine_defaults_local():
+    config = Config()
+    assert config.stt.engine == "local"
+    assert config.tts.engine == "local"
+    assert config.gemini.stt_model == "gemini-3.6-flash"
+    assert config.gemini.tts_voices == {"de": "Kore", "en": "Puck"}
+    assert config.deepgram.stt_model == "nova-3"
+    assert config.deepgram.tts_voices == {
+        "de": "aura-2-viktoria-de",
+        "en": "aura-2-thalia-en",
+    }
+    assert config.deepgram.tts_sample_rate == 24000
+
+
+def test_gemini_env_key_wins(monkeypatch):
+    config = Config.model_validate({"gemini": {"api_key": "file-key"}})
+    assert config.gemini.key == "file-key"
+    monkeypatch.setenv("GEMINI_API_KEY", "env-key")
+    assert config.gemini.key == "env-key"
+
+
+def test_gemini_engine_requires_key(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+        Config.model_validate({"stt": {"engine": "gemini"}})
+    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+        Config.model_validate({"tts": {"engine": "gemini"}})
+    # key present (either source) -> valid
+    Config.model_validate({"stt": {"engine": "gemini"}, "gemini": {"api_key": "k"}})
+    monkeypatch.setenv("GEMINI_API_KEY", "env-key")
+    Config.model_validate({"tts": {"engine": "gemini"}})
+
+
+def test_deepgram_env_key_wins(monkeypatch):
+    config = Config.model_validate({"deepgram": {"api_key": "file-key"}})
+    assert config.deepgram.key == "file-key"
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "env-key")
+    assert config.deepgram.key == "env-key"
+
+
+def test_deepgram_engine_requires_key(monkeypatch):
+    monkeypatch.delenv("DEEPGRAM_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="DEEPGRAM_API_KEY"):
+        Config.model_validate({"stt": {"engine": "deepgram"}})
+    with pytest.raises(ValueError, match="DEEPGRAM_API_KEY"):
+        Config.model_validate({"tts": {"engine": "deepgram"}})
+    # key present (either source) -> valid
+    Config.model_validate({"stt": {"engine": "deepgram"}, "deepgram": {"api_key": "k"}})
+    monkeypatch.setenv("DEEPGRAM_API_KEY", "env-key")
+    Config.model_validate({"tts": {"engine": "deepgram"}})
+
+
 def test_default_language_must_have_voice():
     with pytest.raises(ValueError):
         Config.model_validate(

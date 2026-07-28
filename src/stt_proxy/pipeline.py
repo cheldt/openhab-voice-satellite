@@ -16,7 +16,7 @@ from .config import Config
 from .openhab import OpenHABClient
 from .recorder import NoSpeechError, record_utterance
 from .state import Event, State
-from .stt import Transcriber, Transcript
+from .stt import Transcript
 from .vad import SpeechEndpointer
 
 log = logging.getLogger(__name__)
@@ -24,6 +24,10 @@ log = logging.getLogger(__name__)
 
 class SpeakerProtocol(Protocol):
     async def speak(self, text: str, language: str) -> None: ...
+
+
+class TranscriberProtocol(Protocol):
+    async def transcribe(self, pcm: np.ndarray) -> Transcript: ...
 
 
 class Pipeline:
@@ -45,7 +49,7 @@ class Pipeline:
         config: Config,
         broadcaster: AudioBroadcaster,
         endpointer: SpeechEndpointer,
-        transcriber: Transcriber,
+        transcriber: TranscriberProtocol,
         openhab: OpenHABClient,
         speaker: SpeakerProtocol,
         sink: AudioSink,

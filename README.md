@@ -90,8 +90,14 @@ Everything lives in one YAML file — see the extensively commented
 | `audio.input_device` / `output_device` | substring of the device name (`--list-devices`) |
 | `wakeword.model` | pretrained openWakeWord name or path to custom `.onnx` |
 | `wakeword.threshold_speaking` | raised threshold while TTS is audible (echo mitigation) |
+| `stt.engine` | `local` (faster-whisper), `gemini` or `deepgram` (cloud STT, falls back to local on failure) |
 | `stt.model` | `small` (default) or `base` for lower latency |
 | `openhab.verify_ssl` | set `false` for self-signed HTTPS certificates |
+| `tts.engine` | `local` (Kokoro), `gemini` or `deepgram` (cloud TTS, falls back to local on failure) |
+| `gemini.api_key` | Google Gemini API key; env var `GEMINI_API_KEY` wins over the file |
+| `gemini.tts_voices` | prebuilt Gemini voice name per language (e.g. `de: Kore`) |
+| `deepgram.api_key` | Deepgram API key; env var `DEEPGRAM_API_KEY` wins over the file |
+| `deepgram.tts_voices` | Aura-2 model per language (e.g. `de: aura-2-viktoria-de`) |
 | `barge_in.resume_listening` | wakeword during playback → listen for new command |
 | `dialog.enabled` | every answer re-opens the mic for a follow-up (no wakeword); context is kept server-side via a conversation id |
 | `dialog.followup_timeout_s` | follow-up silence that ends the conversation (first turn uses `vad.no_speech_timeout_s`) |

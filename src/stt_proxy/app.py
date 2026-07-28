@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import AsyncExitStack
 from pathlib import Path
+
+import aiohttp
 
 from .audio.broadcast import AudioBroadcaster
 from .audio.earcons import Earcons
 from .audio.sink import SounddeviceSink
 from .audio.source import SounddeviceSource
 from .config import Config
+from .deepgram import DeepgramClient, DeepgramSpeaker, DeepgramTranscriber
+from .fallback import FallbackSpeaker, FallbackTranscriber
+from .gemini import GeminiClient, GeminiSpeaker, GeminiTranscriber
 from .openhab import OpenHABClient, make_session
-from .pipeline import Pipeline
+from .pipeline import Pipeline, SpeakerProtocol, TranscriberProtocol
 from .state import State
 from .stt import Transcriber
 from .tts import Speaker
@@ -60,16 +66,54 @@ class App:
         wake_queue = broadcaster.subscribe()
         broadcaster.start()
 
-        async with make_session(config.openhab) as session:
+        async with AsyncExitStack() as stack:
+            session = await stack.enter_async_context(make_session(config.openhab))
             openhab = OpenHABClient(config.openhab, session)
+
+            # local engines above stay loaded as fallback for the cloud path
+            final_transcriber: TranscriberProtocol = transcriber
+            final_speaker: SpeakerProtocol = speaker
+            cloud_engines = {config.stt.engine, config.tts.engine} - {"local"}
+            if cloud_engines:
+                # own session: openHAB's may have TLS verification disabled
+                cloud_session = await stack.enter_async_context(aiohttp.ClientSession())
+            if "gemini" in cloud_engines:
+                gemini = GeminiClient(config.gemini, cloud_session)
+                if config.stt.engine == "gemini":
+                    final_transcriber = FallbackTranscriber(
+                        GeminiTranscriber(gemini, config.stt, config.tts.default_language),
+                        transcriber,
+                        label="gemini",
+                    )
+                if config.tts.engine == "gemini":
+                    final_speaker = FallbackSpeaker(
+                        GeminiSpeaker(gemini, config.gemini, config.tts, sink),
+                        speaker,
+                        label="gemini",
+                    )
+            if "deepgram" in cloud_engines:
+                deepgram = DeepgramClient(config.deepgram, cloud_session)
+                if config.stt.engine == "deepgram":
+                    final_transcriber = FallbackTranscriber(
+                        DeepgramTranscriber(deepgram, config.stt, config.tts.default_language),
+                        transcriber,
+                        label="deepgram",
+                    )
+                if config.tts.engine == "deepgram":
+                    final_speaker = FallbackSpeaker(
+                        DeepgramSpeaker(deepgram, config.deepgram, config.tts, sink),
+                        speaker,
+                        label="deepgram",
+                    )
+            log.info("engines: stt=%s tts=%s", config.stt.engine, config.tts.engine)
 
             pipeline = Pipeline(
                 config=config,
                 broadcaster=broadcaster,
                 endpointer=endpointer,
-                transcriber=transcriber,
+                transcriber=final_transcriber,
                 openhab=openhab,
-                speaker=speaker,
+                speaker=final_speaker,
                 sink=sink,
                 earcons=earcons,
                 set_state=self._set_state,

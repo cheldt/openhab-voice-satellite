@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class AudioConfig(BaseModel):
@@ -38,6 +38,7 @@ class VadConfig(BaseModel):
 
 
 class SttConfig(BaseModel):
+    engine: Literal["local", "gemini", "deepgram"] = "local"
     model: str = "small"
     compute_type: str = "int8"
     cpu_threads: int = 4
@@ -79,6 +80,7 @@ class TtsVoiceConfig(BaseModel):
 
 
 class TtsConfig(BaseModel):
+    engine: Literal["local", "gemini", "deepgram"] = "local"
     voices: dict[str, TtsVoiceConfig] = Field(
         default_factory=lambda: {
             "de": TtsVoiceConfig(
@@ -104,6 +106,50 @@ class TtsConfig(BaseModel):
         if voices and v not in voices:
             raise ValueError(f"tts.default_language {v!r} has no voice configured")
         return v
+
+
+class GeminiConfig(BaseModel):
+    api_key: str | None = None
+    base_url: str = "https://generativelanguage.googleapis.com"
+    stt_model: str = "gemini-3.6-flash"
+    tts_model: str = "gemini-3.1-flash-tts-preview"
+    stt_timeout_s: float = 10.0
+    tts_timeout_s: float = 20.0
+    tts_voices: dict[str, str] = Field(
+        default_factory=lambda: {"de": "Kore", "en": "Puck"}
+    )
+
+    @field_validator("base_url")
+    @classmethod
+    def _strip_slash(cls, v: str) -> str:
+        return v.rstrip("/")
+
+    @property
+    def key(self) -> str | None:
+        """Env var GEMINI_API_KEY wins over the config file value."""
+        return os.environ.get("GEMINI_API_KEY") or self.api_key
+
+
+class DeepgramConfig(BaseModel):
+    api_key: str | None = None
+    base_url: str = "https://api.deepgram.com"
+    stt_model: str = "nova-3"
+    stt_timeout_s: float = 10.0
+    tts_timeout_s: float = 20.0
+    tts_sample_rate: int = 24000  # linear16 rate requested from /v1/speak
+    tts_voices: dict[str, str] = Field(
+        default_factory=lambda: {"de": "aura-2-viktoria-de", "en": "aura-2-thalia-en"}
+    )
+
+    @field_validator("base_url")
+    @classmethod
+    def _strip_slash(cls, v: str) -> str:
+        return v.rstrip("/")
+
+    @property
+    def key(self) -> str | None:
+        """Env var DEEPGRAM_API_KEY wins over the config file value."""
+        return os.environ.get("DEEPGRAM_API_KEY") or self.api_key
 
 
 class BargeInConfig(BaseModel):
@@ -134,10 +180,25 @@ class Config(BaseModel):
     stt: SttConfig = Field(default_factory=SttConfig)
     openhab: OpenHABConfig = Field(default_factory=OpenHABConfig)
     tts: TtsConfig = Field(default_factory=TtsConfig)
+    gemini: GeminiConfig = Field(default_factory=GeminiConfig)
+    deepgram: DeepgramConfig = Field(default_factory=DeepgramConfig)
     barge_in: BargeInConfig = Field(default_factory=BargeInConfig)
     dialog: DialogConfig = Field(default_factory=DialogConfig)
     earcons: EarconsConfig = Field(default_factory=EarconsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+
+    @model_validator(mode="after")
+    def _cloud_key_required(self) -> Config:
+        engines = (self.stt.engine, self.tts.engine)
+        if "gemini" in engines and not self.gemini.key:
+            raise ValueError(
+                "engine 'gemini' requires gemini.api_key or env GEMINI_API_KEY"
+            )
+        if "deepgram" in engines and not self.deepgram.key:
+            raise ValueError(
+                "engine 'deepgram' requires deepgram.api_key or env DEEPGRAM_API_KEY"
+            )
+        return self
 
 
 def load_config(path: str | Path) -> Config:

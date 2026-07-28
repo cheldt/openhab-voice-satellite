@@ -81,6 +81,32 @@ def _check(config_path: Path) -> int:
             if vc.voice not in kokoro.get_voices():
                 raise ValueError(f"{lang}: voice {vc.voice!r} not in {Path(vc.voices).name}")
 
+    def check_gemini() -> None:
+        import aiohttp
+
+        from .gemini import GeminiClient
+
+        async def probe() -> None:
+            async with aiohttp.ClientSession() as session:
+                client = GeminiClient(config.gemini, session)
+                if config.stt.engine == "gemini":
+                    await client.check_model(config.gemini.stt_model)
+                if config.tts.engine == "gemini":
+                    await client.check_model(config.gemini.tts_model)
+
+        asyncio.run(probe())
+
+    def check_deepgram() -> None:
+        import aiohttp
+
+        from .deepgram import DeepgramClient
+
+        async def probe() -> None:
+            async with aiohttp.ClientSession() as session:
+                await DeepgramClient(config.deepgram, session).check_auth()
+
+        asyncio.run(probe())
+
     def check_openhab() -> None:
         from .openhab import OpenHABClient, make_session
 
@@ -95,6 +121,10 @@ def _check(config_path: Path) -> int:
     step("vad model", check_vad)
     step("whisper model (incl. warmup)", check_stt)
     step("kokoro voices", check_tts)
+    if "gemini" in (config.stt.engine, config.tts.engine):
+        step("gemini API", check_gemini)
+    if "deepgram" in (config.stt.engine, config.tts.engine):
+        step("deepgram API", check_deepgram)
     step("openHAB REST", check_openhab)
 
     print("all checks passed" if not failures else f"{failures} check(s) failed")

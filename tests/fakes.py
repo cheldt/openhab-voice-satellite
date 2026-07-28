@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import wave
 from pathlib import Path
 from typing import AsyncIterator
@@ -78,6 +80,124 @@ class BufferAudioSink:
 
     def unduck(self) -> None:
         pass
+
+
+class FakeGemini:
+    """aiohttp app implementing the two Gemini endpoints the client uses.
+
+    - POST /v1beta/models/{model}:generateContent — dispatches on the payload:
+      responseModalities AUDIO -> returns `tts_pcm` as base64 inlineData;
+      anything else -> a text part with the scripted STT JSON.
+    - GET /v1beta/models/{model} — model metadata (self-test probe)
+    """
+
+    def __init__(self, stt_text: str = "licht an", stt_language: str = "de") -> None:
+        self.requests: list[tuple[str, dict]] = []  # (model, payload) per generateContent
+        self.api_keys: list[str | None] = []  # x-goog-api-key header per call
+        self.checked_models: list[str] = []  # models probed via GET
+        self.stt_response: str | None = None  # raw text part; overrides stt_text/language
+        self.stt_text = stt_text
+        self.stt_language = stt_language
+        self.tts_pcm = np.arange(0, 2400, dtype=np.int16)  # short ramp
+        self.tts_mime = "audio/L16;codec=pcm;rate=24000"
+        self.status = 200
+        self.response_delay_s = 0.0
+
+    def build_app(self) -> web.Application:
+        app = web.Application()
+        # aiohttp routing can't put ':' in a variable segment, match manually
+        app.router.add_post("/v1beta/models/{tail:.+}", self._generate)
+        app.router.add_get("/v1beta/models/{model}", self._get_model)
+        return app
+
+    async def _get_model(self, request: web.Request) -> web.Response:
+        self.api_keys.append(request.headers.get("x-goog-api-key"))
+        model = request.match_info["model"]
+        self.checked_models.append(model)
+        if self.status != 200:
+            return web.json_response({"error": {"message": "boom"}}, status=self.status)
+        return web.json_response({"name": f"models/{model}"})
+
+    async def _generate(self, request: web.Request) -> web.Response:
+        tail = request.match_info["tail"]
+        model = tail.removesuffix(":generateContent")
+        payload = await request.json()
+        self.requests.append((model, payload))
+        self.api_keys.append(request.headers.get("x-goog-api-key"))
+        await asyncio.sleep(self.response_delay_s)
+        if self.status != 200:
+            return web.json_response({"error": {"message": "boom"}}, status=self.status)
+
+        modalities = payload.get("generationConfig", {}).get("responseModalities")
+        if modalities == ["AUDIO"]:
+            data = base64.b64encode(self.tts_pcm.tobytes()).decode()
+            part = {"inlineData": {"mimeType": self.tts_mime, "data": data}}
+        else:
+            text = self.stt_response
+            if text is None:
+                text = json.dumps({"text": self.stt_text, "language": self.stt_language})
+            part = {"text": text}
+        return web.json_response(
+            {"candidates": [{"content": {"parts": [part]}}]}
+        )
+
+
+class FakeDeepgram:
+    """aiohttp app implementing the three Deepgram endpoints the client uses.
+
+    - POST /v1/listen — records query/auth/body, answers nova-shaped JSON;
+      detected_language only included when the request asked for detection
+    - POST /v1/speak — records query and JSON body, answers `tts_pcm` raw bytes
+    - GET /v1/auth/token — key probe (self-test)
+    """
+
+    def __init__(self, stt_text: str = "licht an", stt_language: str = "de") -> None:
+        self.listen_requests: list[tuple[list[tuple[str, str]], bytes]] = []
+        self.speak_requests: list[tuple[list[tuple[str, str]], dict]] = []
+        self.auth_headers: list[str | None] = []  # Authorization header per call
+        self.stt_text = stt_text
+        self.stt_language = stt_language
+        self.tts_pcm = np.arange(0, 2400, dtype=np.int16)  # short ramp
+        self.status = 200
+        self.speak_statuses: list[int] = []  # FIFO per /v1/speak call; falls back to `status`
+        self.response_delay_s = 0.0
+
+    def build_app(self) -> web.Application:
+        app = web.Application()
+        app.router.add_post("/v1/listen", self._listen)
+        app.router.add_post("/v1/speak", self._speak)
+        app.router.add_get("/v1/auth/token", self._auth)
+        return app
+
+    async def _listen(self, request: web.Request) -> web.Response:
+        query = [(k, v) for k, v in request.query.items()]
+        self.listen_requests.append((query, await request.read()))
+        self.auth_headers.append(request.headers.get("Authorization"))
+        await asyncio.sleep(self.response_delay_s)
+        if self.status != 200:
+            return web.json_response({"err_msg": "boom"}, status=self.status)
+        channel: dict = {"alternatives": [{"transcript": self.stt_text}]}
+        if "detect_language" in request.query:
+            channel["detected_language"] = self.stt_language
+        return web.json_response({"results": {"channels": [channel]}})
+
+    async def _speak(self, request: web.Request) -> web.Response:
+        query = [(k, v) for k, v in request.query.items()]
+        self.speak_requests.append((query, await request.json()))
+        self.auth_headers.append(request.headers.get("Authorization"))
+        await asyncio.sleep(self.response_delay_s)
+        status = self.speak_statuses.pop(0) if self.speak_statuses else self.status
+        if status != 200:
+            return web.json_response({"err_msg": "boom"}, status=status)
+        return web.Response(
+            body=self.tts_pcm.tobytes(), content_type="application/octet-stream"
+        )
+
+    async def _auth(self, request: web.Request) -> web.Response:
+        self.auth_headers.append(request.headers.get("Authorization"))
+        if self.status != 200:
+            return web.json_response({"err_msg": "boom"}, status=self.status)
+        return web.json_response({"api_key_id": "fake"})
 
 
 class FakeOpenHAB:

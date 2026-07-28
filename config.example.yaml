@@ -22,6 +22,7 @@ vad:
   max_utterance_s: 15
 
 stt:
+  engine: "local"           # "gemini"/"deepgram" = cloud STT; falls back to local whisper on failure
   model: "small"            # faster-whisper model name or local path ("base" = faster, less accurate)
   compute_type: "int8"
   cpu_threads: 4
@@ -38,6 +39,7 @@ openhab:
   verify_ssl: true          # false accepts self-signed certificates
 
 tts:
+  engine: "local"           # "gemini"/"deepgram" = cloud TTS; falls back to kokoro on failure
   voices:
     de:
       model: "models/kokoro/kokoro-martin.onnx"
@@ -52,6 +54,28 @@ tts:
       lang: "en-gb"
       speed: 1.0
   default_language: "de"
+
+# Only needed when stt.engine or tts.engine is "gemini".
+# gemini:
+#   api_key: null                             # or set env var GEMINI_API_KEY (env wins)
+#   stt_model: "gemini-3.6-flash"
+#   tts_model: "gemini-3.1-flash-tts-preview"
+#   stt_timeout_s: 10                         # per request; on timeout the local engine takes over
+#   tts_timeout_s: 20
+#   tts_voices:                               # prebuilt Gemini voice per language
+#     de: "Kore"
+#     en: "Puck"
+
+# Only needed when stt.engine or tts.engine is "deepgram".
+# deepgram:
+#   api_key: null                             # or set env var DEEPGRAM_API_KEY (env wins)
+#   stt_model: "nova-3"
+#   stt_timeout_s: 10                         # per request; on timeout the local engine takes over
+#   tts_timeout_s: 20
+#   tts_sample_rate: 24000                    # PCM rate requested from /v1/speak
+#   tts_voices:                               # Aura-2 model per language (language is the model suffix)
+#     de: "aura-2-viktoria-de"
+#     en: "aura-2-thalia-en"
 
 barge_in:
   resume_listening: true    # wakeword during playback -> straight back to LISTENING
