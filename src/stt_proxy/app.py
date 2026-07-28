@@ -49,7 +49,10 @@ class App:
             frame_samples=config.audio.frame_samples,
             device=config.audio.input_device,
         )
-        sink = SounddeviceSink(device=config.audio.output_device)
+        sink = SounddeviceSink(
+            device=config.audio.output_device,
+            lead_in_ms=config.audio.output_lead_in_ms,
+        )
         earcons = Earcons(config.earcons, sink, self._base_dir)
         speaker = Speaker(config.tts, sink, self._base_dir)
 

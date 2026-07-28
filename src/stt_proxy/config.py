@@ -15,6 +15,7 @@ class AudioConfig(BaseModel):
     output_device: str | None = None
     sample_rate: int = 16000
     frame_ms: int = 80
+    output_lead_in_ms: int = Field(300, ge=0)  # silence before playback; masks USB-DAC unmute delay
 
     @property
     def frame_samples(self) -> int:

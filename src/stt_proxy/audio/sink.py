@@ -34,8 +34,9 @@ class SounddeviceSink:
     `stop()` aborts playback immediately from any thread.
     """
 
-    def __init__(self, device: str | None = None) -> None:
+    def __init__(self, device: str | None = None, lead_in_ms: int = 300) -> None:
         self._device = find_device(device, "output")
+        self._lead_in_ms = lead_in_ms
         self._gain = 1.0
         self._stop_flag = threading.Event()
         self._active_stream: sd.OutputStream | None = None
@@ -56,6 +57,11 @@ class SounddeviceSink:
                 pass
 
     async def play(self, pcm: np.ndarray, sample_rate: int) -> None:
+        if self._lead_in_ms > 0:
+            # USB DACs mute the first ~hundreds of ms after stream start
+            # (anti-pop); lead-in silence keeps speech out of that window
+            pad = np.zeros(sample_rate * self._lead_in_ms // 1000, dtype=pcm.dtype)
+            pcm = np.concatenate([pad, pcm])
         self._stop_flag.clear()
         done = asyncio.Event()
         loop = asyncio.get_running_loop()

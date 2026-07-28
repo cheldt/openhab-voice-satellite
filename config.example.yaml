@@ -6,6 +6,7 @@ audio:
   output_device: null
   sample_rate: 16000
   frame_ms: 80              # 1280 samples = one openWakeWord chunk
+  output_lead_in_ms: 300    # silence prepended to playback; masks USB-DAC unmute delay
 
 wakeword:
   model: "hey_jarvis"       # openWakeWord pretrained name or path to a custom .onnx
