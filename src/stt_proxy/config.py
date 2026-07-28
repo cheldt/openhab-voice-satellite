@@ -40,6 +40,7 @@ class SttConfig(BaseModel):
     model: str = "small"
     compute_type: str = "int8"
     cpu_threads: int = 4
+    beam_size: int = Field(1, ge=1)
     languages: list[str] = Field(default_factory=lambda: ["de", "en"])
 
     @field_validator("languages")

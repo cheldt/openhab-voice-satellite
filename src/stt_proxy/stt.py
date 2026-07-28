@@ -35,11 +35,13 @@ class Transcriber:
 
     def _transcribe_sync(self, pcm: np.ndarray) -> Transcript:
         audio = pcm.astype(np.float32) / 32768.0
+        # single configured language: skip whisper's language-detection pass
+        languages = self._config.languages
+        fixed_language = languages[0] if len(languages) == 1 else None
         segments, info = self._model.transcribe(
             audio,
-            language=None,
-            beam_size=5,
-            vad_filter=True,
+            language=fixed_language,
+            beam_size=self._config.beam_size,
         )
         text = " ".join(seg.text.strip() for seg in segments).strip()
         language = info.language

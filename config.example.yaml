@@ -24,7 +24,8 @@ stt:
   model: "small"            # faster-whisper model name or local path ("base" = faster, less accurate)
   compute_type: "int8"
   cpu_threads: 4
-  languages: ["de", "en"]   # auto-detect restricted to these
+  beam_size: 1              # 1 = greedy (fastest); 5 = more accurate, much slower
+  languages: ["de", "en"]   # auto-detect restricted to these; single entry skips detection
 
 openhab:
   url: "http://openhab.local:8080"
