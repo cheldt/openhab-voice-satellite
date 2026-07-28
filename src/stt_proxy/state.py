@@ -18,7 +18,7 @@ class Event(Enum):
     NO_SPEECH = auto()        # listening timed out without speech
     RESPONSE = auto()         # openHAB answered
     PLAYBACK_DONE = auto()    # TTS finished
-    FOLLOW_UP = auto()        # answer contained a question; mic re-opens
+    FOLLOW_UP = auto()        # dialog mode: mic re-opens after the answer
     STOP = auto()             # stop/barge-in trigger
     ERROR = auto()            # any pipeline failure
 

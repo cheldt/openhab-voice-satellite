@@ -12,8 +12,7 @@ def test_defaults():
     assert config.openhab.verify_ssl is True
     assert config.tts.default_language == "de"
     assert config.dialog.enabled is True
-    assert config.dialog.max_turns == 3
-    assert config.dialog.context_mode == "verbatim"
+    assert config.dialog.followup_timeout_s == 6.0
     assert config.dialog.earcon == "wake"
 
 
@@ -73,6 +72,11 @@ def test_empty_languages_rejected():
         Config.model_validate({"stt": {"languages": []}})
 
 
-def test_invalid_dialog_context_mode_rejected():
+def test_zero_followup_timeout_rejected():
     with pytest.raises(ValueError):
-        Config.model_validate({"dialog": {"context_mode": "telepathy"}})
+        Config.model_validate({"dialog": {"followup_timeout_s": 0}})
+
+
+def test_legacy_dialog_keys_ignored():
+    config = Config.model_validate({"dialog": {"max_turns": 3, "context_mode": "stitch"}})
+    assert config.dialog.enabled is True

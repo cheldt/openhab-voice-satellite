@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import uuid
 from typing import Awaitable, Callable, Protocol
 
 import numpy as np
@@ -20,17 +22,6 @@ from .vad import SpeechEndpointer
 log = logging.getLogger(__name__)
 
 
-def stitch_context(history: list[tuple[str, str]], answer: str) -> str:
-    """Compose prior (user_text, question) pairs plus the new answer into one
-    dialogue transcript so a stateless interpreter can disambiguate."""
-    lines: list[str] = []
-    for user_text, question in history:
-        lines.append(f"User: {user_text}")
-        lines.append(f"Assistant: {question}")
-    lines.append(f"User: {answer}")
-    return "\n".join(lines)
-
-
 class SpeakerProtocol(Protocol):
     async def speak(self, text: str, language: str) -> None: ...
 
@@ -38,9 +29,12 @@ class SpeakerProtocol(Protocol):
 class Pipeline:
     """LISTENING -> THINKING -> SPEAKING for one interaction.
 
-    When the openHAB answer contains a question and dialog mode is enabled,
-    SPEAKING loops back to LISTENING (no wakeword) for up to
-    `dialog.max_turns` follow-up rounds.
+    With dialog mode enabled the whole interaction is one server-side
+    conversation: a uuid is generated per wake word and sent with every
+    interpreter request, and after each answer SPEAKING loops back to
+    LISTENING (no wakeword). The conversation ends when no follow-up
+    arrives within `dialog.followup_timeout_s` or the task is cancelled
+    (barge-in); either way the server-side conversation is deleted.
 
     The whole run is one asyncio task; barge-in cancels it and the `finally`
     blocks release the recorder subscription and abort playback.
@@ -67,48 +61,53 @@ class Pipeline:
         self._sink = sink
         self._earcons = earcons
         self._set_state = set_state
+        self._cleanup_tasks: set[asyncio.Task] = set()
 
     async def run_interaction(self, play_wake_earcon: bool = True) -> Event:
         """Returns the terminal event (PLAYBACK_DONE / NO_SPEECH / ERROR)."""
         dialog = self._config.dialog
-        history: list[tuple[str, str]] = []  # (user_text, question) per round
+        conversation_id = str(uuid.uuid4()) if dialog.enabled else None
+        conversation_started = False
         language: str | None = None
-        max_rounds = 1 + (dialog.max_turns if dialog.enabled else 0)
+        round_no = 0
         try:
-            for round_no in range(max_rounds):
+            while True:
                 # LISTENING
                 self._set_state(State.LISTENING)
                 if round_no > 0:
                     await self._earcons.play(dialog.earcon)
-                elif play_wake_earcon:
-                    await self._earcons.play("wake")
+                    timeout = dialog.followup_timeout_s
+                else:
+                    if play_wake_earcon:
+                        await self._earcons.play("wake")
+                    timeout = None  # first round uses vad.no_speech_timeout_s
 
-                transcript = await self._capture_utterance()
+                transcript = await self._capture_utterance(no_speech_timeout_s=timeout)
                 if transcript is None:
-                    return Event.NO_SPEECH
+                    if round_no == 0:
+                        return Event.NO_SPEECH
+                    log.info(
+                        "no follow-up within %.1fs, conversation over",
+                        dialog.followup_timeout_s,
+                    )
+                    return Event.PLAYBACK_DONE
                 # Lock TTS to the first round's language; follow-ups are often
                 # too short for reliable language detection.
                 language = language or transcript.language
 
-                outgoing = (
-                    stitch_context(history, transcript.text)
-                    if history and dialog.context_mode == "stitch"
-                    else transcript.text
-                )
-                response = await self._openhab.send_command(outgoing)
+                # Set before the await: a cancel mid-POST must still delete
+                # the conversation the server may have created.
+                conversation_started = conversation_id is not None
+                response = await self._openhab.send_command(transcript.text, conversation_id)
                 log.info("openHAB answered: %s", response[:200])
 
                 # SPEAKING
                 self._set_state(State.SPEAKING)
                 await self._speaker.speak(response, language)
 
-                if not (dialog.enabled and "?" in response):
+                if not dialog.enabled:
                     return Event.PLAYBACK_DONE
-                if round_no == max_rounds - 1:
-                    log.info("dialog turn limit reached, not re-listening")
-                    return Event.PLAYBACK_DONE
-                history.append((transcript.text, response))
-            return Event.PLAYBACK_DONE
+                round_no += 1
         except TimeoutError:
             log.error("openHAB response timed out")
             await self._earcons.play("error")
@@ -117,15 +116,38 @@ class Pipeline:
             log.exception("pipeline failed")
             await self._earcons.play("error")
             return Event.ERROR
+        finally:
+            if conversation_started:
+                self._schedule_conversation_end(conversation_id)
 
-    async def _capture_utterance(self) -> Transcript | None:
+    def _schedule_conversation_end(self, conversation_id: str) -> None:
+        """Fire-and-forget server-side conversation DELETE.
+
+        Runs as its own task so a cancelled pipeline (barge-in) neither
+        blocks on the round-trip nor loses the cleanup.
+        """
+        task = asyncio.create_task(
+            self._openhab.end_conversation(conversation_id),
+            name=f"end-conversation-{conversation_id[:8]}",
+        )
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_tasks.discard)
+
+    async def _capture_utterance(
+        self, no_speech_timeout_s: float | None = None
+    ) -> Transcript | None:
         """LISTENING record + THINKING transcribe. None = no/empty speech.
 
         The caller sets State.LISTENING and plays the entry earcon.
         """
         frames = self._broadcaster.subscribe()
         try:
-            pcm = await record_utterance(frames, self._endpointer, self._config.vad)
+            pcm = await record_utterance(
+                frames,
+                self._endpointer,
+                self._config.vad,
+                no_speech_timeout_s=no_speech_timeout_s,
+            )
         except NoSpeechError:
             log.info("no speech detected, back to idle")
             return None

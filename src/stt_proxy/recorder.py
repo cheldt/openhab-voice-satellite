@@ -21,13 +21,17 @@ async def record_utterance(
     frames: asyncio.Queue[np.ndarray | None],
     endpointer: SpeechEndpointer,
     config: VadConfig,
+    *,
+    no_speech_timeout_s: float | None = None,
 ) -> np.ndarray:
     """Drain `frames` until the endpointer signals end of utterance.
 
     Returns the full utterance as int16 PCM. Raises NoSpeechError when no
-    speech starts within `no_speech_timeout_s`, and returns whatever was
+    speech starts within the no-speech timeout (`no_speech_timeout_s`
+    overrides `config.no_speech_timeout_s`), and returns whatever was
     collected when `max_utterance_s` is hit.
     """
+    timeout_s = config.no_speech_timeout_s if no_speech_timeout_s is None else no_speech_timeout_s
     endpointer.reset()
     collected: list[np.ndarray] = []
     while True:
@@ -36,8 +40,8 @@ async def record_utterance(
             raise NoSpeechError("audio source closed")
         collected.append(frame)
         endpointer.update(frame)
-        if not endpointer.speech_started and endpointer.elapsed_s >= config.no_speech_timeout_s:
-            raise NoSpeechError(f"no speech within {config.no_speech_timeout_s}s")
+        if not endpointer.speech_started and endpointer.elapsed_s >= timeout_s:
+            raise NoSpeechError(f"no speech within {timeout_s}s")
         if endpointer.endpoint_reached:
             break
         if endpointer.elapsed_s >= config.max_utterance_s:

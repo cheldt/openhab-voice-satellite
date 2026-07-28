@@ -56,6 +56,59 @@ async def test_llm_tools_omitted_when_null(fake_openhab):
         await session.close()
 
 
+async def test_conversation_param_sent(fake_openhab):
+    fake, server = fake_openhab
+    client, session = await _make_client(server)
+    try:
+        await client.send_command("hallo", "abc-123")
+        assert fake.conversations == ["abc-123"]
+        assert fake.llm_tools == ["item-send-command"]  # composed with llmTools
+    finally:
+        await session.close()
+
+
+async def test_conversation_param_omitted(fake_openhab):
+    fake, server = fake_openhab
+    client, session = await _make_client(server)
+    try:
+        await client.send_command("hallo")
+        assert fake.conversations == [None]
+    finally:
+        await session.close()
+
+
+async def test_end_conversation(fake_openhab):
+    fake, server = fake_openhab
+    client, session = await _make_client(server)
+    try:
+        await client.end_conversation("abc-123")
+        assert fake.deleted == ["abc-123"]
+    finally:
+        await session.close()
+
+
+async def test_end_conversation_best_effort_on_http_error(fake_openhab, caplog):
+    fake, server = fake_openhab
+    fake.delete_status = 500
+    client, session = await _make_client(server)
+    try:
+        await client.end_conversation("abc-123")  # must not raise
+        assert "conversation DELETE returned HTTP 500" in caplog.text
+    finally:
+        await session.close()
+
+
+async def test_end_conversation_best_effort_on_connection_error(fake_openhab, caplog):
+    fake, server = fake_openhab
+    client, session = await _make_client(server)
+    await server.close()
+    try:
+        await client.end_conversation("abc-123")  # must not raise
+        assert "failed to end conversation" in caplog.text
+    finally:
+        await session.close()
+
+
 async def test_bearer_token_sent(fake_openhab, monkeypatch):
     fake, server = fake_openhab
     monkeypatch.setenv("OPENHAB_TOKEN", "secret-token")

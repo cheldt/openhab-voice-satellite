@@ -55,9 +55,8 @@ barge_in:
   resume_listening: true    # wakeword during playback -> straight back to LISTENING
 
 dialog:
-  enabled: true             # answer containing "?" re-opens the mic (no wakeword)
-  max_turns: 3              # max follow-up rounds per interaction
-  context_mode: "verbatim"  # "verbatim" = send answer as-is; "stitch" = send full dialogue transcript (stateless interpreters)
+  enabled: true             # after every answer the mic re-opens (no wakeword) for a follow-up
+  followup_timeout_s: 6     # silence that ends the conversation (first turn uses vad.no_speech_timeout_s)
   earcon: "wake"            # earcon when the follow-up mic opens ("wake" or "ack")
 
 earcons:

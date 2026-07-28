@@ -74,6 +74,11 @@ Pi installation + systemd service: see [deploy/install.md](deploy/install.md).
 
 The service posts the transcript as `text/plain` to
 `/rest/voice/interpreters?llmTools=...` and speaks the plain-text response.
+With dialog mode enabled every wake word starts a server-side conversation:
+a fresh uuid is sent as the `conversation` query parameter with each request
+so openHAB keeps the chat context, and when the conversation ends (follow-up
+silence or barge-in) it is deleted via
+`DELETE /rest/voice/conversations/<id>`.
 
 ## Configuration
 
@@ -88,9 +93,8 @@ Everything lives in one YAML file — see the extensively commented
 | `stt.model` | `small` (default) or `base` for lower latency |
 | `openhab.verify_ssl` | set `false` for self-signed HTTPS certificates |
 | `barge_in.resume_listening` | wakeword during playback → listen for new command |
-| `dialog.enabled` | interpreter answer containing `?` re-opens the mic for a follow-up (no wakeword) |
-| `dialog.max_turns` | max follow-up rounds per interaction |
-| `dialog.context_mode` | `verbatim` sends the follow-up as-is; `stitch` sends the full dialogue transcript (for stateless interpreters) |
+| `dialog.enabled` | every answer re-opens the mic for a follow-up (no wakeword); context is kept server-side via a conversation id |
+| `dialog.followup_timeout_s` | follow-up silence that ends the conversation (first turn uses `vad.no_speech_timeout_s`) |
 | `tts.voices` | Kokoro model/voices/voice/lang/speed per language code |
 
 ## Barge-in and echo

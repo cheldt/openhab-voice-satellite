@@ -81,27 +81,32 @@ class BufferAudioSink:
 
 
 class FakeOpenHAB:
-    """aiohttp app implementing the two endpoints the client uses.
+    """aiohttp app implementing the endpoints the client uses.
 
     - GET /rest/: health ping
     - POST /rest/voice/interpreters: records the text and answers with the
       scripted plain-text response after `response_delay_s`
+    - DELETE /rest/voice/conversations/{cid}: records the deleted id
     """
 
     def __init__(self, response: str = "Okay.", response_delay_s: float = 0.05) -> None:
         self.commands: list[str] = []
         self.llm_tools: list[str | None] = []  # ?llmTools= value per call
+        self.conversations: list[str | None] = []  # ?conversation= value per call
+        self.deleted: list[str] = []  # conversation ids DELETEd
         self.headers: list[dict[str, str]] = []
         self.response = response
         self.responses: list[str] = []  # FIFO script; falls back to `response`
         self.response_delay_s = response_delay_s
         self.status = 200  # set e.g. 500 to test error handling
+        self.delete_status = 200
         self.error_body = ""  # body sent along with a non-200 status
 
     def build_app(self) -> web.Application:
         app = web.Application()
         app.router.add_get("/rest/", self._root)
         app.router.add_post("/rest/voice/interpreters", self._interpret)
+        app.router.add_delete("/rest/voice/conversations/{cid}", self._delete_conversation)
         return app
 
     async def _root(self, request: web.Request) -> web.Response:
@@ -110,9 +115,14 @@ class FakeOpenHAB:
     async def _interpret(self, request: web.Request) -> web.Response:
         self.commands.append(await request.text())
         self.llm_tools.append(request.query.get("llmTools"))
+        self.conversations.append(request.query.get("conversation"))
         self.headers.append(dict(request.headers))
         await asyncio.sleep(self.response_delay_s)
         if self.status != 200:
             return web.Response(status=self.status, text=self.error_body)
         text = self.responses.pop(0) if self.responses else self.response
         return web.Response(text=text, content_type="text/plain")
+
+    async def _delete_conversation(self, request: web.Request) -> web.Response:
+        self.deleted.append(request.match_info["cid"])
+        return web.Response(status=self.delete_status)

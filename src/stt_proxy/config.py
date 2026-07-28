@@ -110,8 +110,7 @@ class BargeInConfig(BaseModel):
 
 class DialogConfig(BaseModel):
     enabled: bool = True
-    max_turns: int = Field(3, ge=1, le=10)  # max follow-up rounds after the initial command
-    context_mode: Literal["verbatim", "stitch"] = "verbatim"
+    followup_timeout_s: float = Field(6.0, gt=0.0, le=60.0)  # silence that ends the conversation
     earcon: Literal["wake", "ack"] = "wake"  # cue when re-opening the mic
 
 

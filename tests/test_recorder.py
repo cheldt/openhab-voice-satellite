@@ -71,6 +71,15 @@ async def test_no_speech_timeout():
         await record_utterance(queue, endpointer, config)
 
 
+async def test_no_speech_timeout_override():
+    queue = await _fill_queue(200)
+    endpointer = FakeEndpointer(speech_at=None, endpoint_at=None)
+    config = VadConfig(no_speech_timeout_s=100.0)
+    with pytest.raises(NoSpeechError):
+        await record_utterance(queue, endpointer, config, no_speech_timeout_s=0.5)
+    assert endpointer.elapsed_s < 1.0
+
+
 async def test_max_utterance_cutoff():
     queue = await _fill_queue(200)
     endpointer = FakeEndpointer(speech_at=1, endpoint_at=None)

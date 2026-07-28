@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 
 import aiohttp
 import numpy as np
@@ -83,20 +84,33 @@ def _make_pipeline(config, openhab, broadcaster, sink, speaker,
     )
 
 
+async def _await_cleanup(pipeline: Pipeline) -> None:
+    """Wait for the fire-and-forget conversation DELETE tasks."""
+    if pipeline._cleanup_tasks:
+        await asyncio.gather(*pipeline._cleanup_tasks)
+
+
 async def test_full_interaction(env):
     config, fake_oh, openhab, broadcaster = env
+    config.dialog.followup_timeout_s = 0.3
     sink = BufferAudioSink()
     speaker = FakeSpeaker(sink)
     states: list[State] = []
-    pipeline = _make_pipeline(config, openhab, broadcaster, sink, speaker, states)
+    endpointer = FakeEndpointer(speech_at=2, endpoint_at=5, later=[(None, None)])
+    pipeline = _make_pipeline(config, openhab, broadcaster, sink, speaker, states,
+                              endpointer=endpointer)
 
     result = await pipeline.run_interaction()
 
     assert result is Event.PLAYBACK_DONE
-    assert states == [State.LISTENING, State.THINKING, State.SPEAKING]
+    # a follow-up LISTENING precedes the silence that ends the conversation
+    assert states == [State.LISTENING, State.THINKING, State.SPEAKING, State.LISTENING]
     assert fake_oh.commands == ["schalte das licht an"]
     assert speaker.spoken == [("Das Licht ist an.", "de")]
     assert len(sink.played) == 1
+    uuid.UUID(fake_oh.conversations[0])  # valid conversation id was sent
+    await _await_cleanup(pipeline)
+    assert fake_oh.deleted == [fake_oh.conversations[0]]
 
 
 async def test_barge_in_cancels_speaking(env):
@@ -118,66 +132,37 @@ async def test_barge_in_cancels_speaking(env):
     assert sink.stopped
     # recorder queue was released
     assert broadcaster._subscribers == []
+    # conversation is deleted even when the pipeline task was cancelled
+    await _await_cleanup(pipeline)
+    assert fake_oh.deleted == [fake_oh.conversations[0]]
 
 
 async def test_dialog_follow_up(env):
     config, fake_oh, openhab, broadcaster = env
+    config.dialog.followup_timeout_s = 0.3
     fake_oh.responses = ["Welches Licht meinst du? Optionen: Küche, Wohnzimmer.", "Ok."]
     sink = BufferAudioSink()
     speaker = FakeSpeaker(sink)
     states: list[State] = []
     transcriber = FakeTranscriber(["schalte das licht an", "das im wohnzimmer"])
+    endpointer = FakeEndpointer(speech_at=2, endpoint_at=5,
+                                later=[(2, 5), (None, None)])
     pipeline = _make_pipeline(config, openhab, broadcaster, sink, speaker, states,
-                              transcriber=transcriber)
+                              transcriber=transcriber, endpointer=endpointer)
 
     result = await pipeline.run_interaction()
 
     assert result is Event.PLAYBACK_DONE
-    assert states == [State.LISTENING, State.THINKING, State.SPEAKING] * 2
+    assert states == [State.LISTENING, State.THINKING, State.SPEAKING] * 2 + [State.LISTENING]
     assert fake_oh.commands == ["schalte das licht an", "das im wohnzimmer"]
     assert speaker.spoken == [
         ("Welches Licht meinst du? Optionen: Küche, Wohnzimmer.", "de"),
         ("Ok.", "de"),
     ]
-
-
-async def test_dialog_stitch_mode(env):
-    config, fake_oh, openhab, broadcaster = env
-    config.dialog.context_mode = "stitch"
-    fake_oh.responses = ["Welches Licht meinst du?", "Ok."]
-    sink = BufferAudioSink()
-    speaker = FakeSpeaker(sink)
-    states: list[State] = []
-    transcriber = FakeTranscriber(["schalte das licht an", "das im wohnzimmer"])
-    pipeline = _make_pipeline(config, openhab, broadcaster, sink, speaker, states,
-                              transcriber=transcriber)
-
-    result = await pipeline.run_interaction()
-
-    assert result is Event.PLAYBACK_DONE
-    assert fake_oh.commands == [
-        "schalte das licht an",
-        "User: schalte das licht an\n"
-        "Assistant: Welches Licht meinst du?\n"
-        "User: das im wohnzimmer",
-    ]
-
-
-async def test_dialog_max_turns(env):
-    config, fake_oh, openhab, broadcaster = env
-    config.dialog.max_turns = 1
-    fake_oh.response = "Und welche Helligkeit?"  # every answer is a question
-    sink = BufferAudioSink()
-    speaker = FakeSpeaker(sink)
-    states: list[State] = []
-    pipeline = _make_pipeline(config, openhab, broadcaster, sink, speaker, states)
-
-    result = await pipeline.run_interaction()
-
-    assert result is Event.PLAYBACK_DONE
-    assert len(fake_oh.commands) == 2
-    assert states.count(State.LISTENING) == 2
-    assert len(speaker.spoken) == 2
+    # both requests carry the same conversation id; deleted exactly once
+    assert fake_oh.conversations[0] == fake_oh.conversations[1]
+    await _await_cleanup(pipeline)
+    assert fake_oh.deleted == [fake_oh.conversations[0]]
 
 
 async def test_dialog_disabled(env):
@@ -194,11 +179,14 @@ async def test_dialog_disabled(env):
     assert result is Event.PLAYBACK_DONE
     assert states == [State.LISTENING, State.THINKING, State.SPEAKING]
     assert len(fake_oh.commands) == 1
+    assert fake_oh.conversations == [None]
+    await _await_cleanup(pipeline)
+    assert fake_oh.deleted == []
 
 
 async def test_dialog_follow_up_no_speech_ends(env):
     config, fake_oh, openhab, broadcaster = env
-    config.vad.no_speech_timeout_s = 0.5
+    config.dialog.followup_timeout_s = 0.5
     fake_oh.response = "Welches Licht meinst du?"
     sink = BufferAudioSink()
     speaker = FakeSpeaker(sink)
@@ -209,23 +197,30 @@ async def test_dialog_follow_up_no_speech_ends(env):
 
     result = await pipeline.run_interaction()
 
-    assert result is Event.NO_SPEECH
+    assert result is Event.PLAYBACK_DONE  # graceful end, not an error
     assert len(fake_oh.commands) == 1
     assert speaker.spoken == [("Welches Licht meinst du?", "de")]
+    await _await_cleanup(pipeline)
+    assert fake_oh.deleted == [fake_oh.conversations[0]]
 
 
-def test_stitch_context():
-    from stt_proxy.pipeline import stitch_context
+async def test_no_speech_first_round(env):
+    config, fake_oh, openhab, broadcaster = env
+    config.vad.no_speech_timeout_s = 0.3
+    sink = BufferAudioSink()
+    speaker = FakeSpeaker(sink)
+    states: list[State] = []
+    endpointer = FakeEndpointer(speech_at=None, endpoint_at=None)
+    pipeline = _make_pipeline(config, openhab, broadcaster, sink, speaker, states,
+                              endpointer=endpointer)
 
-    assert stitch_context([], "hallo") == "User: hallo"
-    history = [("mach licht an", "Welches Licht?"), ("küche", "Welche Helligkeit?")]
-    assert stitch_context(history, "50 prozent") == (
-        "User: mach licht an\n"
-        "Assistant: Welches Licht?\n"
-        "User: küche\n"
-        "Assistant: Welche Helligkeit?\n"
-        "User: 50 prozent"
-    )
+    result = await pipeline.run_interaction()
+
+    assert result is Event.NO_SPEECH
+    assert fake_oh.commands == []
+    # no request was sent, so no server-side conversation to delete
+    assert pipeline._cleanup_tasks == set()
+    assert fake_oh.deleted == []
 
 
 async def test_openhab_timeout_returns_error(env):
@@ -241,3 +236,6 @@ async def test_openhab_timeout_returns_error(env):
 
     assert result is Event.ERROR
     assert speaker.spoken == []
+    # the POST was attempted, so the conversation still gets deleted
+    await _await_cleanup(pipeline)
+    assert fake_oh.deleted == [fake_oh.conversations[0]]
