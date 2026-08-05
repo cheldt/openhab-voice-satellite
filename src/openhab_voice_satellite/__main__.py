@@ -13,9 +13,22 @@ from .config import load_config
 
 
 def _list_devices() -> None:
-    import sounddevice as sd
+    try:
+        from .audio.gst_devices import list_audio_nodes
 
-    print(sd.query_devices())
+        nodes = list_audio_nodes()
+    except Exception as exc:
+        print(f"cannot list PipeWire nodes: {exc}")
+        print("(requires PipeWire running and the GStreamer pipewire plugin, "
+              "see deploy/install.md)")
+        sys.exit(1)
+    print("PipeWire audio nodes (audio.input_device / audio.output_device "
+          "match a substring of name or description):")
+    for node in nodes:
+        label = "source" if node.media_class.startswith("Audio/Source") else "sink  "
+        print(f"  {label}  {node.name:<55} {node.description}")
+    if not nodes:
+        print("  (none found — is PipeWire running in this session?)")
 
 
 def _check(config_path: Path) -> int:
@@ -39,18 +52,13 @@ def _check(config_path: Path) -> int:
     print("openhab-voice-satellite self-test")
 
     def check_audio() -> None:
-        import sounddevice as sd
+        from .audio.gst_devices import probe_capture, resolve_node
 
-        from .audio.source import find_device
-
-        find_device(config.audio.input_device, "input")
-        find_device(config.audio.output_device, "output")
-        sd.check_input_settings(
-            device=find_device(config.audio.input_device, "input"),
-            samplerate=config.audio.sample_rate,
-            channels=1,
-            dtype="int16",
-        )
+        input_node = resolve_node(config.audio.input_device, "input")
+        resolve_node(config.audio.output_device, "output")
+        # opens the real capture pipeline and requires one sample — also
+        # catches a node WirePlumber cannot link (which stalls silently)
+        probe_capture(input_node, config.audio.sample_rate)
 
     def check_wakeword() -> None:
         from .wakeword import WakewordDetector

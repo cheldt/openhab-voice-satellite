@@ -16,7 +16,6 @@ license = { text = "MIT" }
 # Its actual runtime needs (onnxruntime, scipy, scikit-learn, tqdm, requests)
 # are covered below.
 dependencies = [
-    "sounddevice>=0.5,<0.6",
     "numpy>=1.26",
     "onnxruntime>=1.17",
     "scipy>=1.11",
@@ -37,6 +36,13 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+]
+# Audio I/O uses GStreamer via PyGObject. On Debian/RPi production installs,
+# prefer apt python3-gi with a --system-site-packages venv (PyGObject has no
+# manylinux wheels; pip builds need libgirepository/cairo dev headers). This
+# extra exists for CI and dev boxes that have those headers.
+gst = [
+    "PyGObject>=3.44",
 ]
 
 [project.scripts]

@@ -11,11 +11,11 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class AudioConfig(BaseModel):
+    # substring of a PipeWire node name/description (see --list-devices); null = default node
     input_device: str | None = None
     output_device: str | None = None
     sample_rate: int = 16000
     frame_ms: int = 80
-    input_latency: float | Literal["low", "high"] = "high"  # PortAudio ring buffer; larger = fewer overflows under CPU load
     output_lead_in_ms: int = Field(300, ge=0)  # silence before playback; masks USB-DAC unmute delay
 
     @property

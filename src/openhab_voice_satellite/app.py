@@ -11,8 +11,9 @@ import aiohttp
 
 from .audio.broadcast import AudioBroadcaster
 from .audio.earcons import Earcons
-from .audio.sink import SounddeviceSink
-from .audio.source import SounddeviceSource
+from .audio.gst_sink import PipewireSink
+from .audio.gst_source import PipewireSource
+from .audio.sink import AudioSink
 from .config import Config
 from .deepgram import DeepgramClient, DeepgramSpeaker, DeepgramTranscriber
 from .fallback import FallbackSpeaker, FallbackTranscriber, LazySpeaker
@@ -51,13 +52,12 @@ class App:
         endpointer = SpeechEndpointer(config.vad, config.audio.sample_rate)
         transcriber = Transcriber(config.stt, config.tts.default_language)
 
-        source = SounddeviceSource(
+        source = PipewireSource(
             sample_rate=config.audio.sample_rate,
             frame_samples=config.audio.frame_samples,
             device=config.audio.input_device,
-            latency=config.audio.input_latency,
         )
-        sink = SounddeviceSink(
+        sink = PipewireSink(
             device=config.audio.output_device,
             lead_in_ms=config.audio.output_lead_in_ms,
         )
@@ -150,7 +150,7 @@ class App:
 
         self._pipeline_task = asyncio.create_task(_run(), name="interaction")
 
-    async def _cancel_pipeline(self, sink: SounddeviceSink) -> bool:
+    async def _cancel_pipeline(self, sink: AudioSink) -> bool:
         task = self._pipeline_task
         if task is None:
             return False
@@ -171,7 +171,7 @@ class App:
         wake_queue: asyncio.Queue,
         detector: WakewordDetector,
         pipeline: Pipeline,
-        sink: SounddeviceSink,
+        sink: AudioSink,
         earcons: Earcons,
     ) -> None:
         """Always-on wakeword loop; starts or cancels the interaction task."""

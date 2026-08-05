@@ -109,8 +109,7 @@ Everything lives in one YAML file — see the extensively commented
 
 | Key | Meaning |
 |---|---|
-| `audio.input_device` / `output_device` | substring of the device name (`--list-devices`) |
-| `audio.input_latency` | `low`, `high` (default) or seconds; bigger capture buffer avoids input overflow under CPU load |
+| `audio.input_device` / `output_device` | substring of a PipeWire node name or description (`--list-devices`); `null` = default node |
 | `wakeword.model` | pretrained openWakeWord name or path to custom `.onnx` |
 | `wakeword.threshold_speaking` | raised threshold while TTS is audible (echo mitigation) |
 | `stt.engine` | `local` (faster-whisper), `gemini` or `deepgram` (cloud STT, falls back to local on failure) |
@@ -135,8 +134,9 @@ Everything lives in one YAML file — see the extensively commented
 During playback the mic hears the speaker. Mitigations built in: raised
 wakeword threshold in SPEAKING, automatic volume ducking when the detector
 starts to trigger. For robust hands-free interruption, run PipeWire's WebRTC
-echo canceller and point the audio devices at it — setup in
-[deploy/install.md](deploy/install.md).
+echo canceller and point `audio.input_device` / `audio.output_device` at its
+echo-cancel nodes (they appear in `--list-devices` like any other PipeWire
+node) — setup in [deploy/install.md](deploy/install.md).
 
 ## Custom German Kokoro voice (optional)
 

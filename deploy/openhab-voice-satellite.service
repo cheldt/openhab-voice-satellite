@@ -1,18 +1,16 @@
-# systemd USER unit (recommended, required when using PipeWire echo cancellation).
+# systemd USER unit. Audio runs natively on PipeWire, so the service must
+# live in the same user session as the PipeWire daemon — a system unit is
+# not supported.
 # Install:
 #   mkdir -p ~/.config/systemd/user
 #   cp deploy/openhab-voice-satellite.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now openhab-voice-satellite
 #   sudo loginctl enable-linger $USER     # keep it running without an open session
-#
-# For a SYSTEM unit with plain ALSA instead: copy to /etc/systemd/system/,
-# add  User=pi  and  SupplementaryGroups=audio  under [Service], and change
-# WantedBy to multi-user.target.
 
 [Unit]
 Description=openhab-voice-satellite voice assistant (wakeword -> STT -> openHAB -> TTS)
-After=network-online.target sound.target
+After=network-online.target sound.target pipewire.service wireplumber.service
 Wants=network-online.target
 
 [Service]

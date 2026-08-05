@@ -34,6 +34,12 @@ wakeword:
     assert config.wakeword.threshold == 0.6
 
 
+def test_stale_input_latency_key_still_loads():
+    # input_latency was PortAudio-only; existing configs must keep loading
+    config = Config.model_validate({"audio": {"input_latency": "high"}})
+    assert not hasattr(config.audio, "input_latency")
+
+
 def test_env_token_wins(monkeypatch):
     config = Config.model_validate({"openhab": {"api_token": "file-token"}})
     assert config.openhab.token == "file-token"

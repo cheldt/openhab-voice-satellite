@@ -2,11 +2,10 @@
 # Relative paths are resolved against this file's directory.
 
 audio:
-  input_device: null        # substring of device name (see: openhab-voice-satellite --list-devices); null = default
+  input_device: null        # substring of a PipeWire node name/description (see: openhab-voice-satellite --list-devices); null = default node
   output_device: null
   sample_rate: 16000
   frame_ms: 80              # 1280 samples = one openWakeWord chunk
-  input_latency: high       # "low", "high", or seconds; high = bigger capture buffer, fewer overflows under CPU load
   output_lead_in_ms: 300    # silence prepended to playback; masks USB-DAC unmute delay
 
 wakeword:
