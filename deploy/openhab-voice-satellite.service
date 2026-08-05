@@ -20,6 +20,10 @@ Type=simple
 WorkingDirectory=/opt/openhab-voice-satellite
 ExecStart=/opt/openhab-voice-satellite/.venv/bin/openhab-voice-satellite --config /opt/openhab-voice-satellite/config.yaml
 Environment=HF_HOME=/opt/openhab-voice-satellite/models/hf
+# CTranslate2/whisper OpenMP workers sleep between jobs instead of spin-waiting
+Environment=OMP_WAIT_POLICY=PASSIVE
+# numpy/OpenBLAS handles tiny arrays only; one thread, never spins
+Environment=OPENBLAS_NUM_THREADS=1
 # Environment=OPENHAB_TOKEN=oh.stt.XXXX   # or keep the token in config.yaml
 # Environment=GEMINI_API_KEY=AIzaXXXX     # only when stt/tts engine is "gemini"
 # Environment=DEEPGRAM_API_KEY=XXXX       # only when stt/tts engine is "deepgram"

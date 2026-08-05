@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from typing import Protocol
 
 import numpy as np
@@ -34,12 +35,16 @@ class SounddeviceSink:
     `stop()` aborts playback immediately from any thread.
     """
 
+    STATUS_LOG_INTERVAL_S = 30.0
+
     def __init__(self, device: str | None = None, lead_in_ms: int = 300) -> None:
         self._device = find_device(device, "output")
         self._lead_in_ms = lead_in_ms
         self._gain = 1.0
         self._stop_flag = threading.Event()
         self._active_stream: sd.OutputStream | None = None
+        self._status_count = 0
+        self._status_last_log = float("-inf")  # first occurrence always logs
 
     def duck(self, factor: float) -> None:
         self._gain = factor
@@ -70,7 +75,13 @@ class SounddeviceSink:
         def callback(outdata: np.ndarray, frames: int, time_info, status) -> None:
             nonlocal pos
             if status:
-                log.warning("output stream status: %s", status)
+                self._status_count += 1
+                now = time.monotonic()
+                if now - self._status_last_log >= self.STATUS_LOG_INTERVAL_S:
+                    log.warning("output stream status: %s (%d occurrences since last report)",
+                                status, self._status_count)
+                    self._status_last_log = now
+                    self._status_count = 0
             chunk = pcm[pos:pos + frames]
             pos += frames
             if self._gain != 1.0:

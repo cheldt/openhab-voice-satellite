@@ -115,7 +115,7 @@ Everything lives in one YAML file — see the extensively commented
 | `wakeword.threshold_speaking` | raised threshold while TTS is audible (echo mitigation) |
 | `stt.engine` | `local` (faster-whisper), `gemini` or `deepgram` (cloud STT, falls back to local on failure) |
 | `stt.model` | `small` (default) or `base` for lower latency |
-| `stt.languages` | language candidates for detection (default `[de, en]`) |
+| `stt.languages` | language candidates for detection (default `[de, en]`); a single entry skips whisper's per-utterance language-detection pass — recommended on constrained boxes |
 | `tts.default_language` | fallback language/voice when detection is inconclusive (default `de`) |
 | `openhab.verify_ssl` | set `false` for self-signed HTTPS certificates |
 | `tts.engine` | `kokoro` or `piper` (local), `gemini` or `deepgram` (cloud TTS, falls back to kokoro on failure) |
@@ -126,6 +126,7 @@ Everything lives in one YAML file — see the extensively commented
 | `barge_in.resume_listening` | wakeword during playback → listen for new command |
 | `dialog.enabled` | every answer re-opens the mic for a follow-up (no wakeword); context is kept server-side via a conversation id |
 | `dialog.followup_timeout_s` | follow-up silence that ends the conversation (first turn uses `vad.no_speech_timeout_s`) |
+| `kokoro.threads` | ONNX threads per Kokoro session (default `2`); bounds TTS CPU |
 | `kokoro.voices` | Kokoro model/voices/voice/lang/speed per language code (engine `kokoro` + cloud fallback) |
 | `piper.voices` | Piper `.onnx` model path per language code (engine `piper` only) |
 

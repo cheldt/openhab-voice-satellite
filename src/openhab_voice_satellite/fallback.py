@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from typing import Callable
 
 import aiohttp
 import numpy as np
@@ -48,6 +50,29 @@ class FallbackTranscriber:
         except _FALLBACK_ERRORS as exc:
             log.warning("%s STT failed (%s), falling back to local", self._label, exc)
             return await self._fallback.transcribe(pcm)
+
+
+class LazySpeaker:
+    """Defers construction of a local speaker until first use.
+
+    Used when a cloud TTS engine is primary: the local models then only load
+    on the first fallback instead of costing RAM and startup time up front.
+    Construction runs in the executor so the multi-second model load never
+    blocks the event loop (and with it the wakeword monitor).
+    """
+
+    def __init__(self, factory: Callable[[], object]) -> None:
+        self._factory = factory
+        self._speaker: object | None = None
+        self._lock = asyncio.Lock()
+
+    async def speak(self, text: str, language: str) -> None:
+        async with self._lock:
+            if self._speaker is None:
+                log.info("loading local TTS fallback on first use")
+                loop = asyncio.get_running_loop()
+                self._speaker = await loop.run_in_executor(None, self._factory)
+        await self._speaker.speak(text, language)
 
 
 class FallbackSpeaker:

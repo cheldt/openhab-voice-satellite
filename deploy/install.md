@@ -20,8 +20,10 @@ python3 -m venv .venv
 .venv/bin/pip install -e .
 # openwakeword is installed without dependencies on purpose — its metadata
 # demands tflite-runtime, which has no wheels for current Pythons; the ONNX
-# backend used here does not need it:
-.venv/bin/pip install --no-deps openwakeword
+# backend used here does not need it. Version pinned: >=0.6.0 is required for
+# the ncpu kwarg that keeps its ONNX sessions single-threaded (unbounded
+# sessions spin-wait and burn ~1 core per worker thread at idle):
+.venv/bin/pip install --no-deps 'openwakeword==0.6.0'
 ```
 
 ## 3. Download models (~1.6 GB total)

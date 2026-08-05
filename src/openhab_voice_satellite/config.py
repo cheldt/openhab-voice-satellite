@@ -130,6 +130,7 @@ class KokoroVoiceConfig(BaseModel):
 
 
 class KokoroConfig(BaseModel):
+    threads: int = Field(2, ge=1)  # ORT intra-op threads per kokoro session
     voices: dict[str, KokoroVoiceConfig] = Field(
         default_factory=lambda: {
             "de": KokoroVoiceConfig(

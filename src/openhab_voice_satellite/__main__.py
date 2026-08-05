@@ -73,11 +73,17 @@ def _check(config_path: Path) -> int:
     def check_tts() -> None:
         from kokoro_onnx import Kokoro
 
+        from .tts import make_onnx_session
+
         def resolve(p: str) -> Path:
             return Path(p) if Path(p).is_absolute() else base_dir / p
 
         for lang, vc in config.kokoro.voices.items():
-            kokoro = Kokoro(str(resolve(vc.model)), str(resolve(vc.voices)))
+            # same session construction as production (tts.Speaker)
+            kokoro = Kokoro.from_session(
+                make_onnx_session(str(resolve(vc.model)), config.kokoro.threads),
+                str(resolve(vc.voices)),
+            )
             if vc.voice not in kokoro.get_voices():
                 raise ValueError(f"{lang}: voice {vc.voice!r} not in {Path(vc.voices).name}")
 

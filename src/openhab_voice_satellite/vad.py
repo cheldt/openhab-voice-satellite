@@ -44,7 +44,7 @@ class SpeechEndpointer:
     def update(self, frame: np.ndarray) -> bool:
         """Feed one frame; returns True if any chunk in it was speech."""
         self._total_samples += len(frame)
-        buf = np.concatenate([self._residual, frame])
+        buf = frame if len(self._residual) == 0 else np.concatenate([self._residual, frame])
         n_chunks = len(buf) // VAD_CHUNK
         self._residual = buf[n_chunks * VAD_CHUNK:]
         had_speech = False

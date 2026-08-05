@@ -27,6 +27,23 @@ def to_int16(samples: np.ndarray) -> np.ndarray:
     return (np.clip(samples, -1.0, 1.0) * 32767.0).astype(np.int16)
 
 
+def make_onnx_session(model_path: str, threads: int):
+    """ONNX session with a bounded, non-spinning thread pool.
+
+    ORT defaults to one intra-op thread per core with spin-waiting workers,
+    which burns idle CPU long after the last inference.
+    """
+    import onnxruntime as ort
+
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = threads
+    opts.inter_op_num_threads = 1
+    opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    return ort.InferenceSession(
+        model_path, sess_options=opts, providers=["CPUExecutionProvider"]
+    )
+
+
 class Speaker:
     def __init__(
         self,
@@ -49,7 +66,9 @@ class Speaker:
         for lang, vc in config.voices.items():
             key = (resolve(vc.model), resolve(vc.voices))
             if key not in cache:
-                cache[key] = Kokoro(str(key[0]), str(key[1]))
+                cache[key] = Kokoro.from_session(
+                    make_onnx_session(str(key[0]), config.threads), str(key[1])
+                )
             self._engines[lang] = (cache[key], vc)
             log.info("kokoro voice loaded: %s -> %s (%s)", lang, vc.voice, key[0].name)
 

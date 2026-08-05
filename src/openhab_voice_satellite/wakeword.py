@@ -27,7 +27,14 @@ class WakewordDetector:
         self._stop_key: str | None = None
         if config.stop_model:
             models.append(config.stop_model)
-        self._model = Model(wakeword_models=models, inference_framework="onnx")
+        try:
+            # ncpu=1: single-threaded ONNX sessions. The default lets ORT spawn
+            # a spin-waiting pool per core, and the 80 ms inference cadence
+            # never lets those workers park -> steady multi-core burn at idle.
+            self._model = Model(wakeword_models=models, inference_framework="onnx", ncpu=1)
+        except TypeError:
+            log.warning("openwakeword lacks ncpu kwarg; upgrade to >=0.6.0 to bound CPU")
+            self._model = Model(wakeword_models=models, inference_framework="onnx")
         keys = list(self._model.models.keys())
         self._wake_key = keys[0]
         if config.stop_model:

@@ -15,7 +15,7 @@ from .audio.sink import SounddeviceSink
 from .audio.source import SounddeviceSource
 from .config import Config
 from .deepgram import DeepgramClient, DeepgramSpeaker, DeepgramTranscriber
-from .fallback import FallbackSpeaker, FallbackTranscriber
+from .fallback import FallbackSpeaker, FallbackTranscriber, LazySpeaker
 from .gemini import GeminiClient, GeminiSpeaker, GeminiTranscriber
 from .openhab import OpenHABClient, make_session
 from .piper_tts import PiperSpeaker
@@ -64,9 +64,13 @@ class App:
         earcons = Earcons(config.earcons, sink, self._base_dir)
         if config.tts.engine == "piper":
             speaker: SpeakerProtocol = PiperSpeaker(config.piper, config.tts, sink, self._base_dir)
-        else:
-            # kokoro; also stays loaded as fallback for the cloud engines
+        elif config.tts.engine == "kokoro":
             speaker = Speaker(config.kokoro, config.tts, sink, self._base_dir)
+        else:
+            # cloud engine primary: kokoro stays the fallback but loads on first use
+            speaker = LazySpeaker(
+                lambda: Speaker(config.kokoro, config.tts, sink, self._base_dir)
+            )
 
         broadcaster = AudioBroadcaster(source)
         wake_queue = broadcaster.subscribe()

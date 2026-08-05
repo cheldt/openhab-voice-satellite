@@ -45,6 +45,7 @@ tts:
 
 # Used when tts.engine is "kokoro" and as fallback for the cloud engines.
 kokoro:
+  threads: 2                   # ONNX intra-op threads per model; higher = faster synthesis, more CPU
   voices:
     de:
       model: "models/kokoro/kokoro-martin.onnx"
