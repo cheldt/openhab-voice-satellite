@@ -32,10 +32,9 @@ export HF_HOME=/opt/stt_proxy/models/hf
 .venv/bin/python scripts/make_earcons.py   # generates sounds/*.wav
 ```
 
-The two Kokoro TTS models are ~326 MB each. espeak-ng (used for
-phonemization) ships inside the `espeakng-loader` Python wheel — no apt
-package needed. When upgrading from a Piper-based install, the old voices
-can be removed with `rm -rf models/piper`.
+The two Kokoro TTS models are ~326 MB each; the Piper voices (~60 MB each)
+land in `models/piper/`. espeak-ng (used for phonemization) ships inside
+the `espeakng-loader` Python wheel — no apt package needed.
 
 Note: espeak-ng silently ignores data paths longer than ~147 characters
 (fixed internal buffer) and falls back to a non-existent build path. Keep
@@ -60,7 +59,7 @@ profile -> API tokens).
 OPENHAB_TOKEN=... HF_HOME=/opt/stt_proxy/models/hf .venv/bin/stt-proxy --check
 ```
 
-All six checks (audio devices, wakeword, VAD, whisper, kokoro, openHAB REST)
+All six checks (audio devices, wakeword, VAD, whisper, kokoro/piper, openHAB REST)
 must print `ok`. The whisper line also warms the model cache, so the first
 real interaction is not slow.
 

@@ -81,6 +81,18 @@ def _check(config_path: Path) -> int:
             if vc.voice not in kokoro.get_voices():
                 raise ValueError(f"{lang}: voice {vc.voice!r} not in {Path(vc.voices).name}")
 
+    def check_piper() -> None:
+        from piper import PiperVoice
+
+        def resolve(p: str) -> Path:
+            return Path(p) if Path(p).is_absolute() else base_dir / p
+
+        for lang, model_path in config.piper.voices.items():
+            path = resolve(model_path)
+            if not path.exists():
+                raise FileNotFoundError(f"{lang}: piper model missing: {path}")
+            PiperVoice.load(str(path))
+
     def check_gemini() -> None:
         import aiohttp
 
@@ -120,7 +132,11 @@ def _check(config_path: Path) -> int:
     step("wakeword model", check_wakeword)
     step("vad model", check_vad)
     step("whisper model (incl. warmup)", check_stt)
-    step("kokoro voices", check_tts)
+    if config.tts.engine == "piper":
+        step("piper voices", check_piper)
+    else:
+        # kokoro is the engine or the cloud fallback
+        step("kokoro voices", check_tts)
     if "gemini" in (config.stt.engine, config.tts.engine):
         step("gemini API", check_gemini)
     if "deepgram" in (config.stt.engine, config.tts.engine):

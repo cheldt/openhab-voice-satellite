@@ -20,6 +20,8 @@ processing: wakeword → speech-to-text → openHAB chat → text-to-speech.
   community [Kokoro-82M-ONNX-German-Martin](https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin)
   model (Apache 2.0, single voice `martin`). Synthesis on a Pi 5 runs at
   roughly real-time speed, so expect a short delay before the first sentence.
+  Alternatively `tts.engine: "piper"` uses Piper (much faster, lower quality);
+  default voices are `en_GB-alba-medium` (female) and `de_DE-thorsten-medium`.
 - **Barge-in**: saying the wakeword during processing or playback cancels the
   current interaction immediately (and by default listens for a new command).
   A custom-trained "stop" model can be added via `wakeword.stop_model`.
@@ -93,7 +95,7 @@ Everything lives in one YAML file — see the extensively commented
 | `stt.engine` | `local` (faster-whisper), `gemini` or `deepgram` (cloud STT, falls back to local on failure) |
 | `stt.model` | `small` (default) or `base` for lower latency |
 | `openhab.verify_ssl` | set `false` for self-signed HTTPS certificates |
-| `tts.engine` | `local` (Kokoro), `gemini` or `deepgram` (cloud TTS, falls back to local on failure) |
+| `tts.engine` | `kokoro` or `piper` (local), `gemini` or `deepgram` (cloud TTS, falls back to kokoro on failure) |
 | `gemini.api_key` | Google Gemini API key; env var `GEMINI_API_KEY` wins over the file |
 | `gemini.tts_voices` | prebuilt Gemini voice name per language (e.g. `de: Kore`) |
 | `deepgram.api_key` | Deepgram API key; env var `DEEPGRAM_API_KEY` wins over the file |
@@ -102,6 +104,7 @@ Everything lives in one YAML file — see the extensively commented
 | `dialog.enabled` | every answer re-opens the mic for a follow-up (no wakeword); context is kept server-side via a conversation id |
 | `dialog.followup_timeout_s` | follow-up silence that ends the conversation (first turn uses `vad.no_speech_timeout_s`) |
 | `tts.voices` | Kokoro model/voices/voice/lang/speed per language code |
+| `piper.voices` | Piper `.onnx` model path per language code (engine `piper` only) |
 
 ## Barge-in and echo
 

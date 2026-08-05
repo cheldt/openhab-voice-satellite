@@ -43,7 +43,7 @@ def test_env_token_wins(monkeypatch):
 def test_engine_defaults_local():
     config = Config()
     assert config.stt.engine == "local"
-    assert config.tts.engine == "local"
+    assert config.tts.engine == "kokoro"
     assert config.gemini.stt_model == "gemini-3.6-flash"
     assert config.gemini.tts_voices == {"de": "Kore", "en": "Puck"}
     assert config.deepgram.stt_model == "nova-3"
@@ -117,6 +117,34 @@ def test_tts_voice_defaults():
     assert config.tts.voices["de"].lang == "de"
     assert config.tts.voices["en"].voice == "bf_emma"
     assert config.tts.voices["en"].speed == 1.0
+
+
+def test_piper_engine_and_defaults():
+    config = Config.model_validate({"tts": {"engine": "piper"}})
+    assert config.tts.engine == "piper"
+    assert config.piper.voices == {
+        "de": "models/piper/de_DE-thorsten-medium.onnx",
+        "en": "models/piper/en_GB-alba-medium.onnx",
+    }
+
+
+def test_tts_engine_local_no_longer_valid():
+    with pytest.raises(ValueError):
+        Config.model_validate({"tts": {"engine": "local"}})
+
+
+def test_piper_default_language_must_have_voice():
+    with pytest.raises(ValueError, match="piper voice"):
+        Config.model_validate(
+            {
+                "tts": {"engine": "piper"},
+                "piper": {"voices": {"en": "models/piper/en_GB-alba-medium.onnx"}},
+            }
+        )
+    # not enforced when piper is not the engine
+    Config.model_validate(
+        {"piper": {"voices": {"en": "models/piper/en_GB-alba-medium.onnx"}}}
+    )
 
 
 def test_empty_languages_rejected():

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download all models: openWakeWord, Kokoro TTS models, faster-whisper cache warmup.
+"""Download all models: openWakeWord, Kokoro + Piper TTS models, faster-whisper cache warmup.
 
 Run from the repo root inside the venv:
     .venv/bin/python scripts/download_models.py [--config config.yaml]
@@ -24,6 +24,18 @@ KOKORO_FILES = {
     "voices-v1.0.bin": f"{_KOKORO_RELEASE}/voices-v1.0.bin",
     "kokoro-martin.onnx": f"{_KOKORO_MARTIN}/kokoro-martin.onnx",
     "voices-martin.npz": f"{_KOKORO_MARTIN}/voices-martin.npz",
+}
+
+_PIPER_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
+# voice file -> HF subpath; each .onnx needs its sidecar .onnx.json
+_PIPER_VOICES = {
+    "en_GB-alba-medium": "en/en_GB/alba/medium",
+    "de_DE-thorsten-medium": "de/de_DE/thorsten/medium",
+}
+PIPER_FILES = {
+    f"{name}{ext}": f"{_PIPER_BASE}/{subpath}/{name}{ext}"
+    for name, subpath in _PIPER_VOICES.items()
+    for ext in (".onnx", ".onnx.json")
 }
 
 
@@ -53,6 +65,12 @@ def download_kokoro(models_dir: Path) -> None:
         download(url, models_dir / "kokoro" / name)
 
 
+def download_piper(models_dir: Path) -> None:
+    print("Piper TTS models:")
+    for name, url in PIPER_FILES.items():
+        download(url, models_dir / "piper" / name)
+
+
 def warm_whisper(model: str, compute_type: str) -> None:
     print(f"faster-whisper {model} ({compute_type}) cache warmup:")
     from faster_whisper import WhisperModel
@@ -75,6 +93,7 @@ def main() -> None:
 
     download_openwakeword()
     download_kokoro(REPO_ROOT / "models")
+    download_piper(REPO_ROOT / "models")
     warm_whisper(stt_model, compute_type)
     print("all models ready")
 

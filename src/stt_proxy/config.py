@@ -80,7 +80,7 @@ class TtsVoiceConfig(BaseModel):
 
 
 class TtsConfig(BaseModel):
-    engine: Literal["local", "gemini", "deepgram"] = "local"
+    engine: Literal["kokoro", "gemini", "deepgram", "piper"] = "kokoro"
     voices: dict[str, TtsVoiceConfig] = Field(
         default_factory=lambda: {
             "de": TtsVoiceConfig(
@@ -152,6 +152,15 @@ class DeepgramConfig(BaseModel):
         return os.environ.get("DEEPGRAM_API_KEY") or self.api_key
 
 
+class PiperConfig(BaseModel):
+    voices: dict[str, str] = Field(  # language -> .onnx model path (sidecar .onnx.json expected)
+        default_factory=lambda: {
+            "de": "models/piper/de_DE-thorsten-medium.onnx",
+            "en": "models/piper/en_GB-alba-medium.onnx",
+        }
+    )
+
+
 class BargeInConfig(BaseModel):
     resume_listening: bool = True
 
@@ -182,6 +191,7 @@ class Config(BaseModel):
     tts: TtsConfig = Field(default_factory=TtsConfig)
     gemini: GeminiConfig = Field(default_factory=GeminiConfig)
     deepgram: DeepgramConfig = Field(default_factory=DeepgramConfig)
+    piper: PiperConfig = Field(default_factory=PiperConfig)
     barge_in: BargeInConfig = Field(default_factory=BargeInConfig)
     dialog: DialogConfig = Field(default_factory=DialogConfig)
     earcons: EarconsConfig = Field(default_factory=EarconsConfig)
@@ -197,6 +207,14 @@ class Config(BaseModel):
         if "deepgram" in engines and not self.deepgram.key:
             raise ValueError(
                 "engine 'deepgram' requires deepgram.api_key or env DEEPGRAM_API_KEY"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _piper_default_voice(self) -> Config:
+        if self.tts.engine == "piper" and self.tts.default_language not in self.piper.voices:
+            raise ValueError(
+                f"tts.default_language {self.tts.default_language!r} has no piper voice configured"
             )
         return self
 

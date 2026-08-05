@@ -18,6 +18,7 @@ from .deepgram import DeepgramClient, DeepgramSpeaker, DeepgramTranscriber
 from .fallback import FallbackSpeaker, FallbackTranscriber
 from .gemini import GeminiClient, GeminiSpeaker, GeminiTranscriber
 from .openhab import OpenHABClient, make_session
+from .piper_tts import PiperSpeaker
 from .pipeline import Pipeline, SpeakerProtocol, TranscriberProtocol
 from .state import State
 from .stt import Transcriber
@@ -60,7 +61,11 @@ class App:
             lead_in_ms=config.audio.output_lead_in_ms,
         )
         earcons = Earcons(config.earcons, sink, self._base_dir)
-        speaker = Speaker(config.tts, sink, self._base_dir)
+        if config.tts.engine == "piper":
+            speaker: SpeakerProtocol = PiperSpeaker(config.piper, config.tts, sink, self._base_dir)
+        else:
+            # kokoro; also stays loaded as fallback for the cloud engines
+            speaker = Speaker(config.tts, sink, self._base_dir)
 
         broadcaster = AudioBroadcaster(source)
         wake_queue = broadcaster.subscribe()
@@ -73,7 +78,7 @@ class App:
             # local engines above stay loaded as fallback for the cloud path
             final_transcriber: TranscriberProtocol = transcriber
             final_speaker: SpeakerProtocol = speaker
-            cloud_engines = {config.stt.engine, config.tts.engine} - {"local"}
+            cloud_engines = {config.stt.engine, config.tts.engine} - {"local", "kokoro", "piper"}
             if cloud_engines:
                 # own session: openHAB's may have TLS verification disabled
                 cloud_session = await stack.enter_async_context(aiohttp.ClientSession())
