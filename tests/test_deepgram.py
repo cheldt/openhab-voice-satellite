@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 from aiohttp.test_utils import TestServer
 
-from stt_proxy.config import DeepgramConfig, SttConfig, TtsConfig
-from stt_proxy.deepgram import (
+from openhab_voice_satellite.config import DeepgramConfig, SttConfig, TtsConfig
+from openhab_voice_satellite.deepgram import (
     TTS_CHUNK_CHARS,
     DeepgramClient,
     DeepgramError,
@@ -16,8 +16,8 @@ from stt_proxy.deepgram import (
     DeepgramTranscriber,
     tts_chunks,
 )
-from stt_proxy.fallback import FallbackSpeaker, FallbackTranscriber
-from stt_proxy.stt import Transcript
+from openhab_voice_satellite.fallback import FallbackSpeaker, FallbackTranscriber
+from openhab_voice_satellite.stt import Transcript
 
 from .fakes import BufferAudioSink, FakeDeepgram
 

@@ -3,8 +3,8 @@ import asyncio
 import numpy as np
 import pytest
 
-from stt_proxy.config import VadConfig
-from stt_proxy.recorder import NoSpeechError, record_utterance
+from openhab_voice_satellite.config import VadConfig
+from openhab_voice_satellite.recorder import NoSpeechError, record_utterance
 
 FRAME = 1280  # 80 ms at 16 kHz
 

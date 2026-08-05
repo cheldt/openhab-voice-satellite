@@ -36,7 +36,7 @@ def _check(config_path: Path) -> int:
             failures += 1
             print(f"  FAIL {name}: {exc}")
 
-    print("stt-proxy self-test")
+    print("openhab-voice-satellite self-test")
 
     def check_audio() -> None:
         import sounddevice as sd
@@ -148,7 +148,7 @@ def _check(config_path: Path) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="stt-proxy", description=__doc__)
+    parser = argparse.ArgumentParser(prog="openhab-voice-satellite", description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("config.yaml"))
     parser.add_argument("--list-devices", action="store_true", help="list audio devices and exit")
     parser.add_argument("--check", action="store_true", help="run self-test and exit")

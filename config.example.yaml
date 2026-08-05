@@ -1,8 +1,8 @@
-# stt-proxy configuration. Copy to config.yaml and adjust.
+# openhab-voice-satellite configuration. Copy to config.yaml and adjust.
 # Relative paths are resolved against this file's directory.
 
 audio:
-  input_device: null        # substring of device name (see: stt-proxy --list-devices); null = default
+  input_device: null        # substring of device name (see: openhab-voice-satellite --list-devices); null = default
   output_device: null
   sample_rate: 16000
   frame_ms: 80              # 1280 samples = one openWakeWord chunk

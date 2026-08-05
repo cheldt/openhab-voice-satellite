@@ -1,6 +1,6 @@
 import pytest
 
-from stt_proxy.config import Config, load_config
+from openhab_voice_satellite.config import Config, load_config
 
 
 def test_defaults():

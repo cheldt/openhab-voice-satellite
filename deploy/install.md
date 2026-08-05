@@ -1,4 +1,4 @@
-# Installing stt-proxy on a Raspberry Pi 5
+# Installing openhab-voice-satellite on a Raspberry Pi 5
 
 Target: Raspberry Pi OS Bookworm 64-bit, Python 3.11–3.13 (kokoro-onnx does
 not support 3.14 yet).
@@ -13,9 +13,9 @@ sudo apt install python3-venv libportaudio2 alsa-utils
 ## 2. Get the code and install
 
 ```bash
-sudo mkdir -p /opt/stt_proxy && sudo chown $USER /opt/stt_proxy
-git clone <your-repo-url> /opt/stt_proxy   # or rsync the project over
-cd /opt/stt_proxy
+sudo mkdir -p /opt/openhab-voice-satellite && sudo chown $USER /opt/openhab-voice-satellite
+git clone https://github.com/cheldt/openhab-voice-satellite.git /opt/openhab-voice-satellite   # or rsync the project over
+cd /opt/openhab-voice-satellite
 python3 -m venv .venv
 .venv/bin/pip install -e .
 # openwakeword is installed without dependencies on purpose — its metadata
@@ -27,7 +27,7 @@ python3 -m venv .venv
 ## 3. Download models (~1.6 GB total)
 
 ```bash
-export HF_HOME=/opt/stt_proxy/models/hf
+export HF_HOME=/opt/openhab-voice-satellite/models/hf
 .venv/bin/python scripts/download_models.py
 .venv/bin/python scripts/make_earcons.py   # generates sounds/*.wav
 ```
@@ -38,14 +38,14 @@ the `espeakng-loader` Python wheel — no apt package needed.
 
 Note: espeak-ng silently ignores data paths longer than ~147 characters
 (fixed internal buffer) and falls back to a non-existent build path. Keep
-the install prefix short (`/opt/stt_proxy` is fine); a deeply nested venv
+the install prefix short (`/opt/openhab-voice-satellite` is fine); a deeply nested venv
 will make TTS fail with `Error processing file '...phontab'`.
 
 ## 4. Configure
 
 ```bash
 cp config.example.yaml config.yaml
-.venv/bin/stt-proxy --list-devices     # find your mic + speaker names
+.venv/bin/openhab-voice-satellite --list-devices     # find your mic + speaker names
 $EDITOR config.yaml                    # devices, openHAB url + token
 ```
 
@@ -56,7 +56,7 @@ profile -> API tokens).
 ## 5. Self-test
 
 ```bash
-OPENHAB_TOKEN=... HF_HOME=/opt/stt_proxy/models/hf .venv/bin/stt-proxy --check
+OPENHAB_TOKEN=... HF_HOME=/opt/openhab-voice-satellite/models/hf .venv/bin/openhab-voice-satellite --check
 ```
 
 All six checks (audio devices, wakeword, VAD, whisper, kokoro/piper, openHAB REST)
@@ -67,11 +67,11 @@ real interaction is not slow.
 
 ```bash
 mkdir -p ~/.config/systemd/user
-cp deploy/stt-proxy.service ~/.config/systemd/user/
+cp deploy/openhab-voice-satellite.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now stt-proxy
+systemctl --user enable --now openhab-voice-satellite
 sudo loginctl enable-linger $USER
-journalctl --user -u stt-proxy -f
+journalctl --user -u openhab-voice-satellite -f
 ```
 
 ## Optional: robust barge-in with echo cancellation
@@ -94,5 +94,5 @@ systemctl --user restart pipewire
 
 Then point `audio.input_device` in `config.yaml` at the new
 "Echo-Cancel Source" and `audio.output_device` at the "Echo-Cancel Sink".
-This requires running stt-proxy as a **user** unit (it must live in the same
+This requires running openhab-voice-satellite as a **user** unit (it must live in the same
 session as PipeWire) — which is the default unit shipped here.

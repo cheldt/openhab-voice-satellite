@@ -1,6 +1,6 @@
 import numpy as np
 
-from stt_proxy.tts import split_sentences, to_int16
+from openhab_voice_satellite.tts import split_sentences, to_int16
 
 
 def test_split_basic():

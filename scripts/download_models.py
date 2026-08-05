@@ -86,7 +86,7 @@ def main() -> None:
 
     stt_model, compute_type = "small", "int8"
     if args.config.exists():
-        from stt_proxy.config import load_config
+        from openhab_voice_satellite.config import load_config
 
         config = load_config(args.config)
         stt_model, compute_type = config.stt.model, config.stt.compute_type

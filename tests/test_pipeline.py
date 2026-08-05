@@ -6,12 +6,12 @@ import numpy as np
 import pytest
 from aiohttp.test_utils import TestServer
 
-from stt_proxy.audio.broadcast import AudioBroadcaster
-from stt_proxy.config import Config
-from stt_proxy.openhab import OpenHABClient
-from stt_proxy.pipeline import Pipeline
-from stt_proxy.state import Event, State
-from stt_proxy.stt import Transcript
+from openhab_voice_satellite.audio.broadcast import AudioBroadcaster
+from openhab_voice_satellite.config import Config
+from openhab_voice_satellite.openhab import OpenHABClient
+from openhab_voice_satellite.pipeline import Pipeline
+from openhab_voice_satellite.state import Event, State
+from openhab_voice_satellite.stt import Transcript
 
 from .fakes import BufferAudioSink, FakeOpenHAB, SilenceAudioSource
 from .test_recorder import FakeEndpointer

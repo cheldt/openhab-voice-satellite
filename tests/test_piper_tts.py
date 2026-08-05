@@ -8,8 +8,8 @@ import types
 import numpy as np
 import pytest
 
-from stt_proxy.config import PiperConfig, TtsConfig
-from stt_proxy.piper_tts import PiperSpeaker
+from openhab_voice_satellite.config import PiperConfig, TtsConfig
+from openhab_voice_satellite.piper_tts import PiperSpeaker
 
 from .fakes import BufferAudioSink
 

@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "stt-proxy"
+name = "openhab-voice-satellite"
 version = "0.1.0"
 description = "Wakeword voice assistant bridging a microphone to openHAB chat items (STT via faster-whisper, TTS via Kokoro)"
 readme = "README.md"
@@ -40,7 +40,7 @@ dev = [
 ]
 
 [project.scripts]
-stt-proxy = "stt_proxy.__main__:main"
+openhab-voice-satellite = "openhab_voice_satellite.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

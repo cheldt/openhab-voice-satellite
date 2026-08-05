@@ -1,4 +1,4 @@
-# stt-proxy
+# openhab-voice-satellite
 
 Local voice assistant for openHAB on a Raspberry Pi 5. Fully offline audio
 processing: wakeword → speech-to-text → openHAB chat → text-to-speech.
@@ -44,9 +44,9 @@ python3 -m venv .venv
 .venv/bin/python scripts/download_models.py
 .venv/bin/python scripts/make_earcons.py
 cp config.example.yaml config.yaml             # edit devices + openHAB url/token
-.venv/bin/stt-proxy --list-devices
-.venv/bin/stt-proxy --check
-.venv/bin/stt-proxy
+.venv/bin/openhab-voice-satellite --list-devices
+.venv/bin/openhab-voice-satellite --check
+.venv/bin/openhab-voice-satellite
 ```
 
 Tests: `.venv/bin/pytest -m "not slow"` (fast, no models needed beyond VAD).

@@ -8,16 +8,16 @@ import numpy as np
 import pytest
 from aiohttp.test_utils import TestServer
 
-from stt_proxy.config import GeminiConfig, SttConfig, TtsConfig
-from stt_proxy.fallback import FallbackSpeaker, FallbackTranscriber
-from stt_proxy.gemini import (
+from openhab_voice_satellite.config import GeminiConfig, SttConfig, TtsConfig
+from openhab_voice_satellite.fallback import FallbackSpeaker, FallbackTranscriber
+from openhab_voice_satellite.gemini import (
     GeminiClient,
     GeminiError,
     GeminiSpeaker,
     GeminiTranscriber,
     pcm_to_wav_bytes,
 )
-from stt_proxy.stt import Transcript
+from openhab_voice_satellite.stt import Transcript
 
 from .fakes import BufferAudioSink, FakeGemini
 

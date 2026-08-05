@@ -2,8 +2,8 @@ import aiohttp
 import pytest
 from aiohttp.test_utils import TestServer
 
-from stt_proxy.config import OpenHABConfig
-from stt_proxy.openhab import OpenHABClient
+from openhab_voice_satellite.config import OpenHABConfig
+from openhab_voice_satellite.openhab import OpenHABClient
 
 from .fakes import FakeOpenHAB
 

@@ -1,4 +1,4 @@
-from stt_proxy.state import TRANSITIONS, Event, State, next_state
+from openhab_voice_satellite.state import TRANSITIONS, Event, State, next_state
 
 
 def test_happy_path():
