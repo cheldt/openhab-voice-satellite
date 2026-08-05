@@ -110,6 +110,7 @@ Everything lives in one YAML file — see the extensively commented
 | Key | Meaning |
 |---|---|
 | `audio.input_device` / `output_device` | substring of the device name (`--list-devices`) |
+| `audio.input_latency` | `low`, `high` (default) or seconds; bigger capture buffer avoids input overflow under CPU load |
 | `wakeword.model` | pretrained openWakeWord name or path to custom `.onnx` |
 | `wakeword.threshold_speaking` | raised threshold while TTS is audible (echo mitigation) |
 | `stt.engine` | `local` (faster-whisper), `gemini` or `deepgram` (cloud STT, falls back to local on failure) |

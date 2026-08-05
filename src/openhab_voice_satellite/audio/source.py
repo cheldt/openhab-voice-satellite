@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import AsyncIterator, Protocol
 
 import numpy as np
@@ -34,34 +35,46 @@ def find_device(name_substring: str | None, kind: str) -> int | None:
 class SounddeviceSource:
     """16 kHz mono int16 capture in frames of `frame_samples`."""
 
+    STATUS_LOG_INTERVAL_S = 30.0
+
     def __init__(
         self,
         sample_rate: int = 16000,
         frame_samples: int = 1280,
         device: str | None = None,
         queue_size: int = 50,
+        latency: float | str = "high",
     ) -> None:
         self._sample_rate = sample_rate
         self._frame_samples = frame_samples
         self._device = find_device(device, "input")
         self._queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue(maxsize=queue_size)
         self._loop = asyncio.get_running_loop()
+        self._status_count = 0
+        self._status_last_log = float("-inf")  # first occurrence always logs
         self._stream = sd.InputStream(
             samplerate=sample_rate,
             blocksize=frame_samples,
             device=self._device,
             channels=1,
             dtype="int16",
+            latency=latency,
             callback=self._callback,
         )
         self._stream.start()
-        log.info("audio input open: device=%s rate=%d frame=%d",
+        log.info("audio input open: device=%s rate=%d frame=%d latency=%.0fms",
                  self._device if self._device is not None else "default",
-                 sample_rate, frame_samples)
+                 sample_rate, frame_samples, self._stream.latency * 1000)
 
     def _callback(self, indata: np.ndarray, frames: int, time_info, status) -> None:
         if status:
-            log.warning("input stream status: %s", status)
+            self._status_count += 1
+            now = time.monotonic()
+            if now - self._status_last_log >= self.STATUS_LOG_INTERVAL_S:
+                log.warning("input stream status: %s (%d occurrences since last report)",
+                            status, self._status_count)
+                self._status_last_log = now
+                self._status_count = 0
         frame = indata[:, 0].copy()
 
         def _put() -> None:

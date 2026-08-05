@@ -55,6 +55,7 @@ class App:
             sample_rate=config.audio.sample_rate,
             frame_samples=config.audio.frame_samples,
             device=config.audio.input_device,
+            latency=config.audio.input_latency,
         )
         sink = SounddeviceSink(
             device=config.audio.output_device,
