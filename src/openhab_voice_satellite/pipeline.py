@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import Awaitable, Callable, Protocol
+from typing import Callable, Protocol
 
 import numpy as np
 
