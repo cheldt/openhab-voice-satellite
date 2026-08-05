@@ -92,31 +92,40 @@ def test_deepgram_engine_requires_key(monkeypatch):
     Config.model_validate({"tts": {"engine": "deepgram"}})
 
 
-def test_default_language_must_have_voice():
-    with pytest.raises(ValueError):
+def test_default_language_must_have_kokoro_voice():
+    en_only = {
+        "voices": {
+            "en": {
+                "model": "x.onnx",
+                "voices": "v.bin",
+                "voice": "bf_emma",
+                "lang": "en-gb",
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="kokoro voice"):
+        Config.model_validate({"tts": {"default_language": "de"}, "kokoro": en_only})
+    # also enforced for cloud engines (kokoro is their fallback)
+    with pytest.raises(ValueError, match="kokoro voice"):
         Config.model_validate(
             {
-                "tts": {
-                    "voices": {
-                        "en": {
-                            "model": "x.onnx",
-                            "voices": "v.bin",
-                            "voice": "bf_emma",
-                            "lang": "en-gb",
-                        }
-                    },
-                    "default_language": "de",
-                }
+                "tts": {"engine": "deepgram", "default_language": "de"},
+                "kokoro": en_only,
+                "deepgram": {"api_key": "k"},
             }
         )
+    # engine piper does not require kokoro coverage
+    Config.model_validate(
+        {"tts": {"engine": "piper", "default_language": "de"}, "kokoro": en_only}
+    )
 
 
-def test_tts_voice_defaults():
+def test_kokoro_voice_defaults():
     config = Config()
-    assert config.tts.voices["de"].voice == "martin"
-    assert config.tts.voices["de"].lang == "de"
-    assert config.tts.voices["en"].voice == "bf_emma"
-    assert config.tts.voices["en"].speed == 1.0
+    assert config.kokoro.voices["de"].voice == "martin"
+    assert config.kokoro.voices["de"].lang == "de"
+    assert config.kokoro.voices["en"].voice == "bf_emma"
+    assert config.kokoro.voices["en"].speed == 1.0
 
 
 def test_piper_engine_and_defaults():

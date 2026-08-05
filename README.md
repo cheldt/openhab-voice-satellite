@@ -103,7 +103,7 @@ Everything lives in one YAML file — see the extensively commented
 | `barge_in.resume_listening` | wakeword during playback → listen for new command |
 | `dialog.enabled` | every answer re-opens the mic for a follow-up (no wakeword); context is kept server-side via a conversation id |
 | `dialog.followup_timeout_s` | follow-up silence that ends the conversation (first turn uses `vad.no_speech_timeout_s`) |
-| `tts.voices` | Kokoro model/voices/voice/lang/speed per language code |
+| `kokoro.voices` | Kokoro model/voices/voice/lang/speed per language code (engine `kokoro` + cloud fallback) |
 | `piper.voices` | Piper `.onnx` model path per language code (engine `piper` only) |
 
 ## Barge-in and echo

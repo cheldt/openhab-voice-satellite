@@ -40,7 +40,11 @@ openhab:
 
 tts:
   engine: "kokoro"          # "kokoro"/"piper" = local; "gemini"/"deepgram" = cloud TTS, falls back to kokoro on failure
-  voices:                   # kokoro voices (used when engine is "kokoro" and as cloud fallback)
+  default_language: "de"
+
+# Used when tts.engine is "kokoro" and as fallback for the cloud engines.
+kokoro:
+  voices:
     de:
       model: "models/kokoro/kokoro-martin.onnx"
       voices: "models/kokoro/voices-martin.npz"
@@ -53,7 +57,6 @@ tts:
       voice: "bf_emma"         # any voice from voices-v1.0.bin
       lang: "en-gb"
       speed: 1.0
-  default_language: "de"
 
 # Only used when tts.engine is "piper" (language -> .onnx model, sidecar .onnx.json next to it).
 # piper:

@@ -18,7 +18,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 _KOKORO_RELEASE = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
 _KOKORO_MARTIN = "https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin/resolve/main"
 # A smaller/faster English model exists at the same release tag:
-# kokoro-v1.0.int8.onnx (92 MB) — point tts.voices.en.model at it if fp32 is too slow.
+# kokoro-v1.0.int8.onnx (92 MB) — point kokoro.voices.en.model at it if fp32 is too slow.
 KOKORO_FILES = {
     "kokoro-v1.0.onnx": f"{_KOKORO_RELEASE}/kokoro-v1.0.onnx",
     "voices-v1.0.bin": f"{_KOKORO_RELEASE}/voices-v1.0.bin",

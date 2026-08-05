@@ -65,7 +65,7 @@ class App:
             speaker: SpeakerProtocol = PiperSpeaker(config.piper, config.tts, sink, self._base_dir)
         else:
             # kokoro; also stays loaded as fallback for the cloud engines
-            speaker = Speaker(config.tts, sink, self._base_dir)
+            speaker = Speaker(config.kokoro, config.tts, sink, self._base_dir)
 
         broadcaster = AudioBroadcaster(source)
         wake_queue = broadcaster.subscribe()

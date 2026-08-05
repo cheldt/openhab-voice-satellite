@@ -71,41 +71,9 @@ class OpenHABConfig(BaseModel):
         return os.environ.get("OPENHAB_TOKEN") or self.api_token
 
 
-class TtsVoiceConfig(BaseModel):
-    model: str  # Kokoro .onnx model path
-    voices: str  # voice-styles file (.bin / .npz)
-    voice: str  # voice name inside the styles file, e.g. "bf_emma", "martin"
-    lang: str  # espeak phonemizer code: "en-gb", "de"
-    speed: float = Field(1.0, gt=0.5, le=2.0)
-
-
 class TtsConfig(BaseModel):
     engine: Literal["kokoro", "gemini", "deepgram", "piper"] = "kokoro"
-    voices: dict[str, TtsVoiceConfig] = Field(
-        default_factory=lambda: {
-            "de": TtsVoiceConfig(
-                model="models/kokoro/kokoro-martin.onnx",
-                voices="models/kokoro/voices-martin.npz",
-                voice="martin",
-                lang="de",
-            ),
-            "en": TtsVoiceConfig(
-                model="models/kokoro/kokoro-v1.0.onnx",
-                voices="models/kokoro/voices-v1.0.bin",
-                voice="bf_emma",
-                lang="en-gb",
-            ),
-        }
-    )
     default_language: str = "de"
-
-    @field_validator("default_language")
-    @classmethod
-    def _known_default(cls, v: str, info) -> str:
-        voices = info.data.get("voices")
-        if voices and v not in voices:
-            raise ValueError(f"tts.default_language {v!r} has no voice configured")
-        return v
 
 
 class GeminiConfig(BaseModel):
@@ -152,6 +120,33 @@ class DeepgramConfig(BaseModel):
         return os.environ.get("DEEPGRAM_API_KEY") or self.api_key
 
 
+class KokoroVoiceConfig(BaseModel):
+    model: str  # Kokoro .onnx model path
+    voices: str  # voice-styles file (.bin / .npz)
+    voice: str  # voice name inside the styles file, e.g. "bf_emma", "martin"
+    lang: str  # espeak phonemizer code: "en-gb", "de"
+    speed: float = Field(1.0, gt=0.5, le=2.0)
+
+
+class KokoroConfig(BaseModel):
+    voices: dict[str, KokoroVoiceConfig] = Field(
+        default_factory=lambda: {
+            "de": KokoroVoiceConfig(
+                model="models/kokoro/kokoro-martin.onnx",
+                voices="models/kokoro/voices-martin.npz",
+                voice="martin",
+                lang="de",
+            ),
+            "en": KokoroVoiceConfig(
+                model="models/kokoro/kokoro-v1.0.onnx",
+                voices="models/kokoro/voices-v1.0.bin",
+                voice="bf_emma",
+                lang="en-gb",
+            ),
+        }
+    )
+
+
 class PiperConfig(BaseModel):
     voices: dict[str, str] = Field(  # language -> .onnx model path (sidecar .onnx.json expected)
         default_factory=lambda: {
@@ -191,6 +186,7 @@ class Config(BaseModel):
     tts: TtsConfig = Field(default_factory=TtsConfig)
     gemini: GeminiConfig = Field(default_factory=GeminiConfig)
     deepgram: DeepgramConfig = Field(default_factory=DeepgramConfig)
+    kokoro: KokoroConfig = Field(default_factory=KokoroConfig)
     piper: PiperConfig = Field(default_factory=PiperConfig)
     barge_in: BargeInConfig = Field(default_factory=BargeInConfig)
     dialog: DialogConfig = Field(default_factory=DialogConfig)
@@ -211,10 +207,17 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _piper_default_voice(self) -> Config:
-        if self.tts.engine == "piper" and self.tts.default_language not in self.piper.voices:
+    def _tts_default_voice(self) -> Config:
+        lang = self.tts.default_language
+        if self.tts.engine == "piper":
+            if lang not in self.piper.voices:
+                raise ValueError(
+                    f"tts.default_language {lang!r} has no piper voice configured"
+                )
+        # kokoro is the engine or the cloud fallback
+        elif lang not in self.kokoro.voices:
             raise ValueError(
-                f"tts.default_language {self.tts.default_language!r} has no piper voice configured"
+                f"tts.default_language {lang!r} has no kokoro voice configured"
             )
         return self
 

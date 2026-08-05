@@ -76,7 +76,7 @@ def _check(config_path: Path) -> int:
         def resolve(p: str) -> Path:
             return Path(p) if Path(p).is_absolute() else base_dir / p
 
-        for lang, vc in config.tts.voices.items():
+        for lang, vc in config.kokoro.voices.items():
             kokoro = Kokoro(str(resolve(vc.model)), str(resolve(vc.voices)))
             if vc.voice not in kokoro.get_voices():
                 raise ValueError(f"{lang}: voice {vc.voice!r} not in {Path(vc.voices).name}")

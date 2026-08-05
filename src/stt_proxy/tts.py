@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from .audio.sink import AudioSink
-from .config import TtsConfig, TtsVoiceConfig
+from .config import KokoroConfig, KokoroVoiceConfig, TtsConfig
 
 log = logging.getLogger(__name__)
 
@@ -28,17 +28,23 @@ def to_int16(samples: np.ndarray) -> np.ndarray:
 
 
 class Speaker:
-    def __init__(self, config: TtsConfig, sink: AudioSink, base_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        config: KokoroConfig,
+        tts_config: TtsConfig,
+        sink: AudioSink,
+        base_dir: Path | None = None,
+    ) -> None:
         from kokoro_onnx import Kokoro
 
         self._sink = sink
-        self._config = config
+        self._default_language = tts_config.default_language
         base = base_dir or Path.cwd()
 
         def resolve(p: str) -> Path:
             return Path(p) if Path(p).is_absolute() else base / p
 
-        self._engines: dict[str, tuple[Kokoro, TtsVoiceConfig]] = {}
+        self._engines: dict[str, tuple[Kokoro, KokoroVoiceConfig]] = {}
         cache: dict[tuple[Path, Path], Kokoro] = {}
         for lang, vc in config.voices.items():
             key = (resolve(vc.model), resolve(vc.voices))
@@ -48,7 +54,7 @@ class Speaker:
             log.info("kokoro voice loaded: %s -> %s (%s)", lang, vc.voice, key[0].name)
 
     def _synthesize_sync(
-        self, engine, vc: TtsVoiceConfig, sentence: str
+        self, engine, vc: KokoroVoiceConfig, sentence: str
     ) -> tuple[np.ndarray, int]:
         start = time.monotonic()
         samples, sample_rate = engine.create(
@@ -64,7 +70,7 @@ class Speaker:
 
     async def speak(self, text: str, language: str) -> None:
         """Speak `text`, overlapping synthesis of sentence N+1 with playback of N."""
-        engine, vc = self._engines.get(language) or self._engines[self._config.default_language]
+        engine, vc = self._engines.get(language) or self._engines[self._default_language]
         loop = asyncio.get_running_loop()
         sentences = split_sentences(text)
         if not sentences:
