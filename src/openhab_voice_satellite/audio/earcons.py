@@ -1,4 +1,4 @@
-"""Short feedback sounds (wake/ack/error), pre-decoded to PCM at startup."""
+"""Short feedback sounds (wake/ack/error/idle), pre-decoded to PCM at startup."""
 
 from __future__ import annotations
 
@@ -33,7 +33,12 @@ class Earcons:
         if not config.enabled:
             return
         base = base_dir or Path.cwd()
-        for name, rel in (("wake", config.wake), ("ack", config.ack), ("error", config.error)):
+        for name, rel in (
+            ("wake", config.wake),
+            ("ack", config.ack),
+            ("error", config.error),
+            ("idle", config.idle),
+        ):
             path = Path(rel) if Path(rel).is_absolute() else base / rel
             if path.exists():
                 self._sounds[name] = _load_wav(path)

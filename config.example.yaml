@@ -99,6 +99,7 @@ earcons:
   wake: "sounds/wake.wav"
   ack: "sounds/ack.wav"
   error: "sounds/error.wav"
+  idle: "sounds/idle.wav"
 
 logging:
   level: "INFO"

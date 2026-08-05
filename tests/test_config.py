@@ -14,6 +14,7 @@ def test_defaults():
     assert config.dialog.enabled is True
     assert config.dialog.followup_timeout_s == 6.0
     assert config.dialog.earcon == "wake"
+    assert config.earcons.idle == "sounds/idle.wav"
 
 
 def test_load_yaml(tmp_path):

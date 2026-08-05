@@ -171,6 +171,7 @@ class EarconsConfig(BaseModel):
     wake: str = "sounds/wake.wav"
     ack: str = "sounds/ack.wav"
     error: str = "sounds/error.wav"
+    idle: str = "sounds/idle.wav"
 
 
 class LoggingConfig(BaseModel):

@@ -20,7 +20,7 @@ from .gemini import GeminiClient, GeminiSpeaker, GeminiTranscriber
 from .openhab import OpenHABClient, make_session
 from .piper_tts import PiperSpeaker
 from .pipeline import Pipeline, SpeakerProtocol, TranscriberProtocol
-from .state import State
+from .state import Event, State
 from .stt import Transcriber
 from .tts import Speaker
 from .vad import SpeechEndpointer
@@ -131,13 +131,17 @@ class App:
                 await broadcaster.stop()
                 source.close()
 
-    def _start_pipeline(self, pipeline: Pipeline, play_wake_earcon: bool = True) -> None:
+    def _start_pipeline(
+        self, pipeline: Pipeline, earcons: Earcons, play_wake_earcon: bool = True
+    ) -> None:
         async def _run() -> None:
             try:
-                await pipeline.run_interaction(play_wake_earcon)
+                event = await pipeline.run_interaction(play_wake_earcon)
             finally:
                 self._set_state(State.IDLE)
                 self._pipeline_task = None
+            if event is not Event.ERROR:
+                await earcons.play("idle")
 
         self._pipeline_task = asyncio.create_task(_run(), name="interaction")
 
@@ -196,7 +200,7 @@ class App:
 
             if self.state is State.IDLE and detection == "wake":
                 detector.reset()
-                self._start_pipeline(pipeline)
+                self._start_pipeline(pipeline, earcons)
             elif self.state in (State.LISTENING, State.THINKING, State.SPEAKING):
                 # wakeword or stop-word during an interaction = barge-in
                 was_speaking = await self._cancel_pipeline(sink)
@@ -208,6 +212,6 @@ class App:
                     and was_speaking
                     and self._config.barge_in.resume_listening
                 ):
-                    self._start_pipeline(pipeline, play_wake_earcon=True)
+                    self._start_pipeline(pipeline, earcons, play_wake_earcon=True)
                 else:
-                    await earcons.play("ack")
+                    await earcons.play("idle")

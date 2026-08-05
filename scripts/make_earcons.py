@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the three feedback sounds (sounds/*.wav) as short sine sweeps."""
+"""Generate the feedback sounds (sounds/*.wav) as short sine sweeps."""
 
 from __future__ import annotations
 
@@ -38,3 +38,4 @@ if __name__ == "__main__":
     write("wake.wav", tone([660, 880]))          # rising: I'm listening
     write("ack.wav", tone([880]))                # single blip: got it, thinking
     write("error.wav", tone([440, 330], 0.15))   # falling: something failed
+    write("idle.wav", tone([880, 660]))          # falling: session over, idle
