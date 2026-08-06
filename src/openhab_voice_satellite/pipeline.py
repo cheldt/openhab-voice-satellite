@@ -14,9 +14,9 @@ import numpy as np
 
 from .audio.broadcast import AudioBroadcaster
 from .audio.earcons import Earcons
-from .audio.wav import write_wav
+from .audio.wav import rms, write_wav
 from .config import Config
-from .openhab import OpenHABClient
+from .openhab import OpenHABClient, OpenHABTimeoutError
 from .recorder import NoSpeechError, record_utterance
 from .state import Event, State
 from .stt import Transcript
@@ -113,7 +113,7 @@ class Pipeline:
                 if not dialog.enabled:
                     return Event.PLAYBACK_DONE
                 round_no += 1
-        except TimeoutError:
+        except OpenHABTimeoutError:
             log.error("openHAB response timed out")
             await self._earcons.play("error")
             return Event.ERROR
@@ -136,6 +136,23 @@ class Pipeline:
             log.info("utterance dumped: %s", path)
         except OSError:
             log.exception("utterance dump failed")
+
+    async def close(self) -> None:
+        """Drain outstanding conversation-DELETE tasks.
+
+        Runs on shutdown while the openHAB session is still open, so the
+        server-side conversations actually get deleted instead of the tasks
+        being destroyed pending at loop close.
+        """
+        if not self._cleanup_tasks:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*self._cleanup_tasks, return_exceptions=True),
+                timeout=5.0,
+            )
+        except asyncio.TimeoutError:
+            log.warning("conversation cleanup timed out")
 
     def _schedule_conversation_end(self, conversation_id: str) -> None:
         """Fire-and-forget server-side conversation DELETE.
@@ -171,10 +188,9 @@ class Pipeline:
         finally:
             self._broadcaster.unsubscribe(frames)
 
-        rms = int(np.sqrt(np.mean(pcm.astype(np.float64) ** 2))) if len(pcm) else 0
         log.info(
             "utterance captured: %.1fs rms=%d",
-            len(pcm) / self._config.audio.sample_rate, rms,
+            len(pcm) / self._config.audio.sample_rate, rms(pcm),
         )
         self._dump_utterance(pcm)
 

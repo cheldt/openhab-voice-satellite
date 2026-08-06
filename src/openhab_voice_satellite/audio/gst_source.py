@@ -9,7 +9,7 @@ from typing import AsyncIterator
 import numpy as np
 
 from .chunker import FrameChunker
-from .gst_common import gst_init, install_sync_handler, s16_mono_caps
+from .gst_common import capture_description, gst_init, install_sync_handler
 from .gst_devices import resolve_node
 
 log = logging.getLogger(__name__)
@@ -48,14 +48,7 @@ class PipewireSource:
 
     @staticmethod
     def _describe(target: str | None, sample_rate: int) -> str:
-        # appsink max-buffers/drop is only a safety net; the drop-oldest
-        # policy lives in the asyncio queue
-        t = f'target-object="{target}" ' if target else ""
-        return (
-            f"pipewiresrc client-name=openhab-voice-satellite {t}"
-            f"! audioconvert ! audioresample ! {s16_mono_caps(sample_rate)} "
-            f"! appsink name=sink emit-signals=true sync=false max-buffers=8 drop=true"
-        )
+        return capture_description(target, sample_rate)
 
     def _on_sample(self, appsink):
         # runs on the GStreamer streaming thread

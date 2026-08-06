@@ -12,6 +12,10 @@ from .config import OpenHABConfig
 log = logging.getLogger(__name__)
 
 
+class OpenHABTimeoutError(Exception):
+    """openHAB did not answer within response_timeout_s."""
+
+
 def make_session(config: OpenHABConfig) -> aiohttp.ClientSession:
     """ClientSession honoring `verify_ssl` (self-signed certificates)."""
     connector = None
@@ -54,15 +58,20 @@ class OpenHABClient:
             "Accept": "text/plain",
         }
         timeout = aiohttp.ClientTimeout(total=self._config.response_timeout_s)
-        async with self._session.post(
-            url, data=text.encode(), params=params or None, headers=headers, timeout=timeout
-        ) as resp:
-            body = (await resp.text()).strip()
-            if resp.status >= 400:
-                # the interpreter puts the actual error message in the body
-                log.error("interpreter returned HTTP %d: %s", resp.status, body[:500])
-            resp.raise_for_status()
-            return body
+        try:
+            async with self._session.post(
+                url, data=text.encode(), params=params or None, headers=headers, timeout=timeout
+            ) as resp:
+                body = (await resp.text()).strip()
+                if resp.status >= 400:
+                    # the interpreter puts the actual error message in the body
+                    log.error("interpreter returned HTTP %d: %s", resp.status, body[:500])
+                resp.raise_for_status()
+                return body
+        except TimeoutError as exc:
+            raise OpenHABTimeoutError(
+                f"no answer within {self._config.response_timeout_s:.0f}s"
+            ) from exc
 
     async def end_conversation(self, conversation_id: str) -> None:
         """Best-effort DELETE of a server-side conversation; never raises."""

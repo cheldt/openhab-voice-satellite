@@ -17,9 +17,9 @@ SAMPLE_RATE = 16000
 BaseUrl = Annotated[str, AfterValidator(lambda v: v.rstrip("/"))]
 
 
-def resolve_path(p: str, base: Path) -> Path:
+def _resolve_path(p: str, base: Path) -> str:
     """Resolve a config path: relative paths are relative to the config file."""
-    return Path(p) if Path(p).is_absolute() else base / p
+    return p if Path(p).is_absolute() else str(base / p)
 
 
 class AudioConfig(BaseModel):
@@ -196,8 +196,26 @@ class Config(BaseModel):
         return self
 
 
+def _resolve_config_paths(config: Config, base: Path) -> Config:
+    """Rewrite config-relative paths to absolute ones, relative to `base`.
+
+    Done once at load time so no consumer needs to know where the config
+    file lives. A Config constructed directly (tests) keeps its paths
+    verbatim — they then resolve relative to the working directory.
+    """
+    config.piper.voices = {
+        lang: _resolve_path(p, base) for lang, p in config.piper.voices.items()
+    }
+    earcons = config.earcons
+    earcons.wake, earcons.ack, earcons.error, earcons.idle = (
+        _resolve_path(p, base)
+        for p in (earcons.wake, earcons.ack, earcons.error, earcons.idle)
+    )
+    return config
+
+
 def load_config(path: str | Path) -> Config:
     path = Path(path)
     with path.open("r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
-    return Config.model_validate(data)
+    return _resolve_config_paths(Config.model_validate(data), path.resolve().parent)

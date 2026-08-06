@@ -174,14 +174,10 @@ def probe_capture(node_name: str | None, sample_rate: int, timeout_s: float = 5.
     """
     import threading
 
-    from .gst_common import gst_init, s16_mono_caps
+    from .gst_common import capture_description, gst_init
 
     Gst = gst_init()
-    target = f'target-object="{node_name}" ' if node_name else ""
-    pipeline = Gst.parse_launch(
-        f"pipewiresrc {target}! audioconvert ! audioresample ! "
-        f"{s16_mono_caps(sample_rate)} ! appsink name=sink emit-signals=true sync=false"
-    )
+    pipeline = Gst.parse_launch(capture_description(node_name, sample_rate))
     got_sample = threading.Event()
 
     def on_sample(sink):

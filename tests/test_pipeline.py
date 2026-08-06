@@ -61,8 +61,7 @@ def _make_pipeline(config, openhab, broadcaster, sink, speaker,
 
 async def _await_cleanup(pipeline: Pipeline) -> None:
     """Wait for the fire-and-forget conversation DELETE tasks."""
-    if pipeline._cleanup_tasks:
-        await asyncio.gather(*pipeline._cleanup_tasks)
+    await pipeline.close()
 
 
 async def test_full_interaction(env):
@@ -218,3 +217,24 @@ async def test_openhab_timeout_returns_error(env):
     # the POST was attempted, so the conversation still gets deleted
     await _await_cleanup(pipeline)
     assert fake_oh.deleted == [fake_oh.conversations[0]]
+
+
+async def test_timeout_elsewhere_is_not_an_openhab_timeout(env, caplog):
+    # a TimeoutError leaked by any other component must hit the generic
+    # failure path (with traceback), not be misread as an openHAB timeout
+    config, fake_oh, openhab, broadcaster = env
+
+    class TimingOutSpeaker:
+        async def speak(self, text: str, language: str) -> None:
+            raise TimeoutError("tts hung")
+
+    states: list[State] = []
+    pipeline = _make_pipeline(config, openhab, broadcaster, BufferAudioSink(),
+                              TimingOutSpeaker(), states)
+
+    result = await pipeline.run_interaction()
+
+    assert result is Event.ERROR
+    assert "openHAB response timed out" not in caplog.text
+    assert "pipeline failed" in caplog.text
+    await _await_cleanup(pipeline)

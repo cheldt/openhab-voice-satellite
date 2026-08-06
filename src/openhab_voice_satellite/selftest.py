@@ -13,10 +13,10 @@ from typing import Awaitable, Callable
 
 import numpy as np
 
-from .config import Config, resolve_path
+from .config import Config
 
 
-def check_audio(config: Config, base_dir: Path) -> None:
+def check_audio(config: Config) -> None:
     from .audio.gst_devices import probe_capture, resolve_node
 
     input_node = resolve_node(config.audio.input_device, "input")
@@ -26,38 +26,38 @@ def check_audio(config: Config, base_dir: Path) -> None:
     probe_capture(input_node, config.audio.sample_rate)
 
 
-def check_wakeword(config: Config, base_dir: Path) -> None:
+def check_wakeword(config: Config) -> None:
     from .wakeword import WakewordDetector
 
     detector = WakewordDetector(config.wakeword)
     detector.process(np.zeros(config.audio.frame_samples, dtype=np.int16))
 
 
-def check_vad(config: Config, base_dir: Path) -> None:
+def check_vad(config: Config) -> None:
     from .vad import SpeechEndpointer
 
     endpointer = SpeechEndpointer(config.vad)
     endpointer.update(np.zeros(config.audio.frame_samples, dtype=np.int16))
 
 
-def check_stt(config: Config, base_dir: Path) -> None:
+def check_stt(config: Config) -> None:
     from .stt import Transcriber
 
     transcriber = Transcriber(config.stt, config.tts.default_language)
     transcriber._transcribe_sync(np.zeros(16000, dtype=np.int16))
 
 
-def check_piper(config: Config, base_dir: Path) -> None:
+def check_piper(config: Config) -> None:
     from piper import PiperVoice
 
     for lang, model_path in config.piper.voices.items():
-        path = resolve_path(model_path, base_dir)
+        path = Path(model_path)
         if not path.exists():
             raise FileNotFoundError(f"{lang}: piper model missing: {path}")
         PiperVoice.load(str(path))
 
 
-async def check_gemini(config: Config, base_dir: Path) -> None:
+async def check_gemini(config: Config) -> None:
     import aiohttp
 
     from .gemini import GeminiClient
@@ -70,7 +70,7 @@ async def check_gemini(config: Config, base_dir: Path) -> None:
             await client.check_model(config.gemini.tts_model)
 
 
-async def check_deepgram(config: Config, base_dir: Path) -> None:
+async def check_deepgram(config: Config) -> None:
     import aiohttp
 
     from .deepgram import DeepgramClient
@@ -79,14 +79,14 @@ async def check_deepgram(config: Config, base_dir: Path) -> None:
         await DeepgramClient(config.deepgram, session).check_auth()
 
 
-async def check_openhab(config: Config, base_dir: Path) -> None:
+async def check_openhab(config: Config) -> None:
     from .openhab import OpenHABClient, make_session
 
     async with make_session(config.openhab) as session:
         await OpenHABClient(config.openhab, session).ping()
 
 
-Check = Callable[[Config, Path], None | Awaitable[None]]
+Check = Callable[[Config], None | Awaitable[None]]
 
 
 def select_checks(config: Config) -> list[tuple[str, Check]]:
@@ -107,14 +107,16 @@ def select_checks(config: Config) -> list[tuple[str, Check]]:
     return checks
 
 
-async def run_checks(config: Config, base_dir: Path) -> int:
+async def run_checks(config: Config, checks: list[tuple[str, Check]] | None = None) -> int:
     """Run all selected checks; returns the process exit code."""
+    if checks is None:
+        checks = select_checks(config)
     print("openhab-voice-satellite self-test")
     failures = 0
-    for name, check in select_checks(config):
+    for name, check in checks:
         start = time.monotonic()
         try:
-            result = check(config, base_dir)
+            result = check(config)
             if asyncio.iscoroutine(result):
                 await result
             print(f"  ok   {name} ({time.monotonic() - start:.1f}s)")

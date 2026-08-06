@@ -6,7 +6,6 @@ import asyncio
 import logging
 import time
 from contextlib import AsyncExitStack
-from pathlib import Path
 
 import aiohttp
 import numpy as np
@@ -15,6 +14,7 @@ from .audio.broadcast import AudioBroadcaster
 from .audio.earcons import Earcons
 from .audio.io import audio_io, verify_links
 from .audio.sink import AudioSink
+from .audio.wav import rms
 from .config import Config
 from .deepgram import DeepgramClient, DeepgramSpeaker, DeepgramTranscriber
 from .fallback import FallbackSpeaker, FallbackTranscriber, LazySpeaker
@@ -53,7 +53,7 @@ class _CaptureHealth:
 
     def observe(self, frame: np.ndarray, score: float) -> None:
         self._frames += 1
-        self._rms = max(self._rms, int(np.sqrt(np.mean(frame.astype(np.float64) ** 2))))
+        self._rms = max(self._rms, rms(frame))
         self._score = max(self._score, score)
         now = time.monotonic()
         if now - self._start < HEARTBEAT_S:
@@ -99,12 +99,12 @@ class _DuckController:
         sink.unduck()
 
 
-def _build_speaker(config: Config, sink: AudioSink, base_dir: Path) -> SpeakerProtocol:
+def _build_speaker(config: Config, sink: AudioSink) -> SpeakerProtocol:
     """The local TTS engine (or its lazy stand-in when a cloud engine is primary)."""
     if config.tts.engine == "piper":
-        return PiperSpeaker(config.piper, config.tts, sink, base_dir)
+        return PiperSpeaker(config.piper, config.tts, sink)
     # cloud engine primary: piper stays the fallback but loads on first use
-    return LazySpeaker(lambda: PiperSpeaker(config.piper, config.tts, sink, base_dir))
+    return LazySpeaker(lambda: PiperSpeaker(config.piper, config.tts, sink))
 
 
 async def _build_engines(
@@ -152,9 +152,8 @@ async def _build_engines(
 
 
 class App:
-    def __init__(self, config: Config, base_dir: Path | None = None) -> None:
+    def __init__(self, config: Config) -> None:
         self._config = config
-        self._base_dir = base_dir or Path.cwd()
         self.state = State.IDLE
         self._pipeline_task: asyncio.Task | None = None
 
@@ -171,8 +170,8 @@ class App:
 
         async with AsyncExitStack() as stack:
             source, sink = await stack.enter_async_context(audio_io(config.audio))
-            earcons = Earcons(config.earcons, sink, self._base_dir)
-            speaker = _build_speaker(config, sink, self._base_dir)
+            earcons = Earcons(config.earcons, sink)
+            speaker = _build_speaker(config, sink)
 
             broadcaster = AudioBroadcaster(source)
             wake_queue = broadcaster.subscribe()
@@ -234,7 +233,7 @@ class App:
             pass
         self._set_state(State.IDLE)
         self._pipeline_task = None
-        log.info("interaction cancelled (barge-in)")
+        log.info("interaction cancelled")
         return was_speaking
 
     async def _interrupt_monitor(
@@ -249,42 +248,49 @@ class App:
         audio = self._config.audio
         health = _CaptureHealth(audio.sample_rate / audio.frame_samples)
         duck = _DuckController()
-        while True:
-            try:
-                frame = await asyncio.wait_for(wake_queue.get(), timeout=MIC_STALL_WARN_S)
-            except asyncio.TimeoutError:
-                log.warning(
-                    "no mic frames for %.0fs — capture stream stalled?", MIC_STALL_WARN_S
-                )
-                health.restart()
-                continue
-            if frame is None:
-                log.info("audio source closed, monitor exiting")
-                return
+        try:
+            while True:
+                try:
+                    frame = await asyncio.wait_for(wake_queue.get(), timeout=MIC_STALL_WARN_S)
+                except asyncio.TimeoutError:
+                    log.warning(
+                        "no mic frames for %.0fs — capture stream stalled?", MIC_STALL_WARN_S
+                    )
+                    health.restart()
+                    continue
+                if frame is None:
+                    log.info("audio source closed, monitor exiting")
+                    return
 
-            speaking = self.state in (State.THINKING, State.SPEAKING)
-            detection = detector.process(frame, speaking=speaking)
-            score = detector.score("wake")
-            health.observe(frame, score)
-            duck.update(self.state is State.SPEAKING, score, sink)
+                speaking = self.state in (State.THINKING, State.SPEAKING)
+                detection = detector.process(frame, speaking=speaking)
+                score = detector.score("wake")
+                health.observe(frame, score)
+                duck.update(self.state is State.SPEAKING, score, sink)
 
-            if detection is None:
-                continue
+                if detection is None:
+                    continue
 
-            if self.state is State.IDLE and detection == "wake":
-                log.info("wakeword detected (score %.2f)", score)
-                detector.reset()
-                self._start_pipeline(pipeline, earcons)
-            elif self.state in (State.LISTENING, State.THINKING, State.SPEAKING):
-                # wakeword or stop-word during an interaction = barge-in
-                was_speaking = await self._cancel_pipeline(sink)
-                duck.release(sink)
-                detector.reset()
-                if (
-                    detection == "wake"
-                    and was_speaking
-                    and self._config.barge_in.resume_listening
-                ):
-                    self._start_pipeline(pipeline, earcons, play_wake_earcon=True)
-                else:
-                    await earcons.play("idle")
+                if self.state is State.IDLE and detection == "wake":
+                    log.info("wakeword detected (score %.2f)", score)
+                    detector.reset()
+                    self._start_pipeline(pipeline, earcons)
+                elif self.state in (State.LISTENING, State.THINKING, State.SPEAKING):
+                    # wakeword or stop-word during an interaction = barge-in
+                    was_speaking = await self._cancel_pipeline(sink)
+                    duck.release(sink)
+                    detector.reset()
+                    if (
+                        detection == "wake"
+                        and was_speaking
+                        and self._config.barge_in.resume_listening
+                    ):
+                        self._start_pipeline(pipeline, earcons, play_wake_earcon=True)
+                    else:
+                        await earcons.play("idle")
+        finally:
+            # shutdown (source closed or Ctrl-C): a still-running interaction
+            # must die, and its conversation cleanup finish, before App.run's
+            # exit stack closes the session and sink they use
+            await self._cancel_pipeline(sink)
+            await pipeline.close()

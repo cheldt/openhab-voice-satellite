@@ -18,10 +18,14 @@ def _write_wav(path, samples=160, rate=16000):
 
 
 def _make_earcons(tmp_path, sink, **config_kwargs) -> Earcons:
+    # load_config resolves the paths, so Earcons only ever sees absolute ones
     (tmp_path / "sounds").mkdir(exist_ok=True)
+    paths = {}
     for name in ("wake", "ack", "error", "idle"):
-        _write_wav(tmp_path / "sounds" / f"{name}.wav")
-    return Earcons(EarconsConfig(**config_kwargs), sink, base_dir=tmp_path)
+        path = tmp_path / "sounds" / f"{name}.wav"
+        _write_wav(path)
+        paths[name] = str(path)
+    return Earcons(EarconsConfig(**paths | config_kwargs), sink)
 
 
 async def test_idle_earcon_loads_and_plays(tmp_path):

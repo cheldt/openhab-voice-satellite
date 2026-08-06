@@ -32,9 +32,8 @@ class PartialSpeechError(CloudEngineError):
 
 
 # Failures that mean "cloud unusable right now" — everything else propagates.
-# TimeoutError must be consumed here: the pipeline treats a leaked TimeoutError
-# as an openHAB timeout. CancelledError (barge-in) is not an Exception and
-# passes through both wrappers untouched.
+# CancelledError (barge-in) is not an Exception and passes through both
+# wrappers untouched.
 FALLBACK_ERRORS = (CloudEngineError, aiohttp.ClientError, TimeoutError, json.JSONDecodeError)
 
 
@@ -58,21 +57,25 @@ class LazySpeaker:
     Used when a cloud TTS engine is primary: the local models then only load
     on the first fallback instead of costing RAM and startup time up front.
     Construction runs in the executor so the multi-second model load never
-    blocks the event loop (and with it the wakeword monitor).
+    blocks the event loop (and with it the wakeword monitor). The load future
+    is memoized and shielded: a barge-in cancel mid-load keeps the in-flight
+    load instead of triggering a second, concurrent one on the next fallback.
     """
 
     def __init__(self, factory: Callable[[], object]) -> None:
         self._factory = factory
-        self._speaker: object | None = None
-        self._lock = asyncio.Lock()
+        self._load: asyncio.Future | None = None
 
     async def speak(self, text: str, language: str) -> None:
-        async with self._lock:
-            if self._speaker is None:
-                log.info("loading local TTS fallback on first use")
-                loop = asyncio.get_running_loop()
-                self._speaker = await loop.run_in_executor(None, self._factory)
-        await self._speaker.speak(text, language)
+        if self._load is None:  # no await between check and assign: race-free
+            log.info("loading local TTS fallback on first use")
+            self._load = asyncio.get_running_loop().run_in_executor(None, self._factory)
+        try:
+            speaker = await asyncio.shield(self._load)
+        except Exception:
+            self._load = None  # failed load: the next fallback retries
+            raise
+        await speaker.speak(text, language)
 
 
 class FallbackSpeaker:

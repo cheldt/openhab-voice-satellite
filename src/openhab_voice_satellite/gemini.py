@@ -16,6 +16,7 @@ from .cloud import pick_voice, raise_for_status
 from .config import SAMPLE_RATE, GeminiConfig, SttConfig, TtsConfig
 from .fallback import CloudEngineError
 from .stt import Transcript
+from .tts import play_pipelined, tts_chunks
 
 log = logging.getLogger(__name__)
 
@@ -128,31 +129,39 @@ class GeminiSpeaker:
         return voice
 
     async def speak(self, text: str, language: str) -> None:
-        if not text.strip():
+        """Speak `text`, overlapping the fetch of chunk N+1 with playback of N.
+
+        Chunking keeps each generateContent request well under tts_timeout_s
+        (the model synthesizes the whole request before responding) and lets
+        a mid-utterance failure fall back with only the unspoken remainder.
+        """
+        chunks = tts_chunks(text)
+        if not chunks:
             return
-        payload = {
-            "contents": [{"parts": [{"text": text}]}],
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "speechConfig": {
-                    "voiceConfig": {
-                        "prebuiltVoiceConfig": {"voiceName": self._voice(language)}
-                    }
-                },
-            },
-        }
+        voice = self._voice(language)
         config = self._client.config
-        response = await self._client.generate(
-            config.tts_model, payload, config.tts_timeout_s
-        )
-        try:
-            part = response["candidates"][0]["content"]["parts"][0]["inlineData"]
-            raw = base64.b64decode(part["data"])
-            mime = part.get("mimeType", "")
-        except (KeyError, IndexError, TypeError) as exc:
-            raise GeminiError(f"malformed TTS response: {exc}") from exc
-        match = _RATE_RE.search(mime)
-        rate = int(match.group(1)) if match else DEFAULT_TTS_RATE
-        pcm = np.frombuffer(raw, dtype=np.int16)
-        if len(pcm):
-            await self._sink.play(pcm, rate)
+
+        async def fetch(chunk: str) -> tuple[np.ndarray, int]:
+            payload = {
+                "contents": [{"parts": [{"text": chunk}]}],
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": {
+                        "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}
+                    },
+                },
+            }
+            response = await self._client.generate(
+                config.tts_model, payload, config.tts_timeout_s
+            )
+            try:
+                part = response["candidates"][0]["content"]["parts"][0]["inlineData"]
+                raw = base64.b64decode(part["data"])
+                mime = part.get("mimeType", "")
+            except (KeyError, IndexError, TypeError) as exc:
+                raise GeminiError(f"malformed TTS response: {exc}") from exc
+            match = _RATE_RE.search(mime)
+            rate = int(match.group(1)) if match else DEFAULT_TTS_RATE
+            return np.frombuffer(raw, dtype=np.int16), rate
+
+        await play_pipelined(chunks, fetch, self._sink)

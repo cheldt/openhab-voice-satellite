@@ -56,12 +56,9 @@ class Monitor:
         return self
 
     async def __aexit__(self, *exc):
-        self.queue.put_nowait(None)  # source-closed sentinel ends the monitor
-        await asyncio.wait_for(self.task, timeout=2.0)
-        if self.app._pipeline_task is not None:
-            self.app._pipeline_task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await self.app._pipeline_task
+        if not self.task.done():  # a test may have cancelled the monitor itself
+            self.queue.put_nowait(None)  # source-closed sentinel ends the monitor
+            await asyncio.wait_for(self.task, timeout=2.0)
 
     async def feed(self, n: int = 1) -> None:
         for _ in range(n):
@@ -194,6 +191,38 @@ async def test_none_frame_exits_monitor():
     assert m.task.done() and m.task.exception() is None
 
 
+async def test_monitor_exit_cancels_running_interaction():
+    # source death mid-interaction: the monitor's exit path must cancel the
+    # held interaction and close the pipeline before App.run unwinds its stack
+    detector = ScriptedDetector(detections={0: "wake"})
+    async with Monitor(
+        detector=detector,
+        pipeline_kwargs={"state_on_run": State.THINKING, "hold_s": 10.0},
+    ) as m:
+        await m.feed()  # interaction starts and holds
+        assert m.app._pipeline_task is not None
+    assert m.app._pipeline_task is None
+    assert m.app.state is State.IDLE
+    assert m.pipeline.closed
+
+
+async def test_monitor_cancellation_cancels_running_interaction():
+    # Ctrl-C path: cancelling the monitor task itself must also tear down the
+    # in-flight interaction and close the pipeline
+    detector = ScriptedDetector(detections={0: "wake"})
+    async with Monitor(
+        detector=detector,
+        pipeline_kwargs={"state_on_run": State.SPEAKING, "hold_s": 10.0},
+    ) as m:
+        await m.feed()
+        assert m.app._pipeline_task is not None
+        m.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await m.task
+        assert m.app._pipeline_task is None
+        assert m.pipeline.closed
+
+
 async def test_mic_stall_warns_and_continues(monkeypatch, caplog):
     monkeypatch.setattr(app_module, "MIC_STALL_WARN_S", 0.05)
     async with Monitor() as m:
@@ -221,11 +250,11 @@ class _StubLocalSpeaker:
         pass
 
 
-async def test_build_speaker_per_engine(monkeypatch, tmp_path):
+async def test_build_speaker_per_engine(monkeypatch):
     monkeypatch.setattr(app_module, "PiperSpeaker", _StubLocalSpeaker)
     sink = BufferAudioSink()
 
-    piper = _build_speaker(Config(), sink, tmp_path)  # piper is the default
+    piper = _build_speaker(Config(), sink)  # piper is the default
     assert isinstance(piper, _StubLocalSpeaker)
 
     cloud = _build_speaker(
@@ -233,7 +262,6 @@ async def test_build_speaker_per_engine(monkeypatch, tmp_path):
             {"tts": {"engine": "gemini"}, "gemini": {"api_key": "k"}}
         ),
         sink,
-        tmp_path,
     )
     assert isinstance(cloud, LazySpeaker)  # piper fallback loads on first use
 

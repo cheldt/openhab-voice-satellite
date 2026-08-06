@@ -105,8 +105,51 @@ async def test_lazy_speaker_constructs_once_across_concurrent_calls():
 
     lazy = LazySpeaker(factory)
     await asyncio.gather(*(lazy.speak(f"text {i}", "de") for i in range(5)))
-    assert len(constructed) == 1  # the asyncio.Lock serializes construction
+    assert len(constructed) == 1  # all callers await the same memoized load
     assert len(constructed[0].spoken) == 5
+
+
+async def test_lazy_speaker_cancel_mid_load_keeps_the_load():
+    # barge-in while the multi-second model load runs: the load must survive
+    # and the next fallback reuse it instead of loading a second model
+    started = threading.Event()
+    release = threading.Event()
+    constructed: list[LocalSpeakerStub] = []
+
+    def factory() -> LocalSpeakerStub:
+        started.set()
+        release.wait(timeout=5)
+        speaker = LocalSpeakerStub()
+        constructed.append(speaker)
+        return speaker
+
+    lazy = LazySpeaker(factory)
+    task = asyncio.create_task(lazy.speak("hi", "de"))
+    await asyncio.to_thread(started.wait, 5)  # factory is running in executor
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    release.set()
+    await lazy.speak("nochmal", "de")
+    assert len(constructed) == 1  # the interrupted load was reused, not redone
+    assert constructed[0].spoken == [("nochmal", "de")]
+
+
+async def test_lazy_speaker_failed_load_retries():
+    attempts: list[int] = []
+
+    def factory() -> LocalSpeakerStub:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise RuntimeError("model file missing")
+        return LocalSpeakerStub()
+
+    lazy = LazySpeaker(factory)
+    with pytest.raises(RuntimeError):
+        await lazy.speak("hi", "de")
+    await lazy.speak("hi", "de")  # a failed load must not be memoized
+    assert len(attempts) == 2
 
 
 async def test_lazy_speaker_constructs_in_executor():

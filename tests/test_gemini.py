@@ -14,9 +14,11 @@ from openhab_voice_satellite.gemini import (
     GeminiSpeaker,
     GeminiTranscriber,
 )
+from openhab_voice_satellite.fallback import FallbackSpeaker
 from openhab_voice_satellite.stt import Transcript
+from openhab_voice_satellite.tts import TTS_CHUNK_CHARS
 
-from .fakes import BufferAudioSink, FakeGemini
+from .fakes import BufferAudioSink, FakeGemini, LocalSpeakerStub
 
 STT_MODEL = "gemini-stt-test"
 TTS_MODEL = "gemini-tts-test"
@@ -118,6 +120,35 @@ async def test_speak_voice_per_language(fake_gemini, session):
         ]["voiceName"]
         == "Puck"
     )
+
+
+async def test_speak_long_text_pipelines_chunks(fake_gemini, session):
+    fake, _ = fake_gemini
+    sink = BufferAudioSink()
+    speaker = _speaker(fake_gemini, session, sink)
+    # 80 items of ~30 chars: 7 chunks of <=400 chars
+    text = ", ".join(f"item number {i} living room lamp" for i in range(80))
+    await speaker.speak(text, "de")
+    assert len(fake.requests) == 7
+    assert len(sink.played) == 7
+    assert all(
+        len(payload["contents"][0]["parts"][0]["text"]) <= TTS_CHUNK_CHARS
+        for _, payload in fake.requests
+    )
+
+
+async def test_speak_midstream_failure_falls_back_with_remainder(
+    fake_gemini, session, caplog
+):
+    fake, _ = fake_gemini
+    fake.generate_statuses = [200, 500]  # first chunk plays, second fails
+    sink = BufferAudioSink()
+    local = LocalSpeakerStub()
+    wrapper = FallbackSpeaker(_speaker(fake_gemini, session, sink), local, label="gemini")
+    await wrapper.speak("First sentence. Second sentence. Third sentence.", "en")
+    assert len(sink.played) == 1  # only the first chunk came from gemini
+    assert local.spoken == [("Second sentence. Third sentence.", "en")]
+    assert "local speaks the rest" in caplog.text
 
 
 async def test_speak_uses_rate_from_mime(fake_gemini, session):

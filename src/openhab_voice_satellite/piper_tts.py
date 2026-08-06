@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from .audio.sink import AudioSink
-from .config import PiperConfig, TtsConfig, resolve_path
+from .config import PiperConfig, TtsConfig
 from .tts import split_sentences, stream_synthesis
 
 log = logging.getLogger(__name__)
@@ -21,16 +21,14 @@ class PiperSpeaker:
         config: PiperConfig,
         tts_config: TtsConfig,
         sink: AudioSink,
-        base_dir: Path | None = None,
     ) -> None:
         from piper import PiperVoice
 
         self._sink = sink
         self._default_language = tts_config.default_language
-        base = base_dir or Path.cwd()
         self._voices = {}
         for lang, model_path in config.voices.items():
-            path = resolve_path(model_path, base)
+            path = Path(model_path)
             self._voices[lang] = PiperVoice.load(str(path))
             log.info("piper voice loaded: %s -> %s", lang, path.name)
 

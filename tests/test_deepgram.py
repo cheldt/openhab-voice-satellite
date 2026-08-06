@@ -8,14 +8,13 @@ from aiohttp.test_utils import TestServer
 
 from openhab_voice_satellite.config import DeepgramConfig, SttConfig, TtsConfig
 from openhab_voice_satellite.deepgram import (
-    TTS_CHUNK_CHARS,
     DeepgramClient,
     DeepgramError,
     DeepgramSpeaker,
     DeepgramTranscriber,
-    tts_chunks,
 )
 from openhab_voice_satellite.fallback import FallbackSpeaker
+from openhab_voice_satellite.tts import TTS_CHUNK_CHARS
 
 from .fakes import BufferAudioSink, FakeDeepgram, LocalSpeakerStub
 from openhab_voice_satellite.stt import Transcript
@@ -132,18 +131,6 @@ async def test_speak_voice_per_language(fake_deepgram, session):
     await speaker.speak("hello", "en")
     query, _ = fake.speak_requests[0]
     assert ("model", "aura-test-en") in query
-
-
-def test_tts_chunks_splits_long_comma_list():
-    # a "list all items" answer: one giant comma sentence
-    text = ", ".join(f"item number {i} living room lamp" for i in range(80))
-    chunks = tts_chunks(text)
-    assert len(chunks) > 1
-    assert all(len(c) <= TTS_CHUNK_CHARS for c in chunks)
-    # nothing lost apart from separators
-    assert "".join(chunks).replace(" ", "").replace(",", "") == text.replace(
-        " ", ""
-    ).replace(",", "")
 
 
 async def test_speak_long_text_pipelines_chunks(fake_deepgram, session):

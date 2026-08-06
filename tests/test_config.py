@@ -20,6 +20,26 @@ wakeword:
     assert config.wakeword.threshold == 0.6
 
 
+def test_load_resolves_paths_relative_to_config_file(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+piper:
+  voices:
+    de: models/de.onnx
+    en: /abs/en.onnx
+earcons:
+  wake: sounds/wake.wav
+"""
+    )
+    config = load_config(path)
+    # relative paths anchor at the config file's directory, absolute stay
+    assert config.piper.voices["de"] == str(tmp_path / "models/de.onnx")
+    assert config.piper.voices["en"] == "/abs/en.onnx"
+    assert config.earcons.wake == str(tmp_path / "sounds/wake.wav")
+    assert config.earcons.ack == str(tmp_path / "sounds/ack.wav")  # default too
+
+
 def test_sample_rate_is_not_configurable():
     # the whole stack (VAD, wakeword, whisper) is hardwired to 16 kHz;
     # an old config setting the key must load and be ignored

@@ -1,4 +1,4 @@
-"""Shared 16-bit PCM WAV helpers (mono read/write, in-memory encode)."""
+"""Shared 16-bit PCM helpers: WAV read/write/encode and RMS."""
 
 from __future__ import annotations
 
@@ -7,6 +7,16 @@ import wave
 from pathlib import Path
 
 import numpy as np
+
+
+def rms(pcm: np.ndarray) -> int:
+    """RMS amplitude of int16 PCM; 0 for empty input.
+
+    The float64 cast is load-bearing: squaring int16 overflows.
+    """
+    if not len(pcm):
+        return 0
+    return int(np.sqrt(np.mean(pcm.astype(np.float64) ** 2)))
 
 
 def pcm_to_wav_bytes(pcm: np.ndarray, sample_rate: int) -> bytes:

@@ -3,7 +3,7 @@ import pytest
 from aiohttp.test_utils import TestServer
 
 from openhab_voice_satellite.config import OpenHABConfig
-from openhab_voice_satellite.openhab import OpenHABClient
+from openhab_voice_satellite.openhab import OpenHABClient, OpenHABTimeoutError
 
 from .fakes import FakeOpenHAB
 
@@ -104,5 +104,7 @@ async def test_http_error_logs_body(fake_openhab, session, caplog):
 async def test_response_timeout(fake_openhab, session):
     fake, server = fake_openhab
     fake.response_delay_s = 10
-    with pytest.raises(TimeoutError):
+    # the dedicated type, not bare TimeoutError: the pipeline maps it to
+    # "openHAB timed out" and must not confuse it with other timeouts
+    with pytest.raises(OpenHABTimeoutError):
         await _client(server, session, response_timeout_s=0.2).send_command("hallo")

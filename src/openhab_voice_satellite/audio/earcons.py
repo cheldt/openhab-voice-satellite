@@ -9,25 +9,24 @@ import numpy as np
 
 from .sink import AudioSink
 from .wav import read_wav_mono
-from ..config import EarconsConfig, resolve_path
+from ..config import EarconsConfig
 
 log = logging.getLogger(__name__)
 
 
 class Earcons:
-    def __init__(self, config: EarconsConfig, sink: AudioSink, base_dir: Path | None = None) -> None:
+    def __init__(self, config: EarconsConfig, sink: AudioSink) -> None:
         self._sink = sink
         self._sounds: dict[str, tuple[np.ndarray, int]] = {}
         if not config.enabled:
             return
-        base = base_dir or Path.cwd()
-        for name, rel in (
+        for name, sound_path in (
             ("wake", config.wake),
             ("ack", config.ack),
             ("error", config.error),
             ("idle", config.idle),
         ):
-            path = resolve_path(rel, base)
+            path = Path(sound_path)
             if path.exists():
                 self._sounds[name] = read_wav_mono(path)
             else:

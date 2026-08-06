@@ -181,6 +181,7 @@ class FakePipeline:
         self._event = event
         self._hold_s = hold_s
         self.calls: list[bool] = []  # play_wake_earcon per call
+        self.closed = False
 
     async def run_interaction(self, play_wake_earcon: bool = True):
         self.calls.append(play_wake_earcon)
@@ -189,6 +190,9 @@ class FakePipeline:
         if self._hold_s:
             await asyncio.sleep(self._hold_s)
         return self._event
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class RecordingEarcons:
@@ -218,6 +222,7 @@ class FakeGemini:
         self.tts_pcm = np.arange(0, 2400, dtype=np.int16)  # short ramp
         self.tts_mime = "audio/L16;codec=pcm;rate=24000"
         self.status = 200
+        self.generate_statuses: list[int] = []  # FIFO per generateContent; falls back to `status`
         self.response_delay_s = 0.0
 
     def build_app(self) -> web.Application:
@@ -242,8 +247,9 @@ class FakeGemini:
         self.requests.append((model, payload))
         self.api_keys.append(request.headers.get("x-goog-api-key"))
         await asyncio.sleep(self.response_delay_s)
-        if self.status != 200:
-            return web.json_response({"error": {"message": "boom"}}, status=self.status)
+        status = self.generate_statuses.pop(0) if self.generate_statuses else self.status
+        if status != 200:
+            return web.json_response({"error": {"message": "boom"}}, status=status)
 
         modalities = payload.get("generationConfig", {}).get("responseModalities")
         if modalities == ["AUDIO"]:

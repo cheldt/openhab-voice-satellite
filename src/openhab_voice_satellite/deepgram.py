@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 
@@ -13,34 +12,11 @@ from .audio.sink import AudioSink
 from .audio.wav import pcm_to_wav_bytes
 from .cloud import pick_voice, raise_for_status
 from .config import SAMPLE_RATE, DeepgramConfig, SttConfig, TtsConfig
-from .fallback import FALLBACK_ERRORS, CloudEngineError, PartialSpeechError
+from .fallback import CloudEngineError
 from .stt import Transcript
-from .tts import split_sentences
+from .tts import play_pipelined, tts_chunks
 
 log = logging.getLogger(__name__)
-
-# /v1/speak synthesizes the whole request before responding, so long texts
-# (e.g. "list all items" answers) blow the timeout. Chunks this size return
-# in a few seconds and are pipelined with playback.
-TTS_CHUNK_CHARS = 400
-
-
-def tts_chunks(text: str) -> list[str]:
-    """Sentences, with oversized ones split further at commas/spaces."""
-    chunks = []
-    for sentence in split_sentences(text):
-        while len(sentence) > TTS_CHUNK_CHARS:
-            cut = sentence.rfind(", ", 0, TTS_CHUNK_CHARS)
-            if cut == -1:
-                cut = sentence.rfind(" ", 0, TTS_CHUNK_CHARS)
-            if cut == -1:
-                cut = TTS_CHUNK_CHARS
-            head, sentence = sentence[:cut].rstrip(","), sentence[cut:].lstrip(", ")
-            if head:
-                chunks.append(head)
-        if sentence:
-            chunks.append(sentence)
-    return chunks
 
 
 class DeepgramError(CloudEngineError):
@@ -158,29 +134,8 @@ class DeepgramSpeaker:
             ("container", "none"),  # raw PCM; default would be a WAV container
         ]
 
-        async def fetch(chunk: str) -> np.ndarray:
+        async def fetch(chunk: str) -> tuple[np.ndarray, int]:
             raw = await self._client.speak(chunk, params, config.tts_timeout_s)
-            return np.frombuffer(raw[: len(raw) & ~1], dtype=np.int16)
+            return np.frombuffer(raw[: len(raw) & ~1], dtype=np.int16), rate
 
-        pending: asyncio.Task | None = asyncio.create_task(fetch(chunks[0]))
-        played = False
-        try:
-            for i in range(len(chunks)):
-                current, pending = pending, None
-                try:
-                    pcm = await current
-                except FALLBACK_ERRORS as exc:
-                    if played:
-                        # some audio already out — hand only the rest to the fallback
-                        raise PartialSpeechError(
-                            str(exc), remaining=" ".join(chunks[i:])
-                        ) from exc
-                    raise
-                if i + 1 < len(chunks):
-                    pending = asyncio.create_task(fetch(chunks[i + 1]))
-                if len(pcm):
-                    await self._sink.play(pcm, rate)
-                    played = True
-        finally:
-            if pending is not None:
-                pending.cancel()
+        await play_pipelined(chunks, fetch, self._sink)

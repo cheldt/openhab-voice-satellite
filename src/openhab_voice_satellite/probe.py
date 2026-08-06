@@ -30,7 +30,8 @@ from typing import Callable
 
 import numpy as np
 
-from .config import Config, resolve_path
+from .audio.wav import rms
+from .config import Config
 from .wakeword import WakewordDetector
 
 RUN_S = 30
@@ -51,10 +52,10 @@ def _print_sources(config: Config) -> None:
     print(f"resolved capture target = {resolved!r}  (None = PipeWire default source)\n")
 
 
-def _load_earcon(config: Config, base_dir: Path) -> tuple[np.ndarray, int]:
+def _load_earcon(config: Config) -> tuple[np.ndarray, int]:
     from .audio.wav import read_wav_mono
 
-    earcon_path = resolve_path(config.earcons.wake, base_dir)
+    earcon_path = Path(config.earcons.wake)
     if earcon_path.exists():
         return read_wav_mono(earcon_path)
     print(f"(wake earcon missing at {earcon_path} — skipping playback checks)")
@@ -92,9 +93,8 @@ class _SecondStats:
         if self._samples < self._config.audio.sample_rate:
             return False
         pcm = np.concatenate(self._buf)
-        rms = int(np.sqrt(np.mean(pcm.astype(np.float64) ** 2)))
         mark = "  <-- WAKE" if self._best >= self._config.wakeword.threshold else ""
-        print(f"{self.t:>4} {rms:>7} {int(np.abs(pcm).max()):>7} {self._best:>10.3f}{mark}")
+        print(f"{self.t:>4} {rms(pcm):>7} {int(np.abs(pcm).max()):>7} {self._best:>10.3f}{mark}")
         self.peak_score = max(self.peak_score, self._best)
         self._buf.clear()
         self._samples = 0
@@ -119,12 +119,12 @@ async def _capture_loop(
     return stats.peak_score
 
 
-async def _probe(config: Config, base_dir: Path) -> None:
+async def _probe(config: Config) -> None:
     from .audio.io import audio_io, verify_links
 
     _print_sources(config)
     detector = WakewordDetector(config.wakeword)
-    earcon, earcon_rate = _load_earcon(config, base_dir)
+    earcon, earcon_rate = _load_earcon(config)
 
     async with audio_io(config.audio) as (source, sink):
         print(f"listening for {RUN_S}s — say the wakeword "
@@ -159,6 +159,6 @@ async def _probe(config: Config, base_dir: Path) -> None:
         print(f"captured audio written to {DUMP_WAV} — play it back to hear what the app hears")
 
 
-def probe_mic(config: Config, base_dir: Path) -> int:
-    asyncio.run(_probe(config, base_dir))
+def probe_mic(config: Config) -> int:
+    asyncio.run(_probe(config))
     return 0

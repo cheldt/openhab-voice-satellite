@@ -49,7 +49,8 @@ async def audio_io(audio: AudioConfig) -> AsyncIterator[tuple[PipewireSource, Pi
 
 async def verify_links(input_target: str | None, output_target: str | None) -> None:
     """Check (after WirePlumber settles) that both streams actually linked."""
+    from .gst_common import CLIENT_NAME
     from .gst_devices import verify_stream_links
 
     await asyncio.sleep(3.0)
-    await verify_stream_links("openhab-voice-satellite", input_target, output_target)
+    await verify_stream_links(CLIENT_NAME, input_target, output_target)

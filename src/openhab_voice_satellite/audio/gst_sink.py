@@ -31,7 +31,7 @@ import threading
 
 import numpy as np
 
-from .gst_common import gst_init, install_sync_handler, s16_mono_caps
+from .gst_common import CLIENT_NAME, gst_init, install_sync_handler, s16_mono_caps
 from .gst_devices import resolve_node
 
 log = logging.getLogger(__name__)
@@ -99,7 +99,7 @@ class PipewireSink:
         return (
             "appsrc name=src format=time is-live=true max-bytes=0 block=false "
             "! audioconvert ! audioresample ! volume name=vol "
-            f"! pulsesink sync=false client-name=openhab-voice-satellite {t}"
+            f"! pulsesink sync=false client-name={CLIENT_NAME} {t}"
         )
 
     def _on_error(self, err, debug) -> None:

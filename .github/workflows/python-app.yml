@@ -18,8 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # requires-python >=3.11; kokoro-onnx caps at <3.14
-        python-version: ["3.11", "3.12", "3.13"]
+        # requires-python >=3.11
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
     - uses: actions/checkout@v4

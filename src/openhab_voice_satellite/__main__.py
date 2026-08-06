@@ -50,7 +50,7 @@ def main() -> None:
         from .selftest import run_checks
 
         config = load_config(args.config)
-        sys.exit(asyncio.run(run_checks(config, args.config.resolve().parent)))
+        sys.exit(asyncio.run(run_checks(config)))
 
     if args.probe_mic:
         logging.basicConfig(format="%(levelname)-7s %(name)s: %(message)s", level=logging.INFO)
@@ -58,7 +58,7 @@ def main() -> None:
 
         from .probe import probe_mic
 
-        sys.exit(probe_mic(config, args.config.resolve().parent))
+        sys.exit(probe_mic(config))
 
     config = load_config(args.config)
     logging.basicConfig(
@@ -68,7 +68,7 @@ def main() -> None:
 
     from .app import App
 
-    app = App(config, base_dir=args.config.resolve().parent)
+    app = App(config)
     try:
         asyncio.run(app.run())
     except KeyboardInterrupt:

@@ -19,8 +19,25 @@ def gst_init():
     return _gst
 
 
+CLIENT_NAME = "openhab-voice-satellite"
+
+
 def s16_mono_caps(rate: int) -> str:
     return f"audio/x-raw,format=S16LE,rate={rate},channels=1,layout=interleaved"
+
+
+def capture_description(target: str | None, sample_rate: int) -> str:
+    """The capture pipeline, shared by the app and byte-for-byte by --check.
+
+    appsink max-buffers/drop is only a safety net; the drop-oldest policy
+    lives in the consumer's asyncio queue.
+    """
+    t = f'target-object="{target}" ' if target else ""
+    return (
+        f"pipewiresrc client-name={CLIENT_NAME} {t}"
+        f"! audioconvert ! audioresample ! {s16_mono_caps(sample_rate)} "
+        f"! appsink name=sink emit-signals=true sync=false max-buffers=8 drop=true"
+    )
 
 
 def install_sync_handler(Gst, bus, on_error, on_eos) -> None:
