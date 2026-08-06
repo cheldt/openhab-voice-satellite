@@ -57,19 +57,21 @@ of silence.
 
 ## Quick start (development machine)
 
+Audio I/O needs GStreamer + PyGObject; install the system packages first
+(see [deploy/install.md](deploy/install.md) for the apt list).
+
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
-.venv/bin/pip install --no-deps openwakeword   # see note in pyproject.toml
+.venv/bin/pip install -e ".[dev,gst]"
+.venv/bin/pip install --no-deps 'openwakeword==0.6.0'   # see note in pyproject.toml
 .venv/bin/python scripts/download_models.py
-.venv/bin/python scripts/make_earcons.py
 cp config.example.yaml config.yaml             # edit devices + openHAB url/token
 .venv/bin/openhab-voice-satellite --list-devices
 .venv/bin/openhab-voice-satellite --check
 .venv/bin/openhab-voice-satellite
 ```
 
-Tests: `.venv/bin/pytest -m "not slow"` (fast, no models needed beyond VAD).
+Tests: `.venv/bin/pytest` (fast; the GStreamer tests skip without PyGObject).
 
 Pi installation + systemd service: see [deploy/install.md](deploy/install.md).
 
