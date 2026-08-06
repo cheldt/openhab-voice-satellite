@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from typing import AsyncIterator
 
 import numpy as np
@@ -20,8 +19,6 @@ FIRST_FRAME_TIMEOUT_S = 5.0
 
 class PipewireSource:
     """16 kHz mono int16 capture in frames of `frame_samples`."""
-
-    STATUS_LOG_INTERVAL_S = 30.0
 
     def __init__(
         self,
@@ -39,8 +36,6 @@ class PipewireSource:
         self._chunker = FrameChunker(frame_samples)
         self._got_frame = False
         self._caps_logged = False
-        self._warn_count = 0
-        self._warn_last_log = float("-inf")  # first occurrence always logs
         self._pipeline = Gst.parse_launch(self._describe(target, sample_rate))
         self._pipeline.get_by_name("sink").connect("new-sample", self._on_sample)
         install_sync_handler(Gst, self._pipeline.get_bus(), self._on_error, self._on_eos)
@@ -105,11 +100,7 @@ class PipewireSource:
             )
 
     def _on_error(self, err, debug) -> None:
-        now = time.monotonic()
-        self._warn_count += 1
-        if now - self._warn_last_log >= self.STATUS_LOG_INTERVAL_S:
-            log.error("capture pipeline error: %s (%s)", err.message, debug)
-            self._warn_last_log = now
+        log.error("capture pipeline error: %s (%s)", err.message, debug)
         self._end_stream()
 
     def _on_eos(self) -> None:

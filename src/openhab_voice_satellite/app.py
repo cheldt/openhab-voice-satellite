@@ -130,7 +130,6 @@ class App:
                 transcriber=final_transcriber,
                 openhab=openhab,
                 speaker=final_speaker,
-                sink=sink,
                 earcons=earcons,
                 set_state=self._set_state,
             )

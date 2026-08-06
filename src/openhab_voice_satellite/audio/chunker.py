@@ -20,6 +20,3 @@ class FrameChunker:
         frames = [buf[i * n:(i + 1) * n].copy() for i in range(n_full)]
         self._rest = buf[n_full * n:].copy()
         return frames
-
-    def reset(self) -> None:
-        self._rest = np.empty(0, dtype=np.int16)

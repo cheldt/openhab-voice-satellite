@@ -15,7 +15,6 @@ import numpy as np
 
 from .audio.broadcast import AudioBroadcaster
 from .audio.earcons import Earcons
-from .audio.sink import AudioSink
 from .config import Config
 from .openhab import OpenHABClient
 from .recorder import NoSpeechError, record_utterance
@@ -56,7 +55,6 @@ class Pipeline:
         transcriber: TranscriberProtocol,
         openhab: OpenHABClient,
         speaker: SpeakerProtocol,
-        sink: AudioSink,
         earcons: Earcons,
         set_state: Callable[[State], None],
     ) -> None:
@@ -66,7 +64,6 @@ class Pipeline:
         self._transcriber = transcriber
         self._openhab = openhab
         self._speaker = speaker
-        self._sink = sink
         self._earcons = earcons
         self._set_state = set_state
         self._cleanup_tasks: set[asyncio.Task] = set()

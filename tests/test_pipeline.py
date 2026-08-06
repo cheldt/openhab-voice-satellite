@@ -78,7 +78,6 @@ def _make_pipeline(config, openhab, broadcaster, sink, speaker,
         transcriber=transcriber or FakeTranscriber(),
         openhab=openhab,
         speaker=speaker,
-        sink=sink,
         earcons=NullEarcons(),
         set_state=states.append,
     )

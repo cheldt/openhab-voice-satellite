@@ -47,10 +47,3 @@ def test_dtype_preserved():
     chunker = FrameChunker(frame_samples=2)
     frames = chunker.push(_samples(2))
     assert frames[0].dtype == np.int16
-
-
-def test_reset_discards_remainder():
-    chunker = FrameChunker(frame_samples=4)
-    chunker.push(_samples(3))
-    chunker.reset()
-    assert chunker.push(_samples(3)) == []
