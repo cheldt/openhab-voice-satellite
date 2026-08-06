@@ -88,7 +88,7 @@ class OpenHABConfig(BaseModel):
 
 
 class TtsConfig(BaseModel):
-    engine: Literal["kokoro", "gemini", "deepgram", "piper"] = "kokoro"
+    engine: Literal["piper", "gemini", "deepgram"] = "piper"
     default_language: str = "de"
 
 
@@ -124,34 +124,6 @@ class DeepgramConfig(BaseModel):
     def key(self) -> str | None:
         """Env var DEEPGRAM_API_KEY wins over the config file value."""
         return os.environ.get("DEEPGRAM_API_KEY") or self.api_key
-
-
-class KokoroVoiceConfig(BaseModel):
-    model: str  # Kokoro .onnx model path
-    voices: str  # voice-styles file (.bin / .npz)
-    voice: str  # voice name inside the styles file, e.g. "bf_emma", "martin"
-    lang: str  # espeak phonemizer code: "en-gb", "de"
-    speed: float = Field(1.0, gt=0.5, le=2.0)
-
-
-class KokoroConfig(BaseModel):
-    threads: int = Field(2, ge=1)  # ORT intra-op threads per kokoro session
-    voices: dict[str, KokoroVoiceConfig] = Field(
-        default_factory=lambda: {
-            "de": KokoroVoiceConfig(
-                model="models/kokoro/kokoro-martin.onnx",
-                voices="models/kokoro/voices-martin.npz",
-                voice="martin",
-                lang="de",
-            ),
-            "en": KokoroVoiceConfig(
-                model="models/kokoro/kokoro-v1.0.onnx",
-                voices="models/kokoro/voices-v1.0.bin",
-                voice="bf_emma",
-                lang="en-gb",
-            ),
-        }
-    )
 
 
 class PiperConfig(BaseModel):
@@ -194,7 +166,6 @@ class Config(BaseModel):
     tts: TtsConfig = Field(default_factory=TtsConfig)
     gemini: GeminiConfig = Field(default_factory=GeminiConfig)
     deepgram: DeepgramConfig = Field(default_factory=DeepgramConfig)
-    kokoro: KokoroConfig = Field(default_factory=KokoroConfig)
     piper: PiperConfig = Field(default_factory=PiperConfig)
     barge_in: BargeInConfig = Field(default_factory=BargeInConfig)
     dialog: DialogConfig = Field(default_factory=DialogConfig)
@@ -216,16 +187,11 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def _tts_default_voice(self) -> Config:
+        # piper is the engine or the cloud engines' fallback either way
         lang = self.tts.default_language
-        if self.tts.engine == "piper":
-            if lang not in self.piper.voices:
-                raise ValueError(
-                    f"tts.default_language {lang!r} has no piper voice configured"
-                )
-        # kokoro is the engine or the cloud fallback
-        elif lang not in self.kokoro.voices:
+        if lang not in self.piper.voices:
             raise ValueError(
-                f"tts.default_language {lang!r} has no kokoro voice configured"
+                f"tts.default_language {lang!r} has no piper voice configured"
             )
         return self
 

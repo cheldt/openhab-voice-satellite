@@ -24,7 +24,6 @@ from .piper_tts import PiperSpeaker
 from .pipeline import Pipeline, SpeakerProtocol, TranscriberProtocol
 from .state import Event, State
 from .stt import Transcriber
-from .tts import Speaker
 from .vad import SpeechEndpointer
 from .wakeword import WakewordDetector
 
@@ -104,10 +103,8 @@ def _build_speaker(config: Config, sink: AudioSink, base_dir: Path) -> SpeakerPr
     """The local TTS engine (or its lazy stand-in when a cloud engine is primary)."""
     if config.tts.engine == "piper":
         return PiperSpeaker(config.piper, config.tts, sink, base_dir)
-    if config.tts.engine == "kokoro":
-        return Speaker(config.kokoro, config.tts, sink, base_dir)
-    # cloud engine primary: kokoro stays the fallback but loads on first use
-    return LazySpeaker(lambda: Speaker(config.kokoro, config.tts, sink, base_dir))
+    # cloud engine primary: piper stays the fallback but loads on first use
+    return LazySpeaker(lambda: PiperSpeaker(config.piper, config.tts, sink, base_dir))
 
 
 async def _build_engines(
@@ -123,7 +120,7 @@ async def _build_engines(
     """
     transcriber = local_transcriber
     speaker = local_speaker
-    cloud_engines = {config.stt.engine, config.tts.engine} - {"local", "kokoro", "piper"}
+    cloud_engines = {config.stt.engine, config.tts.engine} - {"local", "piper"}
     if cloud_engines:
         # own session: openHAB's may have TLS verification disabled
         cloud_session = await stack.enter_async_context(aiohttp.ClientSession())

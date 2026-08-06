@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download all models: openWakeWord, Kokoro + Piper TTS models, faster-whisper cache warmup.
+"""Download all models: openWakeWord, Piper TTS voices, faster-whisper cache warmup.
 
 Run from the repo root inside the venv:
     .venv/bin/python scripts/download_models.py [--config config.yaml]
@@ -14,17 +14,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
-
-_KOKORO_RELEASE = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
-_KOKORO_MARTIN = "https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin/resolve/main"
-# A smaller/faster English model exists at the same release tag:
-# kokoro-v1.0.int8.onnx (92 MB) — point kokoro.voices.en.model at it if fp32 is too slow.
-KOKORO_FILES = {
-    "kokoro-v1.0.onnx": f"{_KOKORO_RELEASE}/kokoro-v1.0.onnx",
-    "voices-v1.0.bin": f"{_KOKORO_RELEASE}/voices-v1.0.bin",
-    "kokoro-martin.onnx": f"{_KOKORO_MARTIN}/kokoro-martin.onnx",
-    "voices-martin.npz": f"{_KOKORO_MARTIN}/voices-martin.npz",
-}
 
 _PIPER_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
 # voice file -> HF subpath; each .onnx needs its sidecar .onnx.json
@@ -59,12 +48,6 @@ def download_openwakeword() -> None:
     print("  done (shared feature models + pretrained wakewords)")
 
 
-def download_kokoro(models_dir: Path) -> None:
-    print("Kokoro TTS models:")
-    for name, url in KOKORO_FILES.items():
-        download(url, models_dir / "kokoro" / name)
-
-
 def download_piper(models_dir: Path) -> None:
     print("Piper TTS models:")
     for name, url in PIPER_FILES.items():
@@ -92,7 +75,6 @@ def main() -> None:
         stt_model, compute_type = config.stt.model, config.stt.compute_type
 
     download_openwakeword()
-    download_kokoro(REPO_ROOT / "models")
     download_piper(REPO_ROOT / "models")
     warm_whisper(stt_model, compute_type)
     print("all models ready")

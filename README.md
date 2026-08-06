@@ -9,7 +9,7 @@ to the local engines automatically on any error.
  mic ──▶ openWakeWord ──▶ record (Silero VAD) ──▶ faster-whisper (de/en auto)
                                                         │ transcript
                                                         ▼
- speaker ◀── Kokoro TTS ◀── answer text ◀── openHAB voice interpreter (HLI)
+ speaker ◀── Piper TTS ◀─── answer text ◀── openHAB voice interpreter (HLI)
 ```
 
 (The STT and TTS boxes can each be swapped for a cloud engine; the local
@@ -22,17 +22,13 @@ engine stays loaded and takes over per request when the cloud call fails.)
   request.
 - **Chat**: posts the transcript to openHAB's voice interpreter endpoint
   (`/rest/voice/interpreters`) and speaks the plain-text answer.
-- **TTS**: Kokoro-82M (via kokoro-onnx), per-language model + voice,
-  sentence-streamed (starts speaking while the rest is still synthesizing).
-  English uses the official model (`bf_emma` by default); German uses the
-  community [Kokoro-82M-ONNX-German-Martin](https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin)
-  model (Apache 2.0, single voice `martin`). Synthesis on a Pi 5 runs at
-  roughly real-time speed, so expect a short delay before the first sentence.
-  Alternatively `tts.engine: "piper"` uses Piper (much faster, lower quality);
-  default voices are `en_GB-alba-medium` (female) and `de_DE-thorsten-medium`.
-  Cloud TTS via `tts.engine: "gemini"` or `"deepgram"` (Aura-2) with the same
-  local fallback; if Deepgram fails mid-utterance, only the unspoken
-  remainder is re-synthesized locally.
+- **TTS**: Piper, per-language voice, sentence-streamed (starts speaking
+  while the rest is still synthesizing) and much faster than real time on a
+  Pi 5. Default voices are `de_DE-thorsten-medium` and `en_GB-alba-medium`
+  (female, Scottish English).
+  Cloud TTS via `tts.engine: "gemini"` or `"deepgram"` (Aura-2) with piper
+  as the automatic local fallback; if Deepgram fails mid-utterance, only the
+  unspoken remainder is re-synthesized locally.
 - **Dialog mode**: after each answer the mic reopens for a follow-up — no
   wakeword needed (`dialog.enabled`, ends after `dialog.followup_timeout_s`
   of silence). Chat context is kept server-side via a conversation id.
@@ -128,7 +124,7 @@ Everything lives in one YAML file — see the extensively commented
 | `stt.languages` | language candidates for detection (default `[de, en]`); a single entry skips whisper's per-utterance language-detection pass — recommended on constrained boxes |
 | `tts.default_language` | fallback language/voice when detection is inconclusive (default `de`) |
 | `openhab.verify_ssl` | set `false` for self-signed HTTPS certificates |
-| `tts.engine` | `kokoro` or `piper` (local), `gemini` or `deepgram` (cloud TTS, falls back to kokoro on failure) |
+| `tts.engine` | `piper` (local), `gemini` or `deepgram` (cloud TTS, falls back to piper on failure) |
 | `gemini.api_key` | Google Gemini API key; env var `GEMINI_API_KEY` wins over the file |
 | `gemini.tts_voices` | prebuilt Gemini voice name per language (e.g. `de: Kore`) |
 | `deepgram.api_key` | Deepgram API key; env var `DEEPGRAM_API_KEY` wins over the file |
@@ -136,9 +132,7 @@ Everything lives in one YAML file — see the extensively commented
 | `barge_in.resume_listening` | wakeword during playback → listen for new command |
 | `dialog.enabled` | every answer re-opens the mic for a follow-up (no wakeword); context is kept server-side via a conversation id |
 | `dialog.followup_timeout_s` | follow-up silence that ends the conversation (first turn uses `vad.no_speech_timeout_s`) |
-| `kokoro.threads` | ONNX threads per Kokoro session (default `2`); bounds TTS CPU |
-| `kokoro.voices` | Kokoro model/voices/voice/lang/speed per language code (engine `kokoro` + cloud fallback) |
-| `piper.voices` | Piper `.onnx` model path per language code (engine `piper` only) |
+| `piper.voices` | Piper `.onnx` model path per language code (engine `piper` + cloud fallback) |
 
 ## Barge-in and echo
 
@@ -148,15 +142,6 @@ starts to trigger. For robust hands-free interruption, run PipeWire's WebRTC
 echo canceller and point `audio.input_device` / `audio.output_device` at its
 echo-cancel nodes (they appear in `--list-devices` like any other PipeWire
 node) — setup in [deploy/install.md](deploy/install.md).
-
-## Custom German Kokoro voice (optional)
-
-`scripts/export_kokoro_victoria.sh` exports the Hugging Face
-[kikiri-tts/kikiri-german-victoria](https://huggingface.co/kikiri-tts/kikiri-german-victoria)
-fine-tune to `models/kokoro/kokoro-victoria.onnx` + `voices-victoria.npz`
-(via the [kokoro-onnx-export](https://github.com/adrianlyjak/kokoro-onnx-export)
-tool, cloned automatically) and smoke-tests German synthesis. Point
-`kokoro.voices.de` at the exported files to use it.
 
 ## License
 

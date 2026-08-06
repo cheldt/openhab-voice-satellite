@@ -39,27 +39,12 @@ openhab:
   verify_ssl: true          # false accepts self-signed certificates
 
 tts:
-  engine: "kokoro"          # "kokoro"/"piper" = local; "gemini"/"deepgram" = cloud TTS, falls back to kokoro on failure
+  engine: "piper"          # "piper" = local; "gemini"/"deepgram" = cloud TTS, falls back to piper on failure
   default_language: "de"
 
-# Used when tts.engine is "kokoro" and as fallback for the cloud engines.
-kokoro:
-  threads: 2                   # ONNX intra-op threads per model; higher = faster synthesis, more CPU
-  voices:
-    de:
-      model: "models/kokoro/kokoro-martin.onnx"
-      voices: "models/kokoro/voices-martin.npz"
-      voice: "martin"          # only voice in this file
-      lang: "de"               # espeak phonemizer language
-      speed: 1.0
-    en:
-      model: "models/kokoro/kokoro-v1.0.onnx"   # or kokoro-v1.0.int8.onnx (smaller/faster)
-      voices: "models/kokoro/voices-v1.0.bin"
-      voice: "bf_emma"         # any voice from voices-v1.0.bin
-      lang: "en-gb"
-      speed: 1.0
 
-# Only used when tts.engine is "piper" (language -> .onnx model, sidecar .onnx.json next to it).
+# Used when tts.engine is "piper" and as fallback for the cloud engines
+# (language -> .onnx model, sidecar .onnx.json next to it).
 # piper:
 #   voices:
 #     de: "models/piper/de_DE-thorsten-medium.onnx"

@@ -12,25 +12,18 @@ def test_local_config_selects_base_checks():
         "wakeword model",
         "vad model",
         "whisper model (incl. warmup)",
-        "kokoro voices",
+        "piper voices",
         "openHAB REST",
     ]
 
 
-def test_piper_engine_swaps_kokoro_for_piper():
-    config = Config.model_validate({"tts": {"engine": "piper"}})
-    names = _names(config)
-    assert "piper voices" in names
-    assert "kokoro voices" not in names
-
-
-def test_gemini_engine_appends_api_check_and_keeps_kokoro():
+def test_gemini_engine_appends_api_check_and_keeps_piper():
     config = Config.model_validate(
         {"stt": {"engine": "gemini"}, "gemini": {"api_key": "k"}}
     )
     names = _names(config)
     assert "gemini API" in names
-    assert "kokoro voices" in names  # cloud engines fall back to kokoro
+    assert "piper voices" in names  # cloud engines fall back to piper
     assert "deepgram API" not in names
 
 

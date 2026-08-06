@@ -38,7 +38,7 @@ def test_engine_defaults_local():
     # the engine selection is a decision, not a literal: local by default
     config = Config()
     assert config.stt.engine == "local"
-    assert config.tts.engine == "kokoro"
+    assert config.tts.engine == "piper"
 
 
 def test_gemini_env_key_wins(monkeypatch):
@@ -79,56 +79,37 @@ def test_deepgram_engine_requires_key(monkeypatch):
     Config.model_validate({"tts": {"engine": "deepgram"}})
 
 
-def test_default_language_must_have_kokoro_voice():
-    en_only = {
-        "voices": {
-            "en": {
-                "model": "x.onnx",
-                "voices": "v.bin",
-                "voice": "bf_emma",
-                "lang": "en-gb",
-            }
-        }
-    }
-    with pytest.raises(ValueError, match="kokoro voice"):
-        Config.model_validate({"tts": {"default_language": "de"}, "kokoro": en_only})
-    # also enforced for cloud engines (kokoro is their fallback)
-    with pytest.raises(ValueError, match="kokoro voice"):
-        Config.model_validate(
-            {
-                "tts": {"engine": "deepgram", "default_language": "de"},
-                "kokoro": en_only,
-                "deepgram": {"api_key": "k"},
-            }
-        )
-    # engine piper does not require kokoro coverage
-    Config.model_validate(
-        {"tts": {"engine": "piper", "default_language": "de"}, "kokoro": en_only}
-    )
-
-
-def test_piper_engine_accepted():
-    config = Config.model_validate({"tts": {"engine": "piper"}})
-    assert config.tts.engine == "piper"
-
-
 def test_tts_engine_local_no_longer_valid():
     with pytest.raises(ValueError):
         Config.model_validate({"tts": {"engine": "local"}})
 
 
+def test_tts_engine_kokoro_no_longer_valid():
+    with pytest.raises(ValueError):
+        Config.model_validate({"tts": {"engine": "kokoro"}})
+
+
+def test_stale_kokoro_block_ignored():
+    # configs from the kokoro era keep loading; the block is just dropped
+    config = Config.model_validate({"kokoro": {"voices": {"de": {"model": "x"}}}})
+    assert config.tts.engine == "piper"
+
+
 def test_piper_default_language_must_have_voice():
+    en_only = {"voices": {"en": "models/piper/en_GB-alba-medium.onnx"}}
+    with pytest.raises(ValueError, match="piper voice"):
+        Config.model_validate({"tts": {"engine": "piper"}, "piper": en_only})
+    # also enforced for cloud engines (piper is their fallback)
     with pytest.raises(ValueError, match="piper voice"):
         Config.model_validate(
             {
-                "tts": {"engine": "piper"},
-                "piper": {"voices": {"en": "models/piper/en_GB-alba-medium.onnx"}},
+                "tts": {"engine": "deepgram", "default_language": "de"},
+                "piper": en_only,
+                "deepgram": {"api_key": "k"},
             }
         )
-    # not enforced when piper is not the engine
-    Config.model_validate(
-        {"piper": {"voices": {"en": "models/piper/en_GB-alba-medium.onnx"}}}
-    )
+    # default language covered -> valid
+    Config.model_validate({"tts": {"default_language": "en"}, "piper": en_only})
 
 
 def test_empty_languages_rejected():

@@ -65,9 +65,6 @@ def main() -> None:
         level=config.logging.level,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
-    # phonemizer warns about word-count mismatches (numbers expand to words);
-    # irrelevant for TTS, which only uses the whole phoneme string
-    logging.getLogger("phonemizer").setLevel(logging.ERROR)
 
     from .app import App
 

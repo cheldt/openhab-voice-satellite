@@ -47,21 +47,6 @@ def check_stt(config: Config, base_dir: Path) -> None:
     transcriber._transcribe_sync(np.zeros(16000, dtype=np.int16))
 
 
-def check_kokoro(config: Config, base_dir: Path) -> None:
-    from kokoro_onnx import Kokoro
-
-    from .tts import make_onnx_session
-
-    for lang, vc in config.kokoro.voices.items():
-        # same session construction as production (tts.Speaker)
-        kokoro = Kokoro.from_session(
-            make_onnx_session(str(resolve_path(vc.model, base_dir)), config.kokoro.threads),
-            str(resolve_path(vc.voices, base_dir)),
-        )
-        if vc.voice not in kokoro.get_voices():
-            raise ValueError(f"{lang}: voice {vc.voice!r} not in {Path(vc.voices).name}")
-
-
 def check_piper(config: Config, base_dir: Path) -> None:
     from piper import PiperVoice
 
@@ -112,11 +97,8 @@ def select_checks(config: Config) -> list[tuple[str, Check]]:
         ("vad model", check_vad),
         ("whisper model (incl. warmup)", check_stt),
     ]
-    if config.tts.engine == "piper":
-        checks.append(("piper voices", check_piper))
-    else:
-        # kokoro is the engine or the cloud fallback
-        checks.append(("kokoro voices", check_kokoro))
+    # piper is the engine or the cloud engines' fallback either way
+    checks.append(("piper voices", check_piper))
     if "gemini" in (config.stt.engine, config.tts.engine):
         checks.append(("gemini API", check_gemini))
     if "deepgram" in (config.stt.engine, config.tts.engine):

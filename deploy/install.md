@@ -1,7 +1,6 @@
 # Installing openhab-voice-satellite on a Raspberry Pi 5
 
-Target: Raspberry Pi OS Bookworm 64-bit, Python 3.11–3.13 (kokoro-onnx does
-not support 3.14 yet).
+Target: Raspberry Pi OS Bookworm 64-bit, Python 3.11+.
 
 ## 1. System packages
 
@@ -38,28 +37,21 @@ python3 -m venv --system-site-packages .venv
 .venv/bin/pip install --no-deps 'openwakeword==0.6.0'
 ```
 
-## 3. Download models (~1.6 GB total)
+## 3. Download models (~400 MB total)
 
 ```bash
 export HF_HOME=/opt/openhab-voice-satellite/models/hf
 .venv/bin/python scripts/download_models.py
 ```
 
-The two Kokoro TTS models are ~326 MB each; the Piper voices (~60 MB each)
-land in `models/piper/`. espeak-ng (used for phonemization) ships inside
-the `espeakng-loader` Python wheel — no apt package needed. The earcon WAVs
-(`sounds/*.wav`) are tracked in the repo; `scripts/make_earcons.py` only
-exists to regenerate them.
+The Piper voices (~60 MB each) land in `models/piper/`; whisper `small`
+(~250 MB) is cached under `HF_HOME`. The earcon WAVs (`sounds/*.wav`) are
+tracked in the repo; `scripts/make_earcons.py` only exists to regenerate them.
 
 A custom wakeword model (`wakeword.model` pointing at a local `.onnx`, e.g.
 `models/wakeword/hey_shodan.onnx`) is **not** provisioned by
 `download_models.py` — copy the file into place yourself before `--check`,
 which otherwise fails with a missing-model error.
-
-Note: espeak-ng silently ignores data paths longer than ~147 characters
-(fixed internal buffer) and falls back to a non-existent build path. Keep
-the install prefix short (`/opt/openhab-voice-satellite` is fine); a deeply nested venv
-will make TTS fail with `Error processing file '...phontab'`.
 
 ## 4. Configure
 
@@ -84,7 +76,7 @@ profile -> API tokens).
 OPENHAB_TOKEN=... HF_HOME=/opt/openhab-voice-satellite/models/hf .venv/bin/openhab-voice-satellite --check
 ```
 
-All checks (audio devices, wakeword, VAD, whisper, kokoro/piper, cloud APIs
+All checks (audio devices, wakeword, VAD, whisper, piper, cloud APIs
 when a cloud engine is configured, openHAB REST)
 must print `ok`. The audio check opens the real capture pipeline and requires
 an actual sample, so it also catches a device name that PipeWire cannot link.

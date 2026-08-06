@@ -222,16 +222,10 @@ class _StubLocalSpeaker:
 
 
 async def test_build_speaker_per_engine(monkeypatch, tmp_path):
-    monkeypatch.setattr(app_module, "Speaker", _StubLocalSpeaker)
     monkeypatch.setattr(app_module, "PiperSpeaker", _StubLocalSpeaker)
     sink = BufferAudioSink()
 
-    kokoro = _build_speaker(Config(), sink, tmp_path)
-    assert isinstance(kokoro, _StubLocalSpeaker)
-
-    piper = _build_speaker(
-        Config.model_validate({"tts": {"engine": "piper"}}), sink, tmp_path
-    )
+    piper = _build_speaker(Config(), sink, tmp_path)  # piper is the default
     assert isinstance(piper, _StubLocalSpeaker)
 
     cloud = _build_speaker(
@@ -241,7 +235,7 @@ async def test_build_speaker_per_engine(monkeypatch, tmp_path):
         sink,
         tmp_path,
     )
-    assert isinstance(cloud, LazySpeaker)  # local fallback loads on first use
+    assert isinstance(cloud, LazySpeaker)  # piper fallback loads on first use
 
 
 @pytest.mark.parametrize("provider", ["gemini", "deepgram"])
