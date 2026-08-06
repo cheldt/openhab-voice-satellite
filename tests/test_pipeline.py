@@ -238,3 +238,18 @@ async def test_timeout_elsewhere_is_not_an_openhab_timeout(env, caplog):
     assert "openHAB response timed out" not in caplog.text
     assert "pipeline failed" in caplog.text
     await _await_cleanup(pipeline)
+
+
+def test_truncate_for_log_short_string_unchanged():
+    from openhab_voice_satellite.pipeline import _truncate_for_log
+
+    assert _truncate_for_log("hello") == "hello"
+    assert _truncate_for_log("a" * 200) == "a" * 200
+
+
+def test_truncate_for_log_long_string_gets_marker():
+    from openhab_voice_satellite.pipeline import _truncate_for_log
+
+    result = _truncate_for_log("a" * 250)
+    assert result.startswith("a" * 200)
+    assert result.endswith("… (+50 chars)")

@@ -24,6 +24,14 @@ from .vad import SpeechEndpointer
 
 log = logging.getLogger(__name__)
 
+LOG_ANSWER_CHARS = 200
+
+
+def _truncate_for_log(text: str, limit: int = LOG_ANSWER_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}… (+{len(text) - limit} chars)"
+
 
 class SpeakerProtocol(Protocol):
     async def speak(self, text: str, language: str) -> None: ...
@@ -104,7 +112,7 @@ class Pipeline:
                 # the conversation the server may have created.
                 conversation_started = conversation_id is not None
                 response = await self._openhab.send_command(transcript.text, conversation_id)
-                log.info("openHAB answered: %s", response[:200])
+                log.info("openHAB answered: %s", _truncate_for_log(response))
 
                 # SPEAKING
                 self._set_state(State.SPEAKING)
