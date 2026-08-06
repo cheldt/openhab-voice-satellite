@@ -166,6 +166,11 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=Path("config.yaml"))
     parser.add_argument("--list-devices", action="store_true", help="list audio devices and exit")
     parser.add_argument("--check", action="store_true", help="run self-test and exit")
+    parser.add_argument(
+        "--probe-mic", action="store_true",
+        help="30s field diagnostic: per-second mic RMS + wakeword score, "
+             "with earcon playback and stream-link verification",
+    )
     args = parser.parse_args()
 
     if args.list_devices:
@@ -174,6 +179,14 @@ def main() -> None:
 
     if args.check:
         sys.exit(_check(args.config))
+
+    if args.probe_mic:
+        logging.basicConfig(format="%(levelname)-7s %(name)s: %(message)s", level=logging.INFO)
+        config = load_config(args.config)
+
+        from .probe import probe_mic
+
+        sys.exit(probe_mic(config, args.config.resolve().parent))
 
     config = load_config(args.config)
     logging.basicConfig(

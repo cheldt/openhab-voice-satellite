@@ -40,6 +40,14 @@ def match_node(
     raise ValueError(f"no {kind} device matching {substring!r}")
 
 
+# The pipewire device provider can emit device-removed events during process
+# teardown, after Python has already finalized the GstDevice wrappers —
+# GStreamer then logs "invalid unclassed pointer" criticals (cosmetic, seen on
+# PipeWire 1.2.x). Keeping the monitor and its devices referenced for the
+# process lifetime avoids the premature finalization.
+_monitor_refs: list[object] = []
+
+
 def list_audio_nodes() -> list[AudioNode]:
     """Enumerate PipeWire audio nodes via a one-shot Gst.DeviceMonitor."""
     from .gst_common import gst_init
@@ -52,7 +60,9 @@ def list_audio_nodes() -> list[AudioNode]:
         raise RuntimeError("failed to start GStreamer device monitor")
     try:
         nodes = []
-        for device in monitor.get_devices():
+        devices = monitor.get_devices()
+        _monitor_refs.append((monitor, devices))
+        for device in devices:
             props = device.get_properties()
             name = props.get_string("node.name") if props else None
             if not name:
@@ -78,6 +88,82 @@ def resolve_node(substring: str | None, kind: Literal["input", "output"]) -> str
     if substring is None:
         return None
     return match_node(list_audio_nodes(), substring, kind)
+
+
+def parse_stream_peers(dump: list[dict], client_name: str) -> dict[str, str]:
+    """Extract which nodes a client's streams are actually linked to.
+
+    `dump` is parsed `pw-dump` output. Returns {"input": <peer node.name>,
+    "output": <peer node.name>} for the client's capture/playback streams
+    (keys absent when the stream or its link doesn't exist). PipeWire links
+    streams silently — a target that cannot be linked falls back to the
+    default node with no error anywhere — so the only way to know what a
+    stream records from or plays to is to look at the live graph.
+    """
+    nodes = {
+        obj["id"]: obj["info"]["props"]
+        for obj in dump
+        if obj.get("type") == "PipeWire:Interface:Node" and obj.get("info", {}).get("props")
+    }
+    streams = {}  # node id -> "input"|"output"
+    for node_id, props in nodes.items():
+        if props.get("node.name") != client_name:
+            continue
+        media_class = props.get("media.class", "")
+        if media_class == "Stream/Input/Audio":
+            streams[node_id] = "input"
+        elif media_class == "Stream/Output/Audio":
+            streams[node_id] = "output"
+    peers: dict[str, str] = {}
+    for obj in dump:
+        if obj.get("type") != "PipeWire:Interface:Link":
+            continue
+        info = obj.get("info", {})
+        out_node, in_node = info.get("output-node-id"), info.get("input-node-id")
+        if streams.get(in_node) == "input" and out_node in nodes:
+            peers["input"] = nodes[out_node].get("node.name", str(out_node))
+        elif streams.get(out_node) == "output" and in_node in nodes:
+            peers["output"] = nodes[in_node].get("node.name", str(in_node))
+    return peers
+
+
+async def verify_stream_links(
+    client_name: str,
+    expected_input: str | None,
+    expected_output: str | None,
+) -> None:
+    """Log the nodes the app's streams actually linked to; warn on mismatch.
+
+    Best-effort: silently skips when pw-dump is unavailable or unparseable.
+    """
+    import asyncio
+    import json
+    import logging
+
+    log = logging.getLogger(__name__)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "pw-dump",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        peers = parse_stream_peers(json.loads(stdout), client_name)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never break the app
+        log.debug("stream link verification skipped: %s", exc)
+        return
+    for kind, expected in (("input", expected_input), ("output", expected_output)):
+        actual = peers.get(kind)
+        if actual is None:
+            log.warning("audio %s stream has no link — capture/playback will be dead", kind)
+        elif expected is not None and actual != expected:
+            log.warning(
+                "audio %s stream linked to %r, NOT the configured %r "
+                "(PipeWire fell back silently — check the node with wpctl status)",
+                kind, actual, expected,
+            )
+        else:
+            log.info("audio %s stream linked to %r", kind, actual)
 
 
 def probe_capture(node_name: str | None, sample_rate: int, timeout_s: float = 5.0) -> None:

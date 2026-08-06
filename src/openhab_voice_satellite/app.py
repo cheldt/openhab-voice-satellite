@@ -136,11 +136,24 @@ class App:
             )
 
             log.info("ready — say the wakeword (%s)", config.wakeword.model)
+            link_check = asyncio.create_task(
+                self._verify_links(source.target, sink.target), name="verify-links"
+            )
             try:
                 await self._interrupt_monitor(wake_queue, detector, pipeline, sink, earcons)
             finally:
+                link_check.cancel()
                 await broadcaster.stop()
                 source.close()
+
+    @staticmethod
+    async def _verify_links(input_target: str | None, output_target: str | None) -> None:
+        from .audio.gst_devices import verify_stream_links
+
+        await asyncio.sleep(3.0)  # give WirePlumber time to settle the links
+        await verify_stream_links(
+            "openhab-voice-satellite", input_target, output_target
+        )
 
     def _start_pipeline(
         self, pipeline: Pipeline, earcons: Earcons, play_wake_earcon: bool = True

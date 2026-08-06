@@ -33,6 +33,7 @@ class PipewireSource:
         Gst = gst_init()
         self._Gst = Gst
         target = resolve_node(device, "input")
+        self.target = target  # resolved node name; None = default source
         self._queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue(maxsize=queue_size)
         self._loop = asyncio.get_running_loop()
         self._chunker = FrameChunker(frame_samples)
