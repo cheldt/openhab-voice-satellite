@@ -174,8 +174,32 @@ class PipewireSink:
                     self._push(dither.tobytes())
                     queued += 2 * n
 
+    def _prepare(self, pcm: np.ndarray, sample_rate: int, now: float) -> np.ndarray:
+        """Flush an interrupted sound, or prepend the wake-up preamble after idle."""
+        if self._sound_until is not None and now < self._sound_until:
+            # interrupting a playing sound: drop the queue and restart
+            self._flush()
+        elif self._preamble_ms and (
+            self._sound_until is None
+            or now - self._sound_until >= self._preamble_idle_s
+        ):
+            # a powered speaker in auto-standby needs real signal for a
+            # beat before it plays anything; give it a soft ramped hiss
+            n = sample_rate * self._preamble_ms // 1000
+            ramp = np.linspace(0.0, 1.0, n) ** 2
+            noise = np.random.randint(-PREAMBLE_PEAK, PREAMBLE_PEAK + 1, n)
+            pcm = np.concatenate([(noise * ramp).astype(np.int16), pcm])
+        return pcm
+
+    def _retune(self, sample_rate: int) -> None:
+        if sample_rate != self._rate:
+            self._rate = sample_rate
+            self._src.set_property(
+                "caps", self._Gst.Caps.from_string(s16_mono_caps(sample_rate))
+            )
+        self._volume.set_property("volume", self._gain)
+
     async def play(self, pcm: np.ndarray, sample_rate: int) -> None:
-        Gst = self._Gst
         done = asyncio.Event()
         loop = asyncio.get_running_loop()
         async with self._play_lock:
@@ -186,27 +210,11 @@ class PipewireSink:
                     # release the play we are replacing; its audio is flushed
                     self._waiter[1].set()
                 self._waiter = (loop, done)
-            if self._sound_until is not None and loop.time() < self._sound_until:
-                # interrupting a playing sound: drop the queue and restart
-                self._flush()
-            elif self._preamble_ms and (
-                self._sound_until is None
-                or loop.time() - self._sound_until >= self._preamble_idle_s
-            ):
-                # a powered speaker in auto-standby needs real signal for a
-                # beat before it plays anything; give it a soft ramped hiss
-                n = sample_rate * self._preamble_ms // 1000
-                ramp = np.linspace(0.0, 1.0, n) ** 2
-                noise = np.random.randint(-PREAMBLE_PEAK, PREAMBLE_PEAK + 1, n)
-                pcm = np.concatenate([(noise * ramp).astype(np.int16), pcm])
-            if sample_rate != self._rate:
-                self._rate = sample_rate
-                self._src.set_property(
-                    "caps", Gst.Caps.from_string(s16_mono_caps(sample_rate))
-                )
-            self._volume.set_property("volume", self._gain)
-
+            pcm = self._prepare(pcm, sample_rate, loop.time())
+            # queued bytes still play out at the pre-retune rate
             backlog_s = self._queued_bytes() / (self._rate * 2)
+            self._retune(sample_rate)
+
             chunk_samples = sample_rate * PUSH_CHUNK_MS // 1000
             for start in range(0, len(pcm), chunk_samples):
                 self._push(pcm[start:start + chunk_samples].tobytes())

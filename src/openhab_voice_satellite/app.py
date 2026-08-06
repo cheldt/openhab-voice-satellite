@@ -38,6 +38,60 @@ MIC_STALL_WARN_S = 10.0  # no frames for this long -> loud warning
 HEARTBEAT_S = 10.0  # capture-health DEBUG line interval
 
 
+def _build_speaker(config: Config, sink: AudioSink, base_dir: Path) -> SpeakerProtocol:
+    """The local TTS engine (or its lazy stand-in when a cloud engine is primary)."""
+    if config.tts.engine == "piper":
+        return PiperSpeaker(config.piper, config.tts, sink, base_dir)
+    if config.tts.engine == "kokoro":
+        return Speaker(config.kokoro, config.tts, sink, base_dir)
+    # cloud engine primary: kokoro stays the fallback but loads on first use
+    return LazySpeaker(lambda: Speaker(config.kokoro, config.tts, sink, base_dir))
+
+
+async def _build_engines(
+    config: Config,
+    stack: AsyncExitStack,
+    sink: AudioSink,
+    local_transcriber: TranscriberProtocol,
+    local_speaker: SpeakerProtocol,
+) -> tuple[TranscriberProtocol, SpeakerProtocol]:
+    """Wrap the local engines with cloud primaries per config.
+
+    The local engines stay loaded as the fallback for every cloud path.
+    """
+    transcriber = local_transcriber
+    speaker = local_speaker
+    cloud_engines = {config.stt.engine, config.tts.engine} - {"local", "kokoro", "piper"}
+    if cloud_engines:
+        # own session: openHAB's may have TLS verification disabled
+        cloud_session = await stack.enter_async_context(aiohttp.ClientSession())
+    if "gemini" in cloud_engines:
+        gemini = GeminiClient(config.gemini, cloud_session)
+        if config.stt.engine == "gemini":
+            transcriber = FallbackTranscriber(
+                GeminiTranscriber(gemini, config.stt, config.tts.default_language),
+                local_transcriber,
+                label="gemini",
+            )
+        if config.tts.engine == "gemini":
+            speaker = FallbackSpeaker(
+                GeminiSpeaker(gemini, config.tts, sink), local_speaker, label="gemini"
+            )
+    if "deepgram" in cloud_engines:
+        deepgram = DeepgramClient(config.deepgram, cloud_session)
+        if config.stt.engine == "deepgram":
+            transcriber = FallbackTranscriber(
+                DeepgramTranscriber(deepgram, config.stt, config.tts.default_language),
+                local_transcriber,
+                label="deepgram",
+            )
+        if config.tts.engine == "deepgram":
+            speaker = FallbackSpeaker(
+                DeepgramSpeaker(deepgram, config.tts, sink), local_speaker, label="deepgram"
+            )
+    return transcriber, speaker
+
+
 class App:
     def __init__(self, config: Config, base_dir: Path | None = None) -> None:
         self._config = config
@@ -59,17 +113,7 @@ class App:
         async with AsyncExitStack() as stack:
             source, sink = await stack.enter_async_context(audio_io(config.audio))
             earcons = Earcons(config.earcons, sink, self._base_dir)
-            if config.tts.engine == "piper":
-                speaker: SpeakerProtocol = PiperSpeaker(
-                    config.piper, config.tts, sink, self._base_dir
-                )
-            elif config.tts.engine == "kokoro":
-                speaker = Speaker(config.kokoro, config.tts, sink, self._base_dir)
-            else:
-                # cloud engine primary: kokoro stays the fallback but loads on first use
-                speaker = LazySpeaker(
-                    lambda: Speaker(config.kokoro, config.tts, sink, self._base_dir)
-                )
+            speaker = _build_speaker(config, sink, self._base_dir)
 
             broadcaster = AudioBroadcaster(source)
             wake_queue = broadcaster.subscribe()
@@ -78,41 +122,9 @@ class App:
             session = await stack.enter_async_context(make_session(config.openhab))
             openhab = OpenHABClient(config.openhab, session)
 
-            # local engines above stay loaded as fallback for the cloud path
-            final_transcriber: TranscriberProtocol = transcriber
-            final_speaker: SpeakerProtocol = speaker
-            cloud_engines = {config.stt.engine, config.tts.engine} - {"local", "kokoro", "piper"}
-            if cloud_engines:
-                # own session: openHAB's may have TLS verification disabled
-                cloud_session = await stack.enter_async_context(aiohttp.ClientSession())
-            if "gemini" in cloud_engines:
-                gemini = GeminiClient(config.gemini, cloud_session)
-                if config.stt.engine == "gemini":
-                    final_transcriber = FallbackTranscriber(
-                        GeminiTranscriber(gemini, config.stt, config.tts.default_language),
-                        transcriber,
-                        label="gemini",
-                    )
-                if config.tts.engine == "gemini":
-                    final_speaker = FallbackSpeaker(
-                        GeminiSpeaker(gemini, config.tts, sink),
-                        speaker,
-                        label="gemini",
-                    )
-            if "deepgram" in cloud_engines:
-                deepgram = DeepgramClient(config.deepgram, cloud_session)
-                if config.stt.engine == "deepgram":
-                    final_transcriber = FallbackTranscriber(
-                        DeepgramTranscriber(deepgram, config.stt, config.tts.default_language),
-                        transcriber,
-                        label="deepgram",
-                    )
-                if config.tts.engine == "deepgram":
-                    final_speaker = FallbackSpeaker(
-                        DeepgramSpeaker(deepgram, config.tts, sink),
-                        speaker,
-                        label="deepgram",
-                    )
+            final_transcriber, final_speaker = await _build_engines(
+                config, stack, sink, transcriber, speaker
+            )
             log.info("engines: stt=%s tts=%s", config.stt.engine, config.tts.engine)
 
             pipeline = Pipeline(
@@ -166,7 +178,7 @@ class App:
         log.info("interaction cancelled (barge-in)")
         return was_speaking
 
-    async def _interrupt_monitor(
+    async def _interrupt_monitor(  # noqa: C901 - split pending behavior tests
         self,
         wake_queue: asyncio.Queue,
         detector: WakewordDetector,
