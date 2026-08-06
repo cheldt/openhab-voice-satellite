@@ -3,7 +3,10 @@
 The pipeline is created once and stays PLAYING for the process lifetime, and
 audio is treated as a plain byte FIFO: `sync=false`, no buffer timestamps.
 The PulseAudio ring buffer paces consumption; the appsrc queue level (bytes)
-is the only scheduling state. Clock-based scheduling (sync=true + PTS) was
+is the only scheduling state. `play()` completion is byte-accounted: it
+returns once cumulative pushed bytes minus the queue level shows the sound
+has left appsrc, plus a short residual for the pulse ring — not after a
+computed worst-case sleep. Clock-based scheduling (sync=true + PTS) was
 abandoned after repeated stack-specific failures: PipeWire drains a freshly
 connected stream before it is linked (per-play pipelines lose 150-800 ms),
 pipewiresink's provided clock freezes on idle, gst pipewiresink on PipeWire
@@ -43,8 +46,14 @@ KEEPALIVE_LOW_WATER_S = 0.2  # top up dither when less than this is queued
 # content-based silence detectors (amp auto-standby, AEC gating) stay awake
 KEEPALIVE_DITHER = 4
 PREAMBLE_PEAK = 4000  # ramp target; loud enough to register as signal
-# waiting for play-out: queued silence + pulse ring buffer + slack
-DRAIN_MARGIN_S = KEEPALIVE_LOW_WATER_S + 0.5
+PLAYOUT_POLL_S = 0.05  # appsrc level poll cadence while a sound drains
+# audio that has left appsrc but not the speaker: the pulsesink ring
+# (buffer-time default ~200 ms, kept saturated by the keepalive FIFO)
+# plus one in-flight PUSH_CHUNK_MS buffer
+SINK_RESIDUAL_S = 0.3
+# appsrc level not draining without a bus error (e.g. dead device):
+# give up backlog + duration + this much later instead of hanging
+PLAYOUT_FAILSAFE_EXTRA_S = 2.0
 
 
 class PipewireSink:
@@ -76,6 +85,9 @@ class PipewireSink:
         self._rate = 16000  # caps rate currently set on appsrc
         # event-loop time when the last queued sound ends; None = never played
         self._sound_until: float | None = None
+        # cumulative bytes ever pushed into appsrc (utterances, preamble,
+        # keepalive dither); only mutated on the event-loop thread
+        self._pushed_bytes = 0
 
         self._pipeline = Gst.parse_launch(self._describe(self._target))
         self._src = self._pipeline.get_by_name("src")
@@ -94,12 +106,13 @@ class PipewireSink:
     def _describe(target: str | None) -> str:
         # is-live: reach PLAYING without preroll; sync=false: pure FIFO, the
         # pulse ring buffer paces consumption; max-bytes=0: the appsrc queue
-        # must hold whole utterances
+        # must hold whole utterances; buffer-time pins the pulse ring to the
+        # documented default so SINK_RESIDUAL_S matches a known ring size
         t = f'device="{target}" ' if target else ""
         return (
             "appsrc name=src format=time is-live=true max-bytes=0 block=false "
             "! audioconvert ! audioresample ! volume name=vol "
-            f"! pulsesink sync=false client-name={CLIENT_NAME} {t}"
+            f"! pulsesink sync=false buffer-time=200000 client-name={CLIENT_NAME} {t}"
         )
 
     def _on_error(self, err, debug) -> None:
@@ -146,6 +159,9 @@ class PipewireSink:
                 pass
 
     def _push(self, samples: bytes) -> None:
+        # the increment must stay in this single choke point so playout
+        # accounting can never miss a push site
+        self._pushed_bytes += len(samples)
         self._src.emit("push-buffer", self._Gst.Buffer.new_wrapped(samples))
 
     def _queued_bytes(self) -> int:
@@ -200,6 +216,8 @@ class PipewireSink:
         self._volume.set_property("volume", self._gain)
 
     async def play(self, pcm: np.ndarray, sample_rate: int) -> None:
+        if not len(pcm):
+            return
         done = asyncio.Event()
         loop = asyncio.get_running_loop()
         async with self._play_lock:
@@ -218,14 +236,16 @@ class PipewireSink:
             chunk_samples = sample_rate * PUSH_CHUNK_MS // 1000
             for start in range(0, len(pcm), chunk_samples):
                 self._push(pcm[start:start + chunk_samples].tobytes())
-            total_s = backlog_s + len(pcm) / sample_rate + DRAIN_MARGIN_S
+            target = self._pushed_bytes  # everything up to and incl. this sound
+            deadline = (
+                loop.time()
+                + backlog_s + len(pcm) / sample_rate
+                + PLAYOUT_FAILSAFE_EXTRA_S
+            )
             self._sound_until = loop.time() + backlog_s + len(pcm) / sample_rate
 
         try:
-            # done fires early on stop() or pipeline error; otherwise play out
-            await asyncio.wait_for(done.wait(), timeout=total_s)
-        except asyncio.TimeoutError:
-            pass  # normal completion
+            await self._await_playout(done, target, deadline)
         except asyncio.CancelledError:
             self._flush()
             raise
@@ -236,6 +256,32 @@ class PipewireSink:
         with self._lock:
             if self._errors:
                 raise RuntimeError(f"playback pipeline error: {self._errors[0]}")
+
+    async def _await_playout(
+        self, done: asyncio.Event, target: int, deadline: float
+    ) -> None:
+        """Return once this play's last byte has left appsrc and the sink
+        ring has had time to play it; early on stop()/replacement/error.
+
+        Keepalive refills raise pushed and level equally, so they cannot move
+        the watermark. Flushed bytes count as dequeued — correct, they never
+        play — and every flush touching a live waiter also sets its `done`;
+        a future flush path that forgets would only cause an early return.
+        """
+        loop = asyncio.get_running_loop()
+        while not done.is_set():
+            if self._pushed_bytes - self._queued_bytes() >= target:
+                break
+            if loop.time() >= deadline:
+                log.warning("playout wait hit failsafe deadline; appsrc level not draining")
+                return
+            await asyncio.sleep(PLAYOUT_POLL_S)
+        try:
+            # done fires early on stop() or pipeline error; otherwise let the
+            # pulsesink ring (+ one in-flight chunk) finish playing out
+            await asyncio.wait_for(done.wait(), timeout=SINK_RESIDUAL_S)
+        except asyncio.TimeoutError:
+            pass  # normal completion
 
     def close(self) -> None:
         self._keepalive_task.cancel()
