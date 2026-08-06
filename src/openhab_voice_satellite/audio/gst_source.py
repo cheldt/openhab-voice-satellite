@@ -37,6 +37,7 @@ class PipewireSource:
         self._loop = asyncio.get_running_loop()
         self._chunker = FrameChunker(frame_samples)
         self._got_frame = False
+        self._caps_logged = False
         self._warn_count = 0
         self._warn_last_log = float("-inf")  # first occurrence always logs
         self._pipeline = Gst.parse_launch(self._describe(target, sample_rate))
@@ -65,6 +66,10 @@ class PipewireSource:
         sample = appsink.emit("pull-sample")
         if sample is None:
             return self._Gst.FlowReturn.OK
+        if not self._caps_logged:
+            self._caps_logged = True
+            caps = sample.get_caps()
+            log.info("capture caps negotiated: %s", caps.to_string() if caps else "?")
         buffer = sample.get_buffer()
         ok, mapinfo = buffer.map(self._Gst.MapFlags.READ)
         if not ok:

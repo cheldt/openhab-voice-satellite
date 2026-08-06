@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import AsyncExitStack
 from pathlib import Path
 
 import aiohttp
+import numpy as np
 
 from .audio.broadcast import AudioBroadcaster
 from .audio.earcons import Earcons
@@ -32,6 +34,9 @@ log = logging.getLogger(__name__)
 # wakeword score that triggers duck-and-confirm during playback
 DUCK_PRETHRESHOLD = 0.35
 DUCK_HOLD_FRAMES = 13  # ~1 s of 80 ms frames
+
+MIC_STALL_WARN_S = 10.0  # no frames for this long -> loud warning
+HEARTBEAT_S = 10.0  # capture-health DEBUG line interval
 
 
 class App:
@@ -176,14 +181,48 @@ class App:
     ) -> None:
         """Always-on wakeword loop; starts or cancels the interaction task."""
         duck_frames_left = 0
+        beat_frames = 0
+        beat_rms = 0
+        beat_score = 0.0
+        beat_start = time.monotonic()
+        audio = self._config.audio
+        expected_fps = audio.sample_rate / audio.frame_samples
         while True:
-            frame = await wake_queue.get()
+            try:
+                frame = await asyncio.wait_for(wake_queue.get(), timeout=MIC_STALL_WARN_S)
+            except asyncio.TimeoutError:
+                log.warning(
+                    "no mic frames for %.0fs — capture stream stalled?", MIC_STALL_WARN_S
+                )
+                beat_start = time.monotonic()
+                continue
             if frame is None:
                 log.info("audio source closed, monitor exiting")
                 return
 
+            beat_frames += 1
+            beat_rms = max(beat_rms, int(np.sqrt(np.mean(frame.astype(np.float64) ** 2))))
+            now = time.monotonic()
+            if now - beat_start >= HEARTBEAT_S:
+                log.debug(
+                    "monitor: %d frames in %.1fs, peak rms=%d, peak wake score=%.3f",
+                    beat_frames, now - beat_start, beat_rms, beat_score,
+                )
+                expected = expected_fps * (now - beat_start)
+                if beat_frames < 0.8 * expected:
+                    log.warning(
+                        "degraded capture: %d of %d expected mic frames in %.0fs "
+                        "— wakeword detection will be unreliable",
+                        beat_frames, int(expected), now - beat_start,
+                    )
+                beat_frames = 0
+                beat_rms = 0
+                beat_score = 0.0
+                beat_start = now
+
             speaking = self.state in (State.THINKING, State.SPEAKING)
             detection = detector.process(frame, speaking=speaking)
+            beat_score = max(beat_score, detector.score("wake"))
 
             # duck-and-confirm: pre-threshold score during playback lowers the
             # volume so the follow-up frames reach the detector more cleanly
@@ -204,6 +243,7 @@ class App:
                 continue
 
             if self.state is State.IDLE and detection == "wake":
+                log.info("wakeword detected (score %.2f)", detector.score("wake"))
                 detector.reset()
                 self._start_pipeline(pipeline, earcons)
             elif self.state in (State.LISTENING, State.THINKING, State.SPEAKING):

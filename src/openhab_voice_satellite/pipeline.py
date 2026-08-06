@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import time
 import uuid
+import wave
+from pathlib import Path
 from typing import Callable, Protocol
 
 import numpy as np
@@ -124,6 +128,22 @@ class Pipeline:
             if conversation_started:
                 self._schedule_conversation_end(conversation_id)
 
+    def _dump_utterance(self, pcm: np.ndarray) -> None:
+        """Write the recorded utterance to $OVS_DUMP_UTTERANCES for field debugging."""
+        dump_dir = os.environ.get("OVS_DUMP_UTTERANCES")
+        if not dump_dir:
+            return
+        path = Path(dump_dir) / f"utterance-{time.strftime('%H%M%S')}.wav"
+        try:
+            with wave.open(str(path), "wb") as f:
+                f.setnchannels(1)
+                f.setsampwidth(2)
+                f.setframerate(self._config.audio.sample_rate)
+                f.writeframes(pcm.tobytes())
+            log.info("utterance dumped: %s", path)
+        except OSError:
+            log.exception("utterance dump failed")
+
     def _schedule_conversation_end(self, conversation_id: str) -> None:
         """Fire-and-forget server-side conversation DELETE.
 
@@ -157,6 +177,13 @@ class Pipeline:
             return None
         finally:
             self._broadcaster.unsubscribe(frames)
+
+        rms = int(np.sqrt(np.mean(pcm.astype(np.float64) ** 2))) if len(pcm) else 0
+        log.info(
+            "utterance captured: %.1fs rms=%d",
+            len(pcm) / self._config.audio.sample_rate, rms,
+        )
+        self._dump_utterance(pcm)
 
         self._set_state(State.THINKING)
         await self._earcons.play("ack")
