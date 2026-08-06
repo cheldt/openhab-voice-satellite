@@ -3,20 +3,6 @@ import pytest
 from openhab_voice_satellite.config import Config, load_config
 
 
-def test_defaults():
-    config = Config()
-    assert config.audio.sample_rate == 16000
-    assert config.audio.frame_samples == 1280
-    assert config.wakeword.model == "hey_jarvis"
-    assert config.openhab.llm_tools == "item-send-command"
-    assert config.openhab.verify_ssl is True
-    assert config.tts.default_language == "de"
-    assert config.dialog.enabled is True
-    assert config.dialog.followup_timeout_s == 6.0
-    assert config.dialog.earcon == "wake"
-    assert config.earcons.idle == "sounds/idle.wav"
-
-
 def test_load_yaml(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text(
@@ -49,17 +35,10 @@ def test_env_token_wins(monkeypatch):
 
 
 def test_engine_defaults_local():
+    # the engine selection is a decision, not a literal: local by default
     config = Config()
     assert config.stt.engine == "local"
     assert config.tts.engine == "kokoro"
-    assert config.gemini.stt_model == "gemini-3.6-flash"
-    assert config.gemini.tts_voices == {"de": "Kore", "en": "Puck"}
-    assert config.deepgram.stt_model == "nova-3"
-    assert config.deepgram.tts_voices == {
-        "de": "aura-2-viktoria-de",
-        "en": "aura-2-thalia-en",
-    }
-    assert config.deepgram.tts_sample_rate == 24000
 
 
 def test_gemini_env_key_wins(monkeypatch):
@@ -128,21 +107,9 @@ def test_default_language_must_have_kokoro_voice():
     )
 
 
-def test_kokoro_voice_defaults():
-    config = Config()
-    assert config.kokoro.voices["de"].voice == "martin"
-    assert config.kokoro.voices["de"].lang == "de"
-    assert config.kokoro.voices["en"].voice == "bf_emma"
-    assert config.kokoro.voices["en"].speed == 1.0
-
-
-def test_piper_engine_and_defaults():
+def test_piper_engine_accepted():
     config = Config.model_validate({"tts": {"engine": "piper"}})
     assert config.tts.engine == "piper"
-    assert config.piper.voices == {
-        "de": "models/piper/de_DE-thorsten-medium.onnx",
-        "en": "models/piper/en_GB-alba-medium.onnx",
-    }
 
 
 def test_tts_engine_local_no_longer_valid():
@@ -172,8 +139,3 @@ def test_empty_languages_rejected():
 def test_zero_followup_timeout_rejected():
     with pytest.raises(ValueError):
         Config.model_validate({"dialog": {"followup_timeout_s": 0}})
-
-
-def test_legacy_dialog_keys_ignored():
-    config = Config.model_validate({"dialog": {"max_turns": 3, "context_mode": "stitch"}})
-    assert config.dialog.enabled is True

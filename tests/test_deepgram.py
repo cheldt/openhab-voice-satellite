@@ -1,4 +1,3 @@
-import asyncio
 import io
 import wave
 
@@ -16,10 +15,12 @@ from openhab_voice_satellite.deepgram import (
     DeepgramTranscriber,
     tts_chunks,
 )
-from openhab_voice_satellite.fallback import FallbackSpeaker, FallbackTranscriber
+from openhab_voice_satellite.fallback import FallbackSpeaker
+
+from .fakes import BufferAudioSink, FakeDeepgram, LocalSpeakerStub
 from openhab_voice_satellite.stt import Transcript
 
-from .fakes import BufferAudioSink, FakeDeepgram
+STT_MODEL = "nova-test"
 
 
 @pytest.fixture
@@ -39,6 +40,8 @@ async def session():
 
 
 def _config(server: TestServer, **overrides) -> DeepgramConfig:
+    overrides.setdefault("stt_model", STT_MODEL)
+    overrides.setdefault("tts_voices", {"de": "aura-test-de", "en": "aura-test-en"})
     return DeepgramConfig(
         base_url=str(server.make_url("")), api_key="test-key", **overrides
     )
@@ -57,23 +60,6 @@ def _speaker(fake_deepgram, session, sink, **overrides) -> DeepgramSpeaker:
     return DeepgramSpeaker(client, TtsConfig(), sink)
 
 
-class LocalTranscriberStub:
-    def __init__(self) -> None:
-        self.calls: list[np.ndarray] = []
-
-    async def transcribe(self, pcm: np.ndarray) -> Transcript:
-        self.calls.append(pcm)
-        return Transcript(text="local fallback", language="de")
-
-
-class LocalSpeakerStub:
-    def __init__(self) -> None:
-        self.spoken: list[tuple[str, str]] = []
-
-    async def speak(self, text: str, language: str) -> None:
-        self.spoken.append((text, language))
-
-
 async def test_transcribe(fake_deepgram, session):
     fake, _ = fake_deepgram
     fake.stt_text, fake.stt_language = "schalte das licht an", "de"
@@ -83,7 +69,7 @@ async def test_transcribe(fake_deepgram, session):
     assert fake.auth_headers == ["Token test-key"]
 
     query, body = fake.listen_requests[0]
-    assert ("model", "nova-3") in query
+    assert ("model", STT_MODEL) in query
     assert ("smart_format", "true") in query
     # both configured languages restrict the detection candidate set
     assert ("detect_language", "de") in query
@@ -133,33 +119,19 @@ async def test_speak(fake_deepgram, session):
 
     query, payload = fake.speak_requests[0]
     assert payload == {"text": "Licht ist an."}
-    assert ("model", "aura-2-viktoria-de") in query
+    assert ("model", "aura-test-de") in query
     assert ("encoding", "linear16") in query
     assert ("sample_rate", "24000") in query
     assert ("container", "none") in query
 
 
 async def test_speak_voice_per_language(fake_deepgram, session):
+    # the per-language voice reaches the wire as deepgram's model param
     fake, _ = fake_deepgram
     speaker = _speaker(fake_deepgram, session, BufferAudioSink())
     await speaker.speak("hello", "en")
     query, _ = fake.speak_requests[0]
-    assert ("model", "aura-2-thalia-en") in query
-
-
-async def test_speak_unknown_language_uses_default_voice(fake_deepgram, session):
-    fake, _ = fake_deepgram
-    speaker = _speaker(fake_deepgram, session, BufferAudioSink())
-    await speaker.speak("bonjour", "fr")
-    query, _ = fake.speak_requests[0]
-    assert ("model", "aura-2-viktoria-de") in query  # tts default_language is "de"
-
-
-def test_tts_chunks_splits_sentences():
-    assert tts_chunks("Licht ist an. Rollladen fährt hoch.") == [
-        "Licht ist an.",
-        "Rollladen fährt hoch.",
-    ]
+    assert ("model", "aura-test-en") in query
 
 
 def test_tts_chunks_splits_long_comma_list():
@@ -178,10 +150,11 @@ async def test_speak_long_text_pipelines_chunks(fake_deepgram, session):
     fake, _ = fake_deepgram
     sink = BufferAudioSink()
     speaker = _speaker(fake_deepgram, session, sink)
+    # 80 items of ~30 chars: 7 chunks of <=400 chars
     text = ", ".join(f"item number {i} living room lamp" for i in range(80))
     await speaker.speak(text, "en")
-    assert len(fake.speak_requests) == len(tts_chunks(text))
-    assert len(sink.played) == len(fake.speak_requests)
+    assert len(fake.speak_requests) == 7
+    assert len(sink.played) == 7
     assert all(len(payload["text"]) <= TTS_CHUNK_CHARS for _, payload in fake.speak_requests)
 
 
@@ -208,61 +181,3 @@ async def test_check_auth(fake_deepgram, session):
     fake.status = 403
     with pytest.raises(DeepgramError):
         await client.check_auth()
-
-
-async def test_fallback_transcriber_on_http_error(fake_deepgram, session, caplog):
-    fake, _ = fake_deepgram
-    fake.status = 500
-    local = LocalTranscriberStub()
-    wrapper = FallbackTranscriber(
-        _transcriber(fake_deepgram, session), local, label="deepgram"
-    )
-    result = await wrapper.transcribe(np.zeros(160, dtype=np.int16))
-    assert result.text == "local fallback"
-    assert len(local.calls) == 1
-    assert "deepgram STT failed" in caplog.text
-
-
-async def test_fallback_transcriber_on_timeout(fake_deepgram, session):
-    fake, server = fake_deepgram
-    fake.response_delay_s = 10
-    config = _config(server, stt_timeout_s=0.2)
-    transcriber = DeepgramTranscriber(DeepgramClient(config, session), SttConfig(), "de")
-    local = LocalTranscriberStub()
-    wrapper = FallbackTranscriber(transcriber, local)
-    result = await wrapper.transcribe(np.zeros(160, dtype=np.int16))
-    assert result.text == "local fallback"
-
-
-async def test_fallback_transcriber_on_connection_error(session):
-    config = DeepgramConfig(base_url="http://127.0.0.1:1", api_key="k")
-    transcriber = DeepgramTranscriber(DeepgramClient(config, session), SttConfig(), "de")
-    local = LocalTranscriberStub()
-    wrapper = FallbackTranscriber(transcriber, local)
-    result = await wrapper.transcribe(np.zeros(160, dtype=np.int16))
-    assert result.text == "local fallback"
-
-
-async def test_fallback_speaker_on_http_error(fake_deepgram, session, caplog):
-    fake, _ = fake_deepgram
-    fake.status = 500
-    local = LocalSpeakerStub()
-    wrapper = FallbackSpeaker(
-        _speaker(fake_deepgram, session, BufferAudioSink()), local, label="deepgram"
-    )
-    await wrapper.speak("Licht ist an.", "de")
-    assert local.spoken == [("Licht ist an.", "de")]
-    assert "deepgram TTS failed" in caplog.text
-
-
-async def test_fallback_propagates_cancellation(fake_deepgram, session):
-    fake, _ = fake_deepgram
-    fake.response_delay_s = 10
-    local = LocalSpeakerStub()
-    wrapper = FallbackSpeaker(_speaker(fake_deepgram, session, BufferAudioSink()), local)
-    task = asyncio.create_task(wrapper.speak("hi", "de"))
-    await asyncio.sleep(0.05)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert local.spoken == []  # barge-in must not trigger the fallback

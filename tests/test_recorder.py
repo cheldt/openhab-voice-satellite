@@ -6,47 +6,7 @@ import pytest
 from openhab_voice_satellite.config import VadConfig
 from openhab_voice_satellite.recorder import NoSpeechError, record_utterance
 
-FRAME = 1280  # 80 ms at 16 kHz
-
-
-class FakeEndpointer:
-    """Scripted endpointer: speech starts at frame `speech_at`, ends at `endpoint_at`.
-
-    `later` holds (speech_at, endpoint_at) scripts for follow-up recordings;
-    each `record_utterance` reset advances to the next one (last repeats).
-    """
-
-    def __init__(
-        self,
-        speech_at: int | None,
-        endpoint_at: int | None,
-        later: list[tuple[int | None, int | None]] | None = None,
-    ) -> None:
-        self._scripts = [(speech_at, endpoint_at)] + list(later or [])
-        self._resets = 0
-        self.reset()
-
-    def reset(self) -> None:
-        # __init__ and the first recording both use scripts[0].
-        idx = min(max(self._resets - 1, 0), len(self._scripts) - 1)
-        self._speech_at, self._endpoint_at = self._scripts[idx]
-        self._resets += 1
-        self._frames = 0
-        self.speech_started = False
-
-    def update(self, frame: np.ndarray) -> bool:
-        self._frames += 1
-        if self._speech_at is not None and self._frames >= self._speech_at:
-            self.speech_started = True
-        return self.speech_started
-
-    @property
-    def endpoint_reached(self) -> bool:
-        return self._endpoint_at is not None and self._frames >= self._endpoint_at
-
-    @property
-    def elapsed_s(self) -> float:
-        return self._frames * FRAME / 16000
+from .fakes import FRAME, FakeEndpointer
 
 
 async def _fill_queue(n_frames: int) -> asyncio.Queue:

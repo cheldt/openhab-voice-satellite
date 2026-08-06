@@ -2,7 +2,6 @@ import asyncio
 import uuid
 
 import aiohttp
-import numpy as np
 import pytest
 from aiohttp.test_utils import TestServer
 
@@ -11,39 +10,16 @@ from openhab_voice_satellite.config import Config
 from openhab_voice_satellite.openhab import OpenHABClient
 from openhab_voice_satellite.pipeline import Pipeline
 from openhab_voice_satellite.state import Event, State
-from openhab_voice_satellite.stt import Transcript
 
-from .fakes import BufferAudioSink, FakeOpenHAB, SilenceAudioSource
-from .test_recorder import FakeEndpointer
-
-
-class FakeTranscriber:
-    def __init__(self, texts: str | list[str] = "schalte das licht an", language: str = "de") -> None:
-        self._texts = [texts] if isinstance(texts, str) else list(texts)
-        self._language = language
-
-    async def transcribe(self, pcm: np.ndarray) -> Transcript:
-        await asyncio.sleep(0.01)
-        text = self._texts.pop(0) if len(self._texts) > 1 else self._texts[0]
-        return Transcript(text=text, language=self._language)
-
-
-class FakeSpeaker:
-    def __init__(self, sink: BufferAudioSink, duration_s: float = 0.0) -> None:
-        self._sink = sink
-        self._duration_s = duration_s
-        self.spoken: list[tuple[str, str]] = []
-
-    async def speak(self, text: str, language: str) -> None:
-        self.spoken.append((text, language))
-        await self._sink.play(np.zeros(160, dtype=np.int16), 16000)
-        if self._duration_s:
-            await asyncio.sleep(self._duration_s)
-
-
-class NullEarcons:
-    async def play(self, name: str) -> None:
-        pass
+from .fakes import (
+    BufferAudioSink,
+    FakeEndpointer,
+    FakeOpenHAB,
+    FakeSpeaker,
+    FakeTranscriber,
+    NullEarcons,
+    SilenceAudioSource,
+)
 
 
 @pytest.fixture
@@ -120,9 +96,13 @@ async def test_barge_in_cancels_speaking(env):
     pipeline = _make_pipeline(config, openhab, broadcaster, sink, speaker, states)
 
     task = asyncio.create_task(pipeline.run_interaction())
-    while State.SPEAKING not in states:
-        await asyncio.sleep(0.01)
-        assert not task.done()
+
+    async def _until_speaking() -> None:
+        while State.SPEAKING not in states:
+            await asyncio.sleep(0.01)
+            assert not task.done()
+
+    await asyncio.wait_for(_until_speaking(), timeout=5.0)
     sink.stop()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

@@ -1,4 +1,4 @@
-"""Test doubles: silence audio source, buffering sink, fake cloud/openHAB servers."""
+"""Test doubles: audio sources/sinks, engine stubs, fake cloud/openHAB servers."""
 
 from __future__ import annotations
 
@@ -9,6 +9,100 @@ from typing import AsyncIterator
 
 import numpy as np
 from aiohttp import web
+
+from openhab_voice_satellite.stt import Transcript
+
+FRAME = 1280  # 80 ms at 16 kHz
+
+
+class FakeEndpointer:
+    """Scripted endpointer: speech starts at frame `speech_at`, ends at `endpoint_at`.
+
+    `later` holds (speech_at, endpoint_at) scripts for follow-up recordings;
+    each `record_utterance` reset advances to the next one (last repeats).
+    """
+
+    def __init__(
+        self,
+        speech_at: int | None,
+        endpoint_at: int | None,
+        later: list[tuple[int | None, int | None]] | None = None,
+    ) -> None:
+        self._scripts = [(speech_at, endpoint_at)] + list(later or [])
+        self._resets = 0
+        self.reset()
+
+    def reset(self) -> None:
+        # __init__ and the first recording both use scripts[0].
+        idx = min(max(self._resets - 1, 0), len(self._scripts) - 1)
+        self._speech_at, self._endpoint_at = self._scripts[idx]
+        self._resets += 1
+        self._frames = 0
+        self.speech_started = False
+
+    def update(self, frame: np.ndarray) -> bool:
+        self._frames += 1
+        if self._speech_at is not None and self._frames >= self._speech_at:
+            self.speech_started = True
+        return self.speech_started
+
+    @property
+    def endpoint_reached(self) -> bool:
+        return self._endpoint_at is not None and self._frames >= self._endpoint_at
+
+    @property
+    def elapsed_s(self) -> float:
+        return self._frames * FRAME / 16000
+
+
+class FakeTranscriber:
+    def __init__(self, texts: str | list[str] = "schalte das licht an", language: str = "de") -> None:
+        self._texts = [texts] if isinstance(texts, str) else list(texts)
+        self._language = language
+
+    async def transcribe(self, pcm: np.ndarray) -> Transcript:
+        await asyncio.sleep(0.01)
+        text = self._texts.pop(0) if len(self._texts) > 1 else self._texts[0]
+        return Transcript(text=text, language=self._language)
+
+
+class FakeSpeaker:
+    def __init__(self, sink: BufferAudioSink, duration_s: float = 0.0) -> None:
+        self._sink = sink
+        self._duration_s = duration_s
+        self.spoken: list[tuple[str, str]] = []
+
+    async def speak(self, text: str, language: str) -> None:
+        self.spoken.append((text, language))
+        await self._sink.play(np.zeros(160, dtype=np.int16), 16000)
+        if self._duration_s:
+            await asyncio.sleep(self._duration_s)
+
+
+class NullEarcons:
+    async def play(self, name: str) -> None:
+        pass
+
+
+class LocalTranscriberStub:
+    """Fallback target: records calls, answers a fixed transcript."""
+
+    def __init__(self) -> None:
+        self.calls: list[np.ndarray] = []
+
+    async def transcribe(self, pcm: np.ndarray) -> Transcript:
+        self.calls.append(pcm)
+        return Transcript(text="local fallback", language="de")
+
+
+class LocalSpeakerStub:
+    """Fallback target: records what it was asked to speak."""
+
+    def __init__(self) -> None:
+        self.spoken: list[tuple[str, str]] = []
+
+    async def speak(self, text: str, language: str) -> None:
+        self.spoken.append((text, language))
 
 
 class SilenceAudioSource:

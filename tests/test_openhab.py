@@ -17,139 +17,92 @@ async def fake_openhab():
     await server.close()
 
 
-async def _make_client(server: TestServer, **overrides) -> tuple[OpenHABClient, aiohttp.ClientSession]:
-    config = OpenHABConfig(url=str(server.make_url("")), **overrides)
+@pytest.fixture
+async def session():
     session = aiohttp.ClientSession()
-    client = OpenHABClient(config, session)
-    return client, session
+    yield session
+    await session.close()
 
 
-async def test_ping(fake_openhab):
+def _client(server: TestServer, session: aiohttp.ClientSession, **overrides) -> OpenHABClient:
+    config = OpenHABConfig(url=str(server.make_url("")), **overrides)
+    return OpenHABClient(config, session)
+
+
+async def test_ping(fake_openhab, session):
     fake, server = fake_openhab
-    client, session = await _make_client(server)
-    try:
-        await client.ping()
-    finally:
-        await session.close()
+    await _client(server, session).ping()
 
 
-async def test_command_and_response(fake_openhab):
+async def test_command_and_response(fake_openhab, session):
     fake, server = fake_openhab
-    client, session = await _make_client(server)
-    try:
-        response = await client.send_command("schalte das licht an")
-        assert response == "Licht ist an."
-        assert fake.commands == ["schalte das licht an"]
-        assert fake.llm_tools == ["item-send-command"]
-        assert fake.headers[0]["Content-Type"].startswith("text/plain")
-    finally:
-        await session.close()
+    response = await _client(server, session).send_command("schalte das licht an")
+    assert response == "Licht ist an."
+    assert fake.commands == ["schalte das licht an"]
+    assert fake.llm_tools == ["item-send-command"]
+    assert fake.conversations == [None]  # no ?conversation= without an id
+    assert fake.headers[0]["Content-Type"].startswith("text/plain")
 
 
-async def test_llm_tools_omitted_when_null(fake_openhab):
+async def test_llm_tools_omitted_when_null(fake_openhab, session):
     fake, server = fake_openhab
-    client, session = await _make_client(server, llm_tools=None)
-    try:
-        await client.send_command("hallo")
-        assert fake.llm_tools == [None]
-    finally:
-        await session.close()
+    await _client(server, session, llm_tools=None).send_command("hallo")
+    assert fake.llm_tools == [None]
 
 
-async def test_conversation_param_sent(fake_openhab):
+async def test_conversation_param_sent(fake_openhab, session):
     fake, server = fake_openhab
-    client, session = await _make_client(server)
-    try:
-        await client.send_command("hallo", "abc-123")
-        assert fake.conversations == ["abc-123"]
-        assert fake.llm_tools == ["item-send-command"]  # composed with llmTools
-    finally:
-        await session.close()
+    await _client(server, session).send_command("hallo", "abc-123")
+    assert fake.conversations == ["abc-123"]
+    assert fake.llm_tools == ["item-send-command"]  # composed with llmTools
 
 
-async def test_conversation_param_omitted(fake_openhab):
+async def test_end_conversation(fake_openhab, session):
     fake, server = fake_openhab
-    client, session = await _make_client(server)
-    try:
-        await client.send_command("hallo")
-        assert fake.conversations == [None]
-    finally:
-        await session.close()
+    await _client(server, session).end_conversation("abc-123")
+    assert fake.deleted == ["abc-123"]
 
 
-async def test_end_conversation(fake_openhab):
-    fake, server = fake_openhab
-    client, session = await _make_client(server)
-    try:
-        await client.end_conversation("abc-123")
-        assert fake.deleted == ["abc-123"]
-    finally:
-        await session.close()
-
-
-async def test_end_conversation_best_effort_on_http_error(fake_openhab, caplog):
+async def test_end_conversation_best_effort_on_http_error(fake_openhab, session, caplog):
     fake, server = fake_openhab
     fake.delete_status = 500
-    client, session = await _make_client(server)
-    try:
-        await client.end_conversation("abc-123")  # must not raise
-        assert "conversation DELETE returned HTTP 500" in caplog.text
-    finally:
-        await session.close()
+    await _client(server, session).end_conversation("abc-123")  # must not raise
+    assert "conversation DELETE returned HTTP 500" in caplog.text
 
 
-async def test_end_conversation_best_effort_on_connection_error(fake_openhab, caplog):
+async def test_end_conversation_best_effort_on_connection_error(fake_openhab, session, caplog):
     fake, server = fake_openhab
-    client, session = await _make_client(server)
+    client = _client(server, session)
     await server.close()
-    try:
-        await client.end_conversation("abc-123")  # must not raise
-        assert "failed to end conversation" in caplog.text
-    finally:
-        await session.close()
+    await client.end_conversation("abc-123")  # must not raise
+    assert "failed to end conversation" in caplog.text
 
 
-async def test_bearer_token_sent(fake_openhab, monkeypatch):
+async def test_bearer_token_sent(fake_openhab, session, monkeypatch):
     fake, server = fake_openhab
     monkeypatch.setenv("OPENHAB_TOKEN", "secret-token")
-    client, session = await _make_client(server)
-    try:
-        await client.send_command("hallo")
-        assert fake.headers[0]["Authorization"] == "Bearer secret-token"
-    finally:
-        await session.close()
+    await _client(server, session).send_command("hallo")
+    assert fake.headers[0]["Authorization"] == "Bearer secret-token"
 
 
-async def test_http_error_raises(fake_openhab):
+async def test_http_error_raises(fake_openhab, session):
     fake, server = fake_openhab
     fake.status = 500
-    client, session = await _make_client(server)
-    try:
-        with pytest.raises(aiohttp.ClientResponseError):
-            await client.send_command("hallo")
-    finally:
-        await session.close()
+    with pytest.raises(aiohttp.ClientResponseError):
+        await _client(server, session).send_command("hallo")
 
 
-async def test_http_error_logs_body(fake_openhab, caplog):
+async def test_http_error_logs_body(fake_openhab, session, caplog):
     fake, server = fake_openhab
     fake.status = 400
     fake.error_body = '{"error":{"message":"Cannot interpret due to a technical problem."}}'
-    client, session = await _make_client(server)
-    try:
-        with pytest.raises(aiohttp.ClientResponseError):
-            await client.send_command("hallo")
-        assert "Cannot interpret" in caplog.text
-    finally:
-        await session.close()
+    with pytest.raises(aiohttp.ClientResponseError):
+        await _client(server, session).send_command("hallo")
+    assert "Cannot interpret" in caplog.text
 
 
-async def test_response_timeout(fake_openhab):
+async def test_response_timeout(fake_openhab, session):
     fake, server = fake_openhab
     fake.response_delay_s = 10
-    client, session = await _make_client(server, response_timeout_s=0.2)
-    try:
-        with pytest.raises(TimeoutError):
-            await client.send_command("hallo")
-    finally:
-        await session.close()
+    with pytest.raises(TimeoutError):
+        await _client(server, session, response_timeout_s=0.2).send_command("hallo")
