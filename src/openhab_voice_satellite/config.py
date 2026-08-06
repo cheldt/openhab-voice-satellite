@@ -16,7 +16,14 @@ class AudioConfig(BaseModel):
     output_device: str | None = None
     sample_rate: int = 16000
     frame_ms: int = 80
-    output_lead_in_ms: int = Field(300, ge=0)  # silence before playback; masks USB-DAC unmute delay
+    # ramped noise before a sound that follows an idle period; wakes powered
+    # speakers whose signal-sensing mute ignores the keep-alive dither.
+    # 0 = off. (replaces output_lead_in_ms, which still loads but is unused)
+    wakeup_preamble_ms: int = Field(0, ge=0)
+    # quiet gap after which the next sound gets the preamble; match this to
+    # how fast the speaker's mute kicks in (0 = before every sound)
+    wakeup_preamble_idle_s: float = Field(60.0, ge=0.0)
+    output_lead_in_ms: int = Field(300, ge=0)  # obsolete, kept so old configs load
 
     @property
     def frame_samples(self) -> int:

@@ -6,7 +6,8 @@ audio:
   output_device: null
   sample_rate: 16000
   frame_ms: 80              # 1280 samples = one openWakeWord chunk
-  output_lead_in_ms: 300    # silence prepended to playback; masks USB-DAC unmute delay
+  wakeup_preamble_ms: 0     # ramped noise before a sound after an idle gap; wakes powered speakers from signal-sensing mute (try 500)
+  wakeup_preamble_idle_s: 60  # gap that counts as idle; match the speaker's mute delay (0 = preamble before every sound)
 
 wakeword:
   model: "hey_jarvis"       # openWakeWord pretrained name or path to a custom .onnx

@@ -64,7 +64,8 @@ class App:
         )
         sink = PipewireSink(
             device=config.audio.output_device,
-            lead_in_ms=config.audio.output_lead_in_ms,
+            wakeup_preamble_ms=config.audio.wakeup_preamble_ms,
+            wakeup_preamble_idle_s=config.audio.wakeup_preamble_idle_s,
         )
         earcons = Earcons(config.earcons, sink, self._base_dir)
         if config.tts.engine == "piper":
