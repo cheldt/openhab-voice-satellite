@@ -3,6 +3,7 @@ import asyncio
 import numpy as np
 import pytest
 
+from openhab_voice_satellite import recorder
 from openhab_voice_satellite.config import VadConfig
 from openhab_voice_satellite.recorder import NoSpeechError, record_utterance
 
@@ -54,3 +55,34 @@ async def test_source_closed_raises():
     endpointer = FakeEndpointer(speech_at=None, endpoint_at=None)
     with pytest.raises(NoSpeechError):
         await record_utterance(queue, endpointer, VadConfig())
+
+
+async def test_mic_stall_raises_within_wall_clock_timeout(monkeypatch):
+    # sample-counted timeouts can never fire on a silent queue; the
+    # wall-clock backstop must exit LISTENING instead of hanging forever
+    monkeypatch.setattr(recorder, "MIC_STALL_TIMEOUT_S", 0.1)
+    queue: asyncio.Queue = asyncio.Queue()  # never delivers a frame
+    endpointer = FakeEndpointer(speech_at=None, endpoint_at=None)
+    with pytest.raises(NoSpeechError, match="stalled"):
+        await asyncio.wait_for(
+            record_utterance(queue, endpointer, VadConfig()), timeout=2.0
+        )
+
+
+async def test_mic_stall_mid_speech_returns_partial(monkeypatch):
+    monkeypatch.setattr(recorder, "MIC_STALL_TIMEOUT_S", 0.1)
+    queue = await _fill_queue(5)  # speech starts, then the mic goes silent
+    endpointer = FakeEndpointer(speech_at=1, endpoint_at=None)
+    pcm = await asyncio.wait_for(
+        record_utterance(queue, endpointer, VadConfig()), timeout=2.0
+    )
+    assert len(pcm) == 5 * FRAME
+
+
+async def test_dropped_frames_warned(caplog):
+    queue = await _fill_queue(10)
+    queue.dropped = 3  # what a SubscriberQueue reports after backpressure
+    endpointer = FakeEndpointer(speech_at=1, endpoint_at=5)
+    with caplog.at_level("WARNING"):
+        await record_utterance(queue, endpointer, VadConfig())
+    assert "dropped mic frames" in caplog.text

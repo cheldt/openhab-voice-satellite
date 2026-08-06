@@ -6,7 +6,7 @@ import asyncio
 
 import numpy as np
 
-from openhab_voice_satellite.audio.broadcast import AudioBroadcaster
+from openhab_voice_satellite.audio.broadcast import AudioBroadcaster, SubscriberQueue
 
 
 class ScriptedSource:
@@ -67,6 +67,25 @@ async def test_stop_unblocks_waiting_subscriber():
     await broadcaster.stop()
     # stop() must fan out the sentinel or the consumer hangs forever
     assert await asyncio.wait_for(consumer, timeout=1.0) is None
+
+
+async def test_backpressure_evictions_are_counted():
+    broadcaster = AudioBroadcaster(ScriptedSource(10), queue_size=3)
+    q = broadcaster.subscribe()
+    broadcaster.start()
+    await asyncio.sleep(0.05)
+    # 10 frames + sentinel into 3 slots: 7 frames evicted by frames, then
+    # the sentinel evicts one more real frame
+    assert q.dropped == 8
+
+
+async def test_evicting_the_sentinel_is_not_a_lost_frame():
+    q = SubscriberQueue(maxsize=1)
+    AudioBroadcaster._put_drop_oldest(q, None)
+    AudioBroadcaster._put_drop_oldest(q, np.full(4, 1, dtype=np.int16))
+    assert q.dropped == 0  # replaced the sentinel, no audio lost
+    AudioBroadcaster._put_drop_oldest(q, np.full(4, 2, dtype=np.int16))
+    assert q.dropped == 1
 
 
 async def test_late_subscriber_misses_earlier_frames():

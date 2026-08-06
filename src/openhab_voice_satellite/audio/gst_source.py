@@ -15,6 +15,7 @@ from .gst_devices import resolve_node
 log = logging.getLogger(__name__)
 
 FIRST_FRAME_TIMEOUT_S = 5.0
+DROP_WARN_INTERVAL_S = 5.0
 
 
 class PipewireSource:
@@ -36,6 +37,8 @@ class PipewireSource:
         self._chunker = FrameChunker(frame_samples)
         self._got_frame = False
         self._caps_logged = False
+        self._dropped = 0
+        self._last_drop_warn = float("-inf")
         self._pipeline = Gst.parse_launch(self._describe(target, sample_rate))
         self._pipeline.get_by_name("sink").connect("new-sample", self._on_sample)
         install_sync_handler(Gst, self._pipeline.get_bus(), self._on_error, self._on_eos)
@@ -75,14 +78,25 @@ class PipewireSource:
         return self._Gst.FlowReturn.OK
 
     def _put_frames(self, frames: list[np.ndarray]) -> None:
+        # runs on the event loop (via call_soon_threadsafe), so logging is safe
         self._got_frame = True
         for frame in frames:
             if self._queue.full():
-                # drop oldest so live audio keeps flowing under backpressure
+                # drop oldest so live audio keeps flowing under backpressure;
+                # only happens when the event loop stalled for ~4s
                 try:
                     self._queue.get_nowait()
                 except asyncio.QueueEmpty:
                     pass
+                else:
+                    self._dropped += 1
+                    now = self._loop.time()
+                    if now - self._last_drop_warn >= DROP_WARN_INTERVAL_S:
+                        self._last_drop_warn = now
+                        log.warning(
+                            "mic capture queue overflow: %d frames dropped so far",
+                            self._dropped,
+                        )
             self._queue.put_nowait(frame)
 
     def _warn_if_stalled(self, target: str | None) -> None:

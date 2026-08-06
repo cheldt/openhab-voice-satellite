@@ -12,6 +12,20 @@ from .source import AudioSource
 log = logging.getLogger(__name__)
 
 
+class SubscriberQueue(asyncio.Queue):
+    """Bounded frame queue that counts drop-oldest evictions.
+
+    Dropped frames are spliced out of the utterance invisibly; the counter
+    lets consumers report the loss instead of hiding it. Gaps are NOT
+    zero-filled: fabricated silence would count toward the endpointer's
+    silence window and could end an utterance mid-drop.
+    """
+
+    def __init__(self, maxsize: int) -> None:
+        super().__init__(maxsize)
+        self.dropped = 0  # frames evicted under backpressure
+
+
 class AudioBroadcaster:
     """Reads frames from an AudioSource and fans them out to subscriber queues.
 
@@ -24,11 +38,11 @@ class AudioBroadcaster:
     def __init__(self, source: AudioSource, queue_size: int = 50) -> None:
         self._source = source
         self._queue_size = queue_size
-        self._subscribers: list[asyncio.Queue[np.ndarray | None]] = []
+        self._subscribers: list[SubscriberQueue] = []
         self._task: asyncio.Task | None = None
 
-    def subscribe(self) -> asyncio.Queue[np.ndarray | None]:
-        queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue(maxsize=self._queue_size)
+    def subscribe(self) -> SubscriberQueue:
+        queue = SubscriberQueue(maxsize=self._queue_size)
         self._subscribers.append(queue)
         return queue
 
@@ -46,12 +60,15 @@ class AudioBroadcaster:
         self._end_stream()
 
     @staticmethod
-    def _put_drop_oldest(queue: asyncio.Queue, item: np.ndarray | None) -> None:
+    def _put_drop_oldest(queue: SubscriberQueue, item: np.ndarray | None) -> None:
         if queue.full():
             try:
-                queue.get_nowait()
+                evicted = queue.get_nowait()
             except asyncio.QueueEmpty:
                 pass
+            else:
+                if evicted is not None:  # losing the sentinel is not a lost frame
+                    queue.dropped += 1
         queue.put_nowait(item)
 
     def _end_stream(self) -> None:
