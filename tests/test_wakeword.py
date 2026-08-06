@@ -89,3 +89,12 @@ def test_score_reads_prediction_buffer(detector_factory):
     detector = detector_factory({"wake": [0.42]}, model="wake")
     detector.process(FRAME)
     assert detector.score("wake") == pytest.approx(0.42)
+
+
+def test_detector_survives_unpatchable_model(detector_factory, caplog):
+    # StubModel has no .preprocessor: the ring-buffer patch must fail open
+    # (warning + stock behavior), never break detector construction
+    with caplog.at_level("WARNING"):
+        detector = detector_factory({"wake": [0.9]}, model="wake")
+    assert "ring-buffer patch skipped" in caplog.text
+    assert detector.process(FRAME) == "wake"

@@ -25,7 +25,7 @@ stt:
   engine: "local"           # "gemini"/"deepgram" = cloud STT; falls back to local whisper on failure
   model: "small"            # faster-whisper model name or local path ("base" = faster, less accurate)
   compute_type: "int8"
-  cpu_threads: 4
+  cpu_threads: 3            # leave 1 core free: wakeword must keep its 80 ms cadence during transcription (barge-in)
   beam_size: 1              # 1 = greedy (fastest); 5 = more accurate, much slower
   languages: ["de", "en"]   # auto-detect restricted to these; single entry skips detection
 

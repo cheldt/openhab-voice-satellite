@@ -70,6 +70,12 @@ Create the openHAB side (see README section "openHAB setup"): a configured
 voice interpreter that answers free text, plus an API token (openHAB UI ->
 profile -> API tokens).
 
+`stt.cpu_threads` defaults to 3 on purpose: whisper (ctranslate2) runs with
+the GIL released and saturates every core it is given, but the always-on
+wakeword monitor must keep its 80 ms cadence during transcription or
+barge-in ("stop" while THINKING/SPEAKING) goes deaf. On the 4-core Pi 5
+leave at least one core free; only raise this on machines with more cores.
+
 ## 5. Self-test
 
 ```bash

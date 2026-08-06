@@ -7,6 +7,7 @@ import logging
 import numpy as np
 
 from .config import WakewordConfig
+from .wakeword_buffer import use_ring_buffer
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class WakewordDetector:
         except TypeError:
             log.warning("openwakeword lacks ncpu kwarg; upgrade to >=0.6.0 to bound CPU")
             self._model = Model(wakeword_models=models, inference_framework="onnx")
+        use_ring_buffer(self._model)
         keys = list(self._model.models.keys())
         self._wake_key = keys[0]
         if config.stop_model:

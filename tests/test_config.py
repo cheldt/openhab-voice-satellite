@@ -61,6 +61,11 @@ def test_engine_defaults_local():
     assert config.tts.engine == "piper"
 
 
+def test_stt_cpu_threads_default_leaves_a_core_free():
+    # 3, not 4: whisper must not starve the wakeword loop on a 4-core Pi 5
+    assert Config().stt.cpu_threads == 3
+
+
 def test_gemini_env_key_wins(monkeypatch):
     config = Config.model_validate({"gemini": {"api_key": "file-key"}})
     assert config.gemini.key == "file-key"

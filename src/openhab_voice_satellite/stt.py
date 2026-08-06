@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -25,6 +26,15 @@ class Transcriber:
 
         self._config = config
         self._default_language = default_language
+        cores = os.cpu_count() or 1
+        if config.cpu_threads >= cores:
+            # advisory only, never coerced: cpu_count miscounts under
+            # cgroup quotas, and an explicit config choice stays honored
+            log.warning(
+                "stt.cpu_threads=%d uses all %d cores; wakeword/barge-in "
+                "degrades during transcription — recommend %d",
+                config.cpu_threads, cores, max(1, cores - 1),
+            )
         self._model = WhisperModel(
             config.model,
             device="cpu",

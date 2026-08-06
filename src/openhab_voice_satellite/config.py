@@ -62,7 +62,10 @@ class SttConfig(BaseModel):
     engine: Literal["local", "gemini", "deepgram"] = "local"
     model: str = "small"
     compute_type: str = "int8"
-    cpu_threads: int = 4
+    # 3, not 4: ctranslate2 runs with the GIL released and saturates its
+    # threads; on the 4-core Pi 5 one core must stay free or the 80 ms
+    # wakeword cadence starves during THINKING (barge-in goes deaf)
+    cpu_threads: int = 3
     beam_size: int = Field(1, ge=1)
     languages: list[str] = Field(default_factory=lambda: ["de", "en"])
 
