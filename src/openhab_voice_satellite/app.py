@@ -38,6 +38,68 @@ MIC_STALL_WARN_S = 10.0  # no frames for this long -> loud warning
 HEARTBEAT_S = 10.0  # capture-health DEBUG line interval
 
 
+class _CaptureHealth:
+    """Frame-rate/RMS bookkeeping behind the heartbeat + degraded-capture logs."""
+
+    def __init__(self, expected_fps: float) -> None:
+        self._expected_fps = expected_fps
+        self._frames = 0
+        self._rms = 0
+        self._score = 0.0
+        self._start = time.monotonic()
+
+    def restart(self) -> None:
+        """Reset the window clock (after a stall, so the gap isn't counted)."""
+        self._start = time.monotonic()
+
+    def observe(self, frame: np.ndarray, score: float) -> None:
+        self._frames += 1
+        self._rms = max(self._rms, int(np.sqrt(np.mean(frame.astype(np.float64) ** 2))))
+        self._score = max(self._score, score)
+        now = time.monotonic()
+        if now - self._start < HEARTBEAT_S:
+            return
+        log.debug(
+            "monitor: %d frames in %.1fs, peak rms=%d, peak wake score=%.3f",
+            self._frames, now - self._start, self._rms, self._score,
+        )
+        expected = self._expected_fps * (now - self._start)
+        if self._frames < 0.8 * expected:
+            log.warning(
+                "degraded capture: %d of %d expected mic frames in %.0fs "
+                "— wakeword detection will be unreliable",
+                self._frames, int(expected), now - self._start,
+            )
+        self._frames = 0
+        self._rms = 0
+        self._score = 0.0
+        self._start = now
+
+
+class _DuckController:
+    """Duck-and-confirm: a pre-threshold score during playback lowers the
+    volume so the follow-up frames reach the detector more cleanly."""
+
+    def __init__(self) -> None:
+        self._frames_left = 0
+
+    def update(self, speaking: bool, score: float, sink: AudioSink) -> None:
+        if speaking:
+            if score >= DUCK_PRETHRESHOLD and self._frames_left == 0:
+                sink.duck(0.2)
+                self._frames_left = DUCK_HOLD_FRAMES
+            elif self._frames_left > 0:
+                self._frames_left -= 1
+                if self._frames_left == 0:
+                    sink.unduck()
+        elif self._frames_left:
+            self.release(sink)
+
+    def release(self, sink: AudioSink) -> None:
+        self._frames_left = 0
+        sink.unduck()
+
+
 def _build_speaker(config: Config, sink: AudioSink, base_dir: Path) -> SpeakerProtocol:
     """The local TTS engine (or its lazy stand-in when a cloud engine is primary)."""
     if config.tts.engine == "piper":
@@ -178,7 +240,7 @@ class App:
         log.info("interaction cancelled (barge-in)")
         return was_speaking
 
-    async def _interrupt_monitor(  # noqa: C901 - split pending behavior tests
+    async def _interrupt_monitor(
         self,
         wake_queue: asyncio.Queue,
         detector: WakewordDetector,
@@ -187,13 +249,9 @@ class App:
         earcons: Earcons,
     ) -> None:
         """Always-on wakeword loop; starts or cancels the interaction task."""
-        duck_frames_left = 0
-        beat_frames = 0
-        beat_rms = 0
-        beat_score = 0.0
-        beat_start = time.monotonic()
         audio = self._config.audio
-        expected_fps = audio.sample_rate / audio.frame_samples
+        health = _CaptureHealth(audio.sample_rate / audio.frame_samples)
+        duck = _DuckController()
         while True:
             try:
                 frame = await asyncio.wait_for(wake_queue.get(), timeout=MIC_STALL_WARN_S)
@@ -201,63 +259,29 @@ class App:
                 log.warning(
                     "no mic frames for %.0fs — capture stream stalled?", MIC_STALL_WARN_S
                 )
-                beat_start = time.monotonic()
+                health.restart()
                 continue
             if frame is None:
                 log.info("audio source closed, monitor exiting")
                 return
 
-            beat_frames += 1
-            beat_rms = max(beat_rms, int(np.sqrt(np.mean(frame.astype(np.float64) ** 2))))
-            now = time.monotonic()
-            if now - beat_start >= HEARTBEAT_S:
-                log.debug(
-                    "monitor: %d frames in %.1fs, peak rms=%d, peak wake score=%.3f",
-                    beat_frames, now - beat_start, beat_rms, beat_score,
-                )
-                expected = expected_fps * (now - beat_start)
-                if beat_frames < 0.8 * expected:
-                    log.warning(
-                        "degraded capture: %d of %d expected mic frames in %.0fs "
-                        "— wakeword detection will be unreliable",
-                        beat_frames, int(expected), now - beat_start,
-                    )
-                beat_frames = 0
-                beat_rms = 0
-                beat_score = 0.0
-                beat_start = now
-
             speaking = self.state in (State.THINKING, State.SPEAKING)
             detection = detector.process(frame, speaking=speaking)
-            beat_score = max(beat_score, detector.score("wake"))
-
-            # duck-and-confirm: pre-threshold score during playback lowers the
-            # volume so the follow-up frames reach the detector more cleanly
-            if self.state is State.SPEAKING:
-                score = detector.score("wake")
-                if score >= DUCK_PRETHRESHOLD and duck_frames_left == 0:
-                    sink.duck(0.2)
-                    duck_frames_left = DUCK_HOLD_FRAMES
-                elif duck_frames_left > 0:
-                    duck_frames_left -= 1
-                    if duck_frames_left == 0:
-                        sink.unduck()
-            elif duck_frames_left:
-                duck_frames_left = 0
-                sink.unduck()
+            score = detector.score("wake")
+            health.observe(frame, score)
+            duck.update(self.state is State.SPEAKING, score, sink)
 
             if detection is None:
                 continue
 
             if self.state is State.IDLE and detection == "wake":
-                log.info("wakeword detected (score %.2f)", detector.score("wake"))
+                log.info("wakeword detected (score %.2f)", score)
                 detector.reset()
                 self._start_pipeline(pipeline, earcons)
             elif self.state in (State.LISTENING, State.THINKING, State.SPEAKING):
                 # wakeword or stop-word during an interaction = barge-in
                 was_speaking = await self._cancel_pipeline(sink)
-                sink.unduck()
-                duck_frames_left = 0
+                duck.release(sink)
                 detector.reset()
                 if (
                     detection == "wake"
