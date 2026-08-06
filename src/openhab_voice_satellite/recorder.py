@@ -23,6 +23,20 @@ class NoSpeechError(Exception):
     """User said nothing within the no-speech timeout."""
 
 
+async def _next_frame(
+    frames: asyncio.Queue[np.ndarray | None], budget: float
+) -> np.ndarray | None:
+    """One frame within `budget` seconds; TimeoutError/QueueEmpty on none."""
+    if budget <= 0:
+        # window exhausted: consume what already arrived, never wait
+        return frames.get_nowait()
+    # asyncio.timeout, not wait_for: 3.11's wait_for swallows an external
+    # cancel that races a completed get() (gh-86296), which would eat a
+    # barge-in during LISTENING
+    async with asyncio.timeout(budget):
+        return await frames.get()
+
+
 async def record_utterance(
     frames: asyncio.Queue[np.ndarray | None],
     endpointer: SpeechEndpointer,
@@ -45,21 +59,21 @@ async def record_utterance(
     # resetting the per-get cap while the sample clock barely advances
     deadline = loop.time() + timeout_s + config.max_utterance_s + MIC_STALL_TIMEOUT_S
     while True:
-        remaining = deadline - loop.time()
+        budget = min(MIC_STALL_TIMEOUT_S, deadline - loop.time())
         try:
-            frame = await asyncio.wait_for(
-                frames.get(), timeout=max(0.0, min(MIC_STALL_TIMEOUT_S, remaining))
+            frame = await _next_frame(frames, budget)
+        except (TimeoutError, asyncio.QueueEmpty):
+            reason = (
+                f"mic stalled: no frames within {MIC_STALL_TIMEOUT_S:.0f}s"
+                if budget > 0 else "listening window exhausted"
             )
-        except asyncio.TimeoutError:
             if endpointer.speech_started and collected:
                 log.warning(
-                    "mic stalled mid-utterance, keeping %.1fs already collected",
-                    endpointer.elapsed_s,
+                    "%s mid-utterance, keeping %.1fs already collected",
+                    reason, endpointer.elapsed_s,
                 )
                 break
-            raise NoSpeechError(
-                f"mic stalled: no frames within {MIC_STALL_TIMEOUT_S:.0f}s"
-            ) from None
+            raise NoSpeechError(reason) from None
         if frame is None:
             raise NoSpeechError("audio source closed")
         collected.append(frame)

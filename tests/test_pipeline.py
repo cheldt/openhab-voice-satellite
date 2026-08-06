@@ -2,6 +2,7 @@ import asyncio
 import uuid
 
 import aiohttp
+import numpy as np
 import pytest
 from aiohttp.test_utils import TestServer
 
@@ -239,6 +240,36 @@ async def test_barge_in_during_earcon_releases_subscription(env):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert broadcaster._subscribers == []
+
+
+async def test_earcon_echo_backlog_is_trimmed(env):
+    # frames captured while the earcon was audible must not reach the VAD
+    # (echo would set the speech flag); only the newest guard window stays
+    config, fake_oh, openhab, broadcaster = env
+    states: list[State] = []
+    pipeline = _make_pipeline(config, openhab, broadcaster, BufferAudioSink(),
+                              FakeSpeaker(BufferAudioSink()), states)
+    q = broadcaster.subscribe()
+    for i in range(10):
+        q.put_nowait(np.full(4, i, dtype=np.int16))
+
+    pipeline._drain_earcon_echo(q)
+
+    assert q.qsize() == 4  # 300 ms guard at 80 ms frames
+    assert int(q.get_nowait()[0]) == 6  # the newest frames survived
+
+
+async def test_earcon_trim_preserves_end_of_stream_sentinel(env):
+    config, fake_oh, openhab, broadcaster = env
+    states: list[State] = []
+    pipeline = _make_pipeline(config, openhab, broadcaster, BufferAudioSink(),
+                              FakeSpeaker(BufferAudioSink()), states)
+    q = broadcaster.subscribe()
+    q.put_nowait(None)  # source closed while the earcon played
+
+    pipeline._drain_earcon_echo(q)
+
+    assert q.get_nowait() is None  # recorder still sees the close signal
 
 
 async def test_no_speech_first_round(env):

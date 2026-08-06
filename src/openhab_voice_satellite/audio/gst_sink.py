@@ -49,7 +49,9 @@ PREAMBLE_PEAK = 4000  # ramp target; loud enough to register as signal
 PLAYOUT_POLL_S = 0.05  # appsrc level poll cadence while a sound drains
 # audio that has left appsrc but not the speaker: the pulsesink ring
 # (buffer-time default ~200 ms, kept saturated by the keepalive FIFO)
-# plus one in-flight PUSH_CHUNK_MS buffer
+# plus one in-flight PUSH_CHUNK_MS buffer. buffer-time is a request; a
+# server granting a larger ring makes play() return slightly early —
+# harmless: the FIFO still drains and the next play cannot flush it
 SINK_RESIDUAL_S = 0.3
 # appsrc level not draining without a bus error (e.g. dead device):
 # give up backlog + duration + this much later instead of hanging
@@ -278,10 +280,13 @@ class PipewireSink:
             await asyncio.sleep(PLAYOUT_POLL_S)
         try:
             # done fires early on stop() or pipeline error; otherwise let the
-            # pulsesink ring (+ one in-flight chunk) finish playing out
-            await asyncio.wait_for(done.wait(), timeout=SINK_RESIDUAL_S)
-        except asyncio.TimeoutError:
-            pass  # normal completion
+            # pulsesink ring (+ one in-flight chunk) finish playing out.
+            # asyncio.timeout, not wait_for: 3.11's wait_for swallows an
+            # external cancel racing a completed done.wait() (gh-86296)
+            async with asyncio.timeout(SINK_RESIDUAL_S):
+                await done.wait()
+        except TimeoutError:
+            pass  # normal completion: ring played out
 
     def close(self) -> None:
         self._keepalive_task.cancel()

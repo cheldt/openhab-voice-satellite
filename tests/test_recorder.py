@@ -79,6 +79,24 @@ async def test_mic_stall_mid_speech_returns_partial(monkeypatch):
     assert len(pcm) == 5 * FRAME
 
 
+async def test_exhausted_window_still_drains_queued_frames(monkeypatch):
+    # frames already in the queue when the overall window expires must be
+    # consumed, not discarded by an instant timeout
+    monkeypatch.setattr(recorder, "MIC_STALL_TIMEOUT_S", 0.0)
+    queue = await _fill_queue(10)
+    endpointer = FakeEndpointer(speech_at=1, endpoint_at=5)
+    pcm = await record_utterance(queue, endpointer, VadConfig())
+    assert len(pcm) == 5 * FRAME
+
+
+async def test_exhausted_window_message_is_not_a_stall(monkeypatch):
+    monkeypatch.setattr(recorder, "MIC_STALL_TIMEOUT_S", 0.0)
+    queue: asyncio.Queue = asyncio.Queue()
+    endpointer = FakeEndpointer(speech_at=None, endpoint_at=None)
+    with pytest.raises(NoSpeechError, match="window exhausted"):
+        await record_utterance(queue, endpointer, VadConfig())
+
+
 async def test_dropped_frames_warned(caplog):
     queue = await _fill_queue(10)
     queue.dropped = 3  # what a SubscriberQueue reports after backpressure

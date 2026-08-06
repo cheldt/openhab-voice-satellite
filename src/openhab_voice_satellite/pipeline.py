@@ -25,6 +25,9 @@ from .vad import SpeechEndpointer
 log = logging.getLogger(__name__)
 
 LOG_ANSWER_CHARS = 200
+# mic backlog younger than this survives the post-earcon trim; matches the
+# sink's playout residual so it postdates the earcon's audible end
+EARCON_ECHO_GUARD_MS = 300
 
 
 def _truncate_for_log(text: str, limit: int = LOG_ANSWER_CHARS) -> str:
@@ -172,12 +175,14 @@ class Pipeline:
     ) -> Transcript | None:
         """One LISTENING round: subscribe, entry earcon, capture.
 
-        Subscribes before the earcon: speech during/right after it lands in
-        the bounded queue instead of being lost to ~1s of deaf time while
-        the earcon plays. The earcon-period samples cost part of the
-        no-speech budget; the endpointer is not reset afterwards — that
-        would discard speech onset. Earcon echo reaching the VAD at worst
-        wastes one STT round (empty-transcript path in _capture_utterance).
+        Subscribes before the earcon so no deaf window follows it, then
+        drops the backlog captured while the earcon was audible: on devices
+        without echo cancellation the earcon's echo would set the
+        endpointer's speech flag, and an echo-only utterance ends the whole
+        interaction (empty transcript -> None is terminal) or feeds echo to
+        STT. Frames from the last EARCON_ECHO_GUARD_MS survive — the sink's
+        play() returns a beat after the audio finished, so those postdate
+        the earcon and may hold the user's speech onset.
         """
         dialog = self._config.dialog
         frames = self._broadcaster.subscribe()
@@ -189,9 +194,21 @@ class Pipeline:
                 if play_wake_earcon:
                     await self._earcons.play("wake")
                 timeout = None  # first round uses vad.no_speech_timeout_s
+            if round_no > 0 or play_wake_earcon:
+                self._drain_earcon_echo(frames)
             return await self._capture_utterance(frames, no_speech_timeout_s=timeout)
         finally:
+            # cancellation backstop; the normal path already released it
             self._broadcaster.unsubscribe(frames)
+
+    def _drain_earcon_echo(self, frames: asyncio.Queue) -> None:
+        """Drop queued mic frames older than the echo guard window."""
+        keep = -(-EARCON_ECHO_GUARD_MS // self._config.audio.frame_ms)  # ceil
+        while frames.qsize() > keep:
+            if frames.get_nowait() is None:
+                # end-of-stream sentinel: keep it for the recorder
+                frames.put_nowait(None)
+                break
 
     async def _capture_utterance(
         self,
@@ -213,6 +230,11 @@ class Pipeline:
         except NoSpeechError:
             log.info("no speech detected, back to idle")
             return None
+        finally:
+            # release as soon as recording ends so the broadcaster stops
+            # feeding a dead queue through the ack earcon and transcription
+            # (unsubscribe is idempotent; _listen_round holds the backstop)
+            self._broadcaster.unsubscribe(frames)
 
         log.info(
             "utterance captured: %.1fs rms=%d",
