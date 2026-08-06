@@ -3,27 +3,15 @@
 from __future__ import annotations
 
 import logging
-import wave
 from pathlib import Path
 
 import numpy as np
 
 from .sink import AudioSink
-from ..config import EarconsConfig
+from .wav import read_wav_mono
+from ..config import EarconsConfig, resolve_path
 
 log = logging.getLogger(__name__)
-
-
-def _load_wav(path: Path) -> tuple[np.ndarray, int]:
-    with wave.open(str(path), "rb") as wav:
-        if wav.getsampwidth() != 2:
-            raise ValueError(f"{path}: earcons must be 16-bit PCM")
-        rate = wav.getframerate()
-        raw = wav.readframes(wav.getnframes())
-        pcm = np.frombuffer(raw, dtype=np.int16)
-        if wav.getnchannels() > 1:
-            pcm = pcm.reshape(-1, wav.getnchannels())[:, 0].copy()
-    return pcm, rate
 
 
 class Earcons:
@@ -39,9 +27,9 @@ class Earcons:
             ("error", config.error),
             ("idle", config.idle),
         ):
-            path = Path(rel) if Path(rel).is_absolute() else base / rel
+            path = resolve_path(rel, base)
             if path.exists():
-                self._sounds[name] = _load_wav(path)
+                self._sounds[name] = read_wav_mono(path)
             else:
                 log.warning("earcon file missing, skipping: %s", path)
 

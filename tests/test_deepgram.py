@@ -54,7 +54,7 @@ def _speaker(fake_deepgram, session, sink, **overrides) -> DeepgramSpeaker:
     _, server = fake_deepgram
     config = _config(server, **overrides)
     client = DeepgramClient(config, session)
-    return DeepgramSpeaker(client, config, TtsConfig(), sink)
+    return DeepgramSpeaker(client, TtsConfig(), sink)
 
 
 class LocalTranscriberStub:

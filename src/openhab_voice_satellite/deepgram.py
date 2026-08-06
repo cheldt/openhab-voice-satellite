@@ -10,9 +10,10 @@ import aiohttp
 import numpy as np
 
 from .audio.sink import AudioSink
+from .audio.wav import pcm_to_wav_bytes
+from .cloud import pick_voice, raise_for_status
 from .config import SAMPLE_RATE, DeepgramConfig, SttConfig, TtsConfig
 from .fallback import FALLBACK_ERRORS, CloudEngineError, PartialSpeechError
-from .gemini import pcm_to_wav_bytes
 from .stt import Transcript
 from .tts import split_sentences
 
@@ -48,20 +49,20 @@ class DeepgramError(CloudEngineError):
 
 class DeepgramClient:
     def __init__(self, config: DeepgramConfig, session: aiohttp.ClientSession) -> None:
-        self._config = config
+        self.config = config
         self._session = session
 
     def _headers(self, content_type: str) -> dict[str, str]:
         # header instead of ?key= keeps the key out of URLs and logs
         return {
-            "Authorization": f"Token {self._config.key or ''}",
+            "Authorization": f"Token {self.config.key or ''}",
             "Content-Type": content_type,
         }
 
     async def listen(
         self, wav: bytes, params: list[tuple[str, str]], timeout_s: float
     ) -> dict:
-        url = f"{self._config.base_url}/v1/listen"
+        url = f"{self.config.base_url}/v1/listen"
         timeout = aiohttp.ClientTimeout(total=timeout_s)
         async with self._session.post(
             url,
@@ -70,15 +71,13 @@ class DeepgramClient:
             headers=self._headers("audio/wav"),
             timeout=timeout,
         ) as resp:
-            body = await resp.text()
-            if resp.status >= 400:
-                raise DeepgramError(f"HTTP {resp.status} from /v1/listen: {body[:500]}")
-            return json.loads(body)
+            await raise_for_status(resp, DeepgramError, "/v1/listen")
+            return json.loads(await resp.text())
 
     async def speak(
         self, text: str, params: list[tuple[str, str]], timeout_s: float
     ) -> bytes:
-        url = f"{self._config.base_url}/v1/speak"
+        url = f"{self.config.base_url}/v1/speak"
         timeout = aiohttp.ClientTimeout(total=timeout_s)
         async with self._session.post(
             url,
@@ -87,21 +86,17 @@ class DeepgramClient:
             headers=self._headers("application/json"),
             timeout=timeout,
         ) as resp:
-            if resp.status >= 400:
-                body = await resp.text()
-                raise DeepgramError(f"HTTP {resp.status} from /v1/speak: {body[:500]}")
+            await raise_for_status(resp, DeepgramError, "/v1/speak")
             return await resp.read()
 
     async def check_auth(self) -> None:
         """GET the token metadata: validates key and reachability."""
-        url = f"{self._config.base_url}/v1/auth/token"
-        timeout = aiohttp.ClientTimeout(total=self._config.stt_timeout_s)
+        url = f"{self.config.base_url}/v1/auth/token"
+        timeout = aiohttp.ClientTimeout(total=self.config.stt_timeout_s)
         async with self._session.get(
             url, headers=self._headers("application/json"), timeout=timeout
         ) as resp:
-            if resp.status >= 400:
-                body = await resp.text()
-                raise DeepgramError(f"HTTP {resp.status} from /v1/auth/token: {body[:500]}")
+            await raise_for_status(resp, DeepgramError, "/v1/auth/token")
 
 
 class DeepgramTranscriber:
@@ -111,19 +106,17 @@ class DeepgramTranscriber:
         self._client = client
         self._config = config
         self._default_language = default_language
-        self._model = client._config.stt_model
-        self._timeout_s = client._config.stt_timeout_s
 
     async def transcribe(self, pcm: np.ndarray) -> Transcript:
         languages = self._config.languages
-        params = [("model", self._model), ("smart_format", "true")]
+        params = [("model", self._client.config.stt_model), ("smart_format", "true")]
         if len(languages) == 1:
             params.append(("language", languages[0]))
         else:
             # repeated detect_language params restrict the candidate set
             params.extend(("detect_language", lang) for lang in languages)
         response = await self._client.listen(
-            pcm_to_wav_bytes(pcm, SAMPLE_RATE), params, self._timeout_s
+            pcm_to_wav_bytes(pcm, SAMPLE_RATE), params, self._client.config.stt_timeout_s
         )
         try:
             channel = response["results"]["channels"][0]
@@ -138,21 +131,15 @@ class DeepgramTranscriber:
 
 
 class DeepgramSpeaker:
-    def __init__(
-        self,
-        client: DeepgramClient,
-        config: DeepgramConfig,
-        tts_config: TtsConfig,
-        sink: AudioSink,
-    ) -> None:
+    def __init__(self, client: DeepgramClient, tts_config: TtsConfig, sink: AudioSink) -> None:
         self._client = client
-        self._config = config
         self._tts_config = tts_config
         self._sink = sink
 
     def _voice(self, language: str) -> str:
-        voices = self._config.tts_voices
-        voice = voices.get(language) or voices.get(self._tts_config.default_language)
+        voice = pick_voice(
+            self._client.config.tts_voices, language, self._tts_config.default_language
+        )
         if voice is None:
             raise DeepgramError("deepgram.tts_voices is empty")
         return voice
@@ -162,7 +149,8 @@ class DeepgramSpeaker:
         chunks = tts_chunks(text)
         if not chunks:
             return
-        rate = self._config.tts_sample_rate
+        config = self._client.config
+        rate = config.tts_sample_rate
         params = [
             ("model", self._voice(language)),
             ("encoding", "linear16"),
@@ -171,7 +159,7 @@ class DeepgramSpeaker:
         ]
 
         async def fetch(chunk: str) -> np.ndarray:
-            raw = await self._client.speak(chunk, params, self._config.tts_timeout_s)
+            raw = await self._client.speak(chunk, params, config.tts_timeout_s)
             return np.frombuffer(raw[: len(raw) & ~1], dtype=np.int16)
 
         pending: asyncio.Task | None = asyncio.create_task(fetch(chunks[0]))

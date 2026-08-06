@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from pathlib import Path
@@ -10,8 +9,8 @@ from pathlib import Path
 import numpy as np
 
 from .audio.sink import AudioSink
-from .config import PiperConfig, TtsConfig
-from .tts import split_sentences
+from .config import PiperConfig, TtsConfig, resolve_path
+from .tts import split_sentences, stream_synthesis
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ class PiperSpeaker:
         base = base_dir or Path.cwd()
         self._voices = {}
         for lang, model_path in config.voices.items():
-            path = Path(model_path) if Path(model_path).is_absolute() else base / model_path
+            path = resolve_path(model_path, base)
             self._voices[lang] = PiperVoice.load(str(path))
             log.info("piper voice loaded: %s -> %s", lang, path.name)
 
@@ -55,17 +54,9 @@ class PiperSpeaker:
     async def speak(self, text: str, language: str) -> None:
         """Speak `text`, overlapping synthesis of sentence N+1 with playback of N."""
         voice = self._voices.get(language) or self._voices[self._default_language]
-        loop = asyncio.get_running_loop()
         sentences = split_sentences(text)
         if not sentences:
             return
-
-        synth = loop.run_in_executor(None, self._synthesize_sync, voice, sentences[0])
-        for i, _ in enumerate(sentences):
-            pcm, rate = await synth
-            if i + 1 < len(sentences):
-                synth = loop.run_in_executor(
-                    None, self._synthesize_sync, voice, sentences[i + 1]
-                )
-            if len(pcm):
-                await self._sink.play(pcm, rate)
+        await stream_synthesis(
+            sentences, lambda s: self._synthesize_sync(voice, s), self._sink
+        )

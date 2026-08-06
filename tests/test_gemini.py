@@ -10,12 +10,12 @@ from aiohttp.test_utils import TestServer
 
 from openhab_voice_satellite.config import GeminiConfig, SttConfig, TtsConfig
 from openhab_voice_satellite.fallback import FallbackSpeaker, FallbackTranscriber
+from openhab_voice_satellite.audio.wav import pcm_to_wav_bytes
 from openhab_voice_satellite.gemini import (
     GeminiClient,
     GeminiError,
     GeminiSpeaker,
     GeminiTranscriber,
-    pcm_to_wav_bytes,
 )
 from openhab_voice_satellite.stt import Transcript
 
@@ -54,7 +54,7 @@ def _speaker(fake_gemini, session, sink, **overrides) -> GeminiSpeaker:
     _, server = fake_gemini
     config = _config(server, **overrides)
     client = GeminiClient(config, session)
-    return GeminiSpeaker(client, config, TtsConfig(), sink)
+    return GeminiSpeaker(client, TtsConfig(), sink)
 
 
 class LocalTranscriberStub:

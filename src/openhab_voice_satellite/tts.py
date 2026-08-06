@@ -7,11 +7,12 @@ import logging
 import re
 import time
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
 from .audio.sink import AudioSink
-from .config import KokoroConfig, KokoroVoiceConfig, TtsConfig
+from .config import KokoroConfig, KokoroVoiceConfig, TtsConfig, resolve_path
 
 log = logging.getLogger(__name__)
 
@@ -20,6 +21,22 @@ _SENTENCE_SPLIT = re.compile(r"(?<=[.!?:;])\s+")
 
 def split_sentences(text: str) -> list[str]:
     return [s for s in _SENTENCE_SPLIT.split(text.strip()) if s]
+
+
+async def stream_synthesis(
+    sentences: list[str],
+    synth: Callable[[str], tuple[np.ndarray, int]],
+    sink: AudioSink,
+) -> None:
+    """Play sentence N while synthesizing N+1 in the executor."""
+    loop = asyncio.get_running_loop()
+    pending = loop.run_in_executor(None, synth, sentences[0])
+    for i, _ in enumerate(sentences):
+        pcm, rate = await pending
+        if i + 1 < len(sentences):
+            pending = loop.run_in_executor(None, synth, sentences[i + 1])
+        if len(pcm):
+            await sink.play(pcm, rate)
 
 
 def to_int16(samples: np.ndarray) -> np.ndarray:
@@ -58,13 +75,10 @@ class Speaker:
         self._default_language = tts_config.default_language
         base = base_dir or Path.cwd()
 
-        def resolve(p: str) -> Path:
-            return Path(p) if Path(p).is_absolute() else base / p
-
         self._engines: dict[str, tuple[Kokoro, KokoroVoiceConfig]] = {}
         cache: dict[tuple[Path, Path], Kokoro] = {}
         for lang, vc in config.voices.items():
-            key = (resolve(vc.model), resolve(vc.voices))
+            key = (resolve_path(vc.model, base), resolve_path(vc.voices, base))
             if key not in cache:
                 cache[key] = Kokoro.from_session(
                     make_onnx_session(str(key[0]), config.threads), str(key[1])
@@ -90,17 +104,9 @@ class Speaker:
     async def speak(self, text: str, language: str) -> None:
         """Speak `text`, overlapping synthesis of sentence N+1 with playback of N."""
         engine, vc = self._engines.get(language) or self._engines[self._default_language]
-        loop = asyncio.get_running_loop()
         sentences = split_sentences(text)
         if not sentences:
             return
-
-        synth = loop.run_in_executor(None, self._synthesize_sync, engine, vc, sentences[0])
-        for i, _ in enumerate(sentences):
-            pcm, rate = await synth
-            if i + 1 < len(sentences):
-                synth = loop.run_in_executor(
-                    None, self._synthesize_sync, engine, vc, sentences[i + 1]
-                )
-            if len(pcm):
-                await self._sink.play(pcm, rate)
+        await stream_synthesis(
+            sentences, lambda s: self._synthesize_sync(engine, vc, s), self._sink
+        )

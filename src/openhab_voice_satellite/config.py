@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import Annotated, ClassVar, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
 
 # Capture rate is not configurable: Silero VAD, openWakeWord and whisper are
 # all hardwired to 16 kHz.
 SAMPLE_RATE = 16000
+
+# URL fields: no trailing slash so f"{base_url}/path" composes cleanly
+BaseUrl = Annotated[str, AfterValidator(lambda v: v.rstrip("/"))]
+
+
+def resolve_path(p: str, base: Path) -> Path:
+    """Resolve a config path: relative paths are relative to the config file."""
+    return Path(p) if Path(p).is_absolute() else base / p
 
 
 class AudioConfig(BaseModel):
@@ -67,16 +75,11 @@ class SttConfig(BaseModel):
 
 
 class OpenHABConfig(BaseModel):
-    url: str = "http://openhab.local:8080"
+    url: BaseUrl = "http://openhab.local:8080"
     api_token: str | None = None
     llm_tools: str | None = "item-send-command"  # ?llmTools= param; null = omit
     response_timeout_s: float = 30.0
     verify_ssl: bool = True  # False accepts self-signed certificates
-
-    @field_validator("url")
-    @classmethod
-    def _strip_slash(cls, v: str) -> str:
-        return v.rstrip("/")
 
     @property
     def token(self) -> str | None:
@@ -91,7 +94,7 @@ class TtsConfig(BaseModel):
 
 class GeminiConfig(BaseModel):
     api_key: str | None = None
-    base_url: str = "https://generativelanguage.googleapis.com"
+    base_url: BaseUrl = "https://generativelanguage.googleapis.com"  # test override
     stt_model: str = "gemini-3.6-flash"
     tts_model: str = "gemini-3.1-flash-tts-preview"
     stt_timeout_s: float = 10.0
@@ -99,11 +102,6 @@ class GeminiConfig(BaseModel):
     tts_voices: dict[str, str] = Field(
         default_factory=lambda: {"de": "Kore", "en": "Puck"}
     )
-
-    @field_validator("base_url")
-    @classmethod
-    def _strip_slash(cls, v: str) -> str:
-        return v.rstrip("/")
 
     @property
     def key(self) -> str | None:
@@ -113,7 +111,7 @@ class GeminiConfig(BaseModel):
 
 class DeepgramConfig(BaseModel):
     api_key: str | None = None
-    base_url: str = "https://api.deepgram.com"
+    base_url: BaseUrl = "https://api.deepgram.com"  # test override
     stt_model: str = "nova-3"
     stt_timeout_s: float = 10.0
     tts_timeout_s: float = 20.0
@@ -121,11 +119,6 @@ class DeepgramConfig(BaseModel):
     tts_voices: dict[str, str] = Field(
         default_factory=lambda: {"de": "aura-2-viktoria-de", "en": "aura-2-thalia-en"}
     )
-
-    @field_validator("base_url")
-    @classmethod
-    def _strip_slash(cls, v: str) -> str:
-        return v.rstrip("/")
 
     @property
     def key(self) -> str | None:

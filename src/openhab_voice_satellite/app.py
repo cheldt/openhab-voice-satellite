@@ -95,7 +95,7 @@ class App:
                     )
                 if config.tts.engine == "gemini":
                     final_speaker = FallbackSpeaker(
-                        GeminiSpeaker(gemini, config.gemini, config.tts, sink),
+                        GeminiSpeaker(gemini, config.tts, sink),
                         speaker,
                         label="gemini",
                     )
@@ -109,7 +109,7 @@ class App:
                     )
                 if config.tts.engine == "deepgram":
                     final_speaker = FallbackSpeaker(
-                        DeepgramSpeaker(deepgram, config.deepgram, config.tts, sink),
+                        DeepgramSpeaker(deepgram, config.tts, sink),
                         speaker,
                         label="deepgram",
                     )

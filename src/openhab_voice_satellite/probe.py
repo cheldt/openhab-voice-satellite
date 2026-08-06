@@ -25,12 +25,11 @@ hear exactly what the app hears.
 from __future__ import annotations
 
 import asyncio
-import wave
 from pathlib import Path
 
 import numpy as np
 
-from .config import Config
+from .config import Config, resolve_path
 from .wakeword import WakewordDetector
 
 RUN_S = 30
@@ -57,15 +56,11 @@ async def _probe(config: Config, base_dir: Path) -> None:
 
 async def _probe_streams(config, base_dir, detector, source, sink) -> None:
     from .audio.io import verify_links
+    from .audio.wav import read_wav_mono
 
-    wake = Path(config.earcons.wake)
-    earcon_path = wake if wake.is_absolute() else base_dir / wake
+    earcon_path = resolve_path(config.earcons.wake, base_dir)
     if earcon_path.exists():
-        with wave.open(str(earcon_path)) as w:
-            earcon = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
-            if w.getnchannels() > 1:
-                earcon = earcon.reshape(-1, w.getnchannels())[:, 0].copy()
-            earcon_rate = w.getframerate()
+        earcon, earcon_rate = read_wav_mono(earcon_path)
     else:
         print(f"(wake earcon missing at {earcon_path} — skipping playback checks)")
         earcon, earcon_rate = np.zeros(0, dtype=np.int16), 16000
@@ -125,12 +120,9 @@ async def _probe_streams(config, base_dir, detector, source, sink) -> None:
             task.cancel()
 
     if captured:
-        pcm = np.concatenate(captured)
-        with wave.open(str(DUMP_WAV), "wb") as w:
-            w.setnchannels(1)
-            w.setsampwidth(2)
-            w.setframerate(config.audio.sample_rate)
-            w.writeframes(pcm.tobytes())
+        from .audio.wav import write_wav
+
+        write_wav(DUMP_WAV, np.concatenate(captured), config.audio.sample_rate)
         print(f"\npeak wake score: {peak_score:.3f} (threshold {config.wakeword.threshold})")
         print(f"captured audio written to {DUMP_WAV} — play it back to hear what the app hears")
 

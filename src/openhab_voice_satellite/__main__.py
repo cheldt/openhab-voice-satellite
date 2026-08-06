@@ -81,16 +81,14 @@ def _check(config_path: Path) -> int:
     def check_tts() -> None:
         from kokoro_onnx import Kokoro
 
+        from .config import resolve_path
         from .tts import make_onnx_session
-
-        def resolve(p: str) -> Path:
-            return Path(p) if Path(p).is_absolute() else base_dir / p
 
         for lang, vc in config.kokoro.voices.items():
             # same session construction as production (tts.Speaker)
             kokoro = Kokoro.from_session(
-                make_onnx_session(str(resolve(vc.model)), config.kokoro.threads),
-                str(resolve(vc.voices)),
+                make_onnx_session(str(resolve_path(vc.model, base_dir)), config.kokoro.threads),
+                str(resolve_path(vc.voices, base_dir)),
             )
             if vc.voice not in kokoro.get_voices():
                 raise ValueError(f"{lang}: voice {vc.voice!r} not in {Path(vc.voices).name}")
@@ -98,11 +96,10 @@ def _check(config_path: Path) -> int:
     def check_piper() -> None:
         from piper import PiperVoice
 
-        def resolve(p: str) -> Path:
-            return Path(p) if Path(p).is_absolute() else base_dir / p
+        from .config import resolve_path
 
         for lang, model_path in config.piper.voices.items():
-            path = resolve(model_path)
+            path = resolve_path(model_path, base_dir)
             if not path.exists():
                 raise FileNotFoundError(f"{lang}: piper model missing: {path}")
             PiperVoice.load(str(path))

@@ -7,7 +7,6 @@ import logging
 import os
 import time
 import uuid
-import wave
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -15,6 +14,7 @@ import numpy as np
 
 from .audio.broadcast import AudioBroadcaster
 from .audio.earcons import Earcons
+from .audio.wav import write_wav
 from .config import Config
 from .openhab import OpenHABClient
 from .recorder import NoSpeechError, record_utterance
@@ -132,11 +132,7 @@ class Pipeline:
             return
         path = Path(dump_dir) / f"utterance-{time.strftime('%H%M%S')}.wav"
         try:
-            with wave.open(str(path), "wb") as f:
-                f.setnchannels(1)
-                f.setsampwidth(2)
-                f.setframerate(self._config.audio.sample_rate)
-                f.writeframes(pcm.tobytes())
+            write_wav(path, pcm, self._config.audio.sample_rate)
             log.info("utterance dumped: %s", path)
         except OSError:
             log.exception("utterance dump failed")
