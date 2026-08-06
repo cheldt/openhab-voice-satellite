@@ -35,7 +35,7 @@ class PartialSpeechError(CloudEngineError):
 # TimeoutError must be consumed here: the pipeline treats a leaked TimeoutError
 # as an openHAB timeout. CancelledError (barge-in) is not an Exception and
 # passes through both wrappers untouched.
-_FALLBACK_ERRORS = (CloudEngineError, aiohttp.ClientError, TimeoutError, json.JSONDecodeError)
+FALLBACK_ERRORS = (CloudEngineError, aiohttp.ClientError, TimeoutError, json.JSONDecodeError)
 
 
 class FallbackTranscriber:
@@ -47,7 +47,7 @@ class FallbackTranscriber:
     async def transcribe(self, pcm: np.ndarray) -> Transcript:
         try:
             return await self._primary.transcribe(pcm)
-        except _FALLBACK_ERRORS as exc:
+        except FALLBACK_ERRORS as exc:
             log.warning("%s STT failed (%s), falling back to local", self._label, exc)
             return await self._fallback.transcribe(pcm)
 
@@ -83,7 +83,7 @@ class FallbackSpeaker:
 
     async def speak(self, text: str, language: str) -> None:
         try:
-            # A plain _FALLBACK_ERRORS failure happens before any audio played
+            # A plain FALLBACK_ERRORS failure happens before any audio played
             # and the local engine re-speaks the whole text without repetition.
             # Chunking speakers raise PartialSpeechError once audio has played,
             # so only the unspoken remainder is handed to the fallback.
@@ -94,6 +94,6 @@ class FallbackSpeaker:
                 self._label, exc,
             )
             await self._fallback.speak(exc.remaining, language)
-        except _FALLBACK_ERRORS as exc:
+        except FALLBACK_ERRORS as exc:
             log.warning("%s TTS failed (%s), falling back to local", self._label, exc)
             await self._fallback.speak(text, language)

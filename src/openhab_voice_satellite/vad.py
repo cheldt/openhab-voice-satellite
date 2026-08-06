@@ -6,7 +6,7 @@ import logging
 
 import numpy as np
 
-from .config import VadConfig
+from .config import SAMPLE_RATE, VadConfig
 
 log = logging.getLogger(__name__)
 
@@ -22,12 +22,12 @@ class SpeechEndpointer:
     `speech_started` for the recorder loop.
     """
 
-    def __init__(self, config: VadConfig, sample_rate: int = 16000) -> None:
+    def __init__(self, config: VadConfig) -> None:
         from pysilero_vad import SileroVoiceActivityDetector
 
         self._vad = SileroVoiceActivityDetector()
         self._config = config
-        self._sample_rate = sample_rate
+        self._sample_rate = SAMPLE_RATE
         self._residual = np.empty(0, dtype=np.int16)
         self.reset()
 

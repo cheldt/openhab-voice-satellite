@@ -69,7 +69,7 @@ def _check(config_path: Path) -> int:
     def check_vad() -> None:
         from .vad import SpeechEndpointer
 
-        endpointer = SpeechEndpointer(config.vad, config.audio.sample_rate)
+        endpointer = SpeechEndpointer(config.vad)
         endpointer.update(np.zeros(config.audio.frame_samples, dtype=np.int16))
 
     def check_stt() -> None:

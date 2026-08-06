@@ -38,9 +38,8 @@ DUMP_WAV = Path("diagnose_capture.wav")
 
 
 async def _probe(config: Config, base_dir: Path) -> None:
-    from .audio.gst_devices import list_audio_nodes, match_node, verify_stream_links
-    from .audio.gst_sink import PipewireSink
-    from .audio.gst_source import PipewireSource
+    from .audio.gst_devices import list_audio_nodes, match_node
+    from .audio.io import audio_io
 
     nodes = list_audio_nodes()
     print(f"config audio.input_device = {config.audio.input_device!r}")
@@ -52,16 +51,13 @@ async def _probe(config: Config, base_dir: Path) -> None:
     print(f"resolved capture target = {resolved!r}  (None = PipeWire default source)\n")
 
     detector = WakewordDetector(config.wakeword)
-    source = PipewireSource(
-        sample_rate=config.audio.sample_rate,
-        frame_samples=config.audio.frame_samples,
-        device=config.audio.input_device,
-    )
-    sink = PipewireSink(
-        device=config.audio.output_device,
-        wakeup_preamble_ms=config.audio.wakeup_preamble_ms,
-        wakeup_preamble_idle_s=config.audio.wakeup_preamble_idle_s,
-    )
+    async with audio_io(config.audio) as (source, sink):
+        await _probe_streams(config, base_dir, detector, source, sink)
+
+
+async def _probe_streams(config, base_dir, detector, source, sink) -> None:
+    from .audio.io import verify_links
+
     wake = Path(config.earcons.wake)
     earcon_path = wake if wake.is_absolute() else base_dir / wake
     if earcon_path.exists():
@@ -73,10 +69,6 @@ async def _probe(config: Config, base_dir: Path) -> None:
     else:
         print(f"(wake earcon missing at {earcon_path} — skipping playback checks)")
         earcon, earcon_rate = np.zeros(0, dtype=np.int16), 16000
-
-    async def check_links() -> None:
-        await asyncio.sleep(3.0)
-        await verify_stream_links("openhab-voice-satellite", source.target, sink.target)
 
     async def play_earcon(tag: str) -> None:
         if not len(earcon):
@@ -92,7 +84,9 @@ async def _probe(config: Config, base_dir: Path) -> None:
     print(f"listening for {RUN_S}s — say the wakeword ({config.wakeword.model}) a few times")
     print(f"{'sec':>4} {'rms':>7} {'peak':>7} {'wake_score':>10}")
     captured: list[np.ndarray] = []
-    side_tasks: list[asyncio.Task] = [asyncio.create_task(check_links())]
+    side_tasks: list[asyncio.Task] = [
+        asyncio.create_task(verify_links(source.target, sink.target))
+    ]
     peak_score = 0.0
     t = 0
 
@@ -129,8 +123,6 @@ async def _probe(config: Config, base_dir: Path) -> None:
     finally:
         for task in side_tasks:
             task.cancel()
-        source.close()
-        sink.close()
 
     if captured:
         pcm = np.concatenate(captured)

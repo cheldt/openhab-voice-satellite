@@ -13,7 +13,7 @@ import aiohttp
 import numpy as np
 
 from .audio.sink import AudioSink
-from .config import GeminiConfig, SttConfig, TtsConfig
+from .config import SAMPLE_RATE, GeminiConfig, SttConfig, TtsConfig
 from .fallback import CloudEngineError
 from .stt import Transcript
 
@@ -83,8 +83,8 @@ class GeminiTranscriber:
         self._model = client._config.stt_model
         self._timeout_s = client._config.stt_timeout_s
 
-    async def transcribe(self, pcm: np.ndarray, sample_rate: int = 16000) -> Transcript:
-        wav_b64 = base64.b64encode(pcm_to_wav_bytes(pcm, sample_rate)).decode()
+    async def transcribe(self, pcm: np.ndarray) -> Transcript:
+        wav_b64 = base64.b64encode(pcm_to_wav_bytes(pcm, SAMPLE_RATE)).decode()
         languages = self._config.languages
         payload = {
             "contents": [

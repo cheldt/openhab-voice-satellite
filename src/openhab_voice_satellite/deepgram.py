@@ -10,8 +10,8 @@ import aiohttp
 import numpy as np
 
 from .audio.sink import AudioSink
-from .config import DeepgramConfig, SttConfig, TtsConfig
-from .fallback import CloudEngineError, PartialSpeechError
+from .config import SAMPLE_RATE, DeepgramConfig, SttConfig, TtsConfig
+from .fallback import FALLBACK_ERRORS, CloudEngineError, PartialSpeechError
 from .gemini import pcm_to_wav_bytes
 from .stt import Transcript
 from .tts import split_sentences
@@ -114,7 +114,7 @@ class DeepgramTranscriber:
         self._model = client._config.stt_model
         self._timeout_s = client._config.stt_timeout_s
 
-    async def transcribe(self, pcm: np.ndarray, sample_rate: int = 16000) -> Transcript:
+    async def transcribe(self, pcm: np.ndarray) -> Transcript:
         languages = self._config.languages
         params = [("model", self._model), ("smart_format", "true")]
         if len(languages) == 1:
@@ -123,7 +123,7 @@ class DeepgramTranscriber:
             # repeated detect_language params restrict the candidate set
             params.extend(("detect_language", lang) for lang in languages)
         response = await self._client.listen(
-            pcm_to_wav_bytes(pcm, sample_rate), params, self._timeout_s
+            pcm_to_wav_bytes(pcm, SAMPLE_RATE), params, self._timeout_s
         )
         try:
             channel = response["results"]["channels"][0]
@@ -181,7 +181,7 @@ class DeepgramSpeaker:
                 current, pending = pending, None
                 try:
                     pcm = await current
-                except (DeepgramError, aiohttp.ClientError, TimeoutError) as exc:
+                except FALLBACK_ERRORS as exc:
                     if played:
                         # some audio already out — hand only the rest to the fallback
                         raise PartialSpeechError(

@@ -13,8 +13,7 @@ import numpy as np
 
 from .audio.broadcast import AudioBroadcaster
 from .audio.earcons import Earcons
-from .audio.gst_sink import PipewireSink
-from .audio.gst_source import PipewireSource
+from .audio.io import audio_io, verify_links
 from .audio.sink import AudioSink
 from .config import Config
 from .deepgram import DeepgramClient, DeepgramSpeaker, DeepgramTranscriber
@@ -54,35 +53,28 @@ class App:
         config = self._config
         log.info("loading models...")
         detector = WakewordDetector(config.wakeword)
-        endpointer = SpeechEndpointer(config.vad, config.audio.sample_rate)
+        endpointer = SpeechEndpointer(config.vad)
         transcriber = Transcriber(config.stt, config.tts.default_language)
 
-        source = PipewireSource(
-            sample_rate=config.audio.sample_rate,
-            frame_samples=config.audio.frame_samples,
-            device=config.audio.input_device,
-        )
-        sink = PipewireSink(
-            device=config.audio.output_device,
-            wakeup_preamble_ms=config.audio.wakeup_preamble_ms,
-            wakeup_preamble_idle_s=config.audio.wakeup_preamble_idle_s,
-        )
-        earcons = Earcons(config.earcons, sink, self._base_dir)
-        if config.tts.engine == "piper":
-            speaker: SpeakerProtocol = PiperSpeaker(config.piper, config.tts, sink, self._base_dir)
-        elif config.tts.engine == "kokoro":
-            speaker = Speaker(config.kokoro, config.tts, sink, self._base_dir)
-        else:
-            # cloud engine primary: kokoro stays the fallback but loads on first use
-            speaker = LazySpeaker(
-                lambda: Speaker(config.kokoro, config.tts, sink, self._base_dir)
-            )
-
-        broadcaster = AudioBroadcaster(source)
-        wake_queue = broadcaster.subscribe()
-        broadcaster.start()
-
         async with AsyncExitStack() as stack:
+            source, sink = await stack.enter_async_context(audio_io(config.audio))
+            earcons = Earcons(config.earcons, sink, self._base_dir)
+            if config.tts.engine == "piper":
+                speaker: SpeakerProtocol = PiperSpeaker(
+                    config.piper, config.tts, sink, self._base_dir
+                )
+            elif config.tts.engine == "kokoro":
+                speaker = Speaker(config.kokoro, config.tts, sink, self._base_dir)
+            else:
+                # cloud engine primary: kokoro stays the fallback but loads on first use
+                speaker = LazySpeaker(
+                    lambda: Speaker(config.kokoro, config.tts, sink, self._base_dir)
+                )
+
+            broadcaster = AudioBroadcaster(source)
+            wake_queue = broadcaster.subscribe()
+            broadcaster.start()
+
             session = await stack.enter_async_context(make_session(config.openhab))
             openhab = OpenHABClient(config.openhab, session)
 
@@ -136,23 +128,13 @@ class App:
 
             log.info("ready — say the wakeword (%s)", config.wakeword.model)
             link_check = asyncio.create_task(
-                self._verify_links(source.target, sink.target), name="verify-links"
+                verify_links(source.target, sink.target), name="verify-links"
             )
             try:
                 await self._interrupt_monitor(wake_queue, detector, pipeline, sink, earcons)
             finally:
                 link_check.cancel()
                 await broadcaster.stop()
-                source.close()
-
-    @staticmethod
-    async def _verify_links(input_target: str | None, output_target: str | None) -> None:
-        from .audio.gst_devices import verify_stream_links
-
-        await asyncio.sleep(3.0)  # give WirePlumber time to settle the links
-        await verify_stream_links(
-            "openhab-voice-satellite", input_target, output_target
-        )
 
     def _start_pipeline(
         self, pipeline: Pipeline, earcons: Earcons, play_wake_earcon: bool = True

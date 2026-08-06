@@ -34,10 +34,11 @@ wakeword:
     assert config.wakeword.threshold == 0.6
 
 
-def test_stale_input_latency_key_still_loads():
-    # input_latency was PortAudio-only; existing configs must keep loading
-    config = Config.model_validate({"audio": {"input_latency": "high"}})
-    assert not hasattr(config.audio, "input_latency")
+def test_sample_rate_is_not_configurable():
+    # the whole stack (VAD, wakeword, whisper) is hardwired to 16 kHz;
+    # an old config setting the key must load and be ignored
+    config = Config.model_validate({"audio": {"sample_rate": 48000}})
+    assert config.audio.sample_rate == 16000
 
 
 def test_env_token_wins(monkeypatch):

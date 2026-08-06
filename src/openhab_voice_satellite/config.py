@@ -4,17 +4,23 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+# Capture rate is not configurable: Silero VAD, openWakeWord and whisper are
+# all hardwired to 16 kHz.
+SAMPLE_RATE = 16000
 
 
 class AudioConfig(BaseModel):
     # substring of a PipeWire node name/description (see --list-devices); null = default node
     input_device: str | None = None
     output_device: str | None = None
-    sample_rate: int = 16000
+    # ClassVar keeps `config.audio.sample_rate` reads working while pydantic
+    # ignores the key in old config files.
+    sample_rate: ClassVar[int] = SAMPLE_RATE
     frame_ms: int = 80
     # ramped noise before a sound that follows an idle period; wakes powered
     # speakers whose signal-sensing mute ignores the keep-alive dither.
