@@ -1,6 +1,7 @@
 """fallback.py is provider-agnostic — test it against stub primaries, no HTTP."""
 
 import asyncio
+import threading
 
 import aiohttp
 import numpy as np
@@ -10,6 +11,7 @@ from openhab_voice_satellite.fallback import (
     CloudEngineError,
     FallbackSpeaker,
     FallbackTranscriber,
+    LazySpeaker,
     PartialSpeechError,
 )
 
@@ -91,3 +93,31 @@ async def test_cancellation_propagates_without_fallback():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert local.spoken == []  # barge-in must not trigger the fallback
+
+
+async def test_lazy_speaker_constructs_once_across_concurrent_calls():
+    constructed: list[LocalSpeakerStub] = []
+
+    def factory() -> LocalSpeakerStub:
+        speaker = LocalSpeakerStub()
+        constructed.append(speaker)
+        return speaker
+
+    lazy = LazySpeaker(factory)
+    await asyncio.gather(*(lazy.speak(f"text {i}", "de") for i in range(5)))
+    assert len(constructed) == 1  # the asyncio.Lock serializes construction
+    assert len(constructed[0].spoken) == 5
+
+
+async def test_lazy_speaker_constructs_in_executor():
+    loop_thread = threading.get_ident()
+    factory_thread: list[int] = []
+
+    def factory() -> LocalSpeakerStub:
+        factory_thread.append(threading.get_ident())
+        return LocalSpeakerStub()
+
+    lazy = LazySpeaker(factory)
+    await lazy.speak("hi", "de")
+    # multi-second model loads must not block the event loop (wakeword monitor)
+    assert factory_thread[0] != loop_thread

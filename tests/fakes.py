@@ -128,6 +128,7 @@ class BufferAudioSink:
         self.played: list[tuple[np.ndarray, int]] = []
         self.stopped = False
         self.duck_calls: list[float] = []
+        self.unduck_calls = 0
 
     async def play(self, pcm: np.ndarray, sample_rate: int) -> None:
         self.played.append((pcm, sample_rate))
@@ -139,7 +140,63 @@ class BufferAudioSink:
         self.duck_calls.append(factor)
 
     def unduck(self) -> None:
-        pass
+        self.unduck_calls += 1
+
+
+class ScriptedDetector:
+    """WakewordDetector stand-in: detections/scores keyed by frame index."""
+
+    def __init__(
+        self,
+        detections: dict[int, str] | None = None,
+        scores: dict[int, float] | None = None,
+    ) -> None:
+        self.detections = detections or {}
+        self.scores = scores or {}
+        self.frames_seen = 0
+        self.speaking_flags: list[bool] = []
+        self.resets = 0
+        self._last_score = 0.0
+
+    def process(self, frame: np.ndarray, speaking: bool = False) -> str | None:
+        i = self.frames_seen
+        self.frames_seen += 1
+        self.speaking_flags.append(speaking)
+        self._last_score = self.scores.get(i, 0.0)
+        return self.detections.get(i)
+
+    def score(self, key: str = "wake") -> float:
+        return self._last_score
+
+    def reset(self) -> None:
+        self.resets += 1
+
+
+class FakePipeline:
+    """Records run_interaction calls; sets a state and holds, then returns `event`."""
+
+    def __init__(self, set_state=None, state_on_run=None, event=None, hold_s: float = 0.0) -> None:
+        self._set_state = set_state
+        self._state_on_run = state_on_run
+        self._event = event
+        self._hold_s = hold_s
+        self.calls: list[bool] = []  # play_wake_earcon per call
+
+    async def run_interaction(self, play_wake_earcon: bool = True):
+        self.calls.append(play_wake_earcon)
+        if self._set_state and self._state_on_run is not None:
+            self._set_state(self._state_on_run)
+        if self._hold_s:
+            await asyncio.sleep(self._hold_s)
+        return self._event
+
+
+class RecordingEarcons:
+    def __init__(self) -> None:
+        self.played: list[str] = []
+
+    async def play(self, name: str) -> None:
+        self.played.append(name)
 
 
 class FakeGemini:
