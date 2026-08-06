@@ -87,15 +87,7 @@ class Pipeline:
             while True:
                 # LISTENING
                 self._set_state(State.LISTENING)
-                if round_no > 0:
-                    await self._earcons.play(dialog.earcon)
-                    timeout = dialog.followup_timeout_s
-                else:
-                    if play_wake_earcon:
-                        await self._earcons.play("wake")
-                    timeout = None  # first round uses vad.no_speech_timeout_s
-
-                transcript = await self._capture_utterance(no_speech_timeout_s=timeout)
+                transcript = await self._listen_round(round_no, play_wake_earcon)
                 if transcript is None:
                     if round_no == 0:
                         return Event.NO_SPEECH
@@ -175,14 +167,42 @@ class Pipeline:
         self._cleanup_tasks.add(task)
         task.add_done_callback(self._cleanup_tasks.discard)
 
+    async def _listen_round(
+        self, round_no: int, play_wake_earcon: bool
+    ) -> Transcript | None:
+        """One LISTENING round: subscribe, entry earcon, capture.
+
+        Subscribes before the earcon: speech during/right after it lands in
+        the bounded queue instead of being lost to ~1s of deaf time while
+        the earcon plays. The earcon-period samples cost part of the
+        no-speech budget; the endpointer is not reset afterwards — that
+        would discard speech onset. Earcon echo reaching the VAD at worst
+        wastes one STT round (empty-transcript path in _capture_utterance).
+        """
+        dialog = self._config.dialog
+        frames = self._broadcaster.subscribe()
+        try:
+            if round_no > 0:
+                await self._earcons.play(dialog.earcon)
+                timeout = dialog.followup_timeout_s
+            else:
+                if play_wake_earcon:
+                    await self._earcons.play("wake")
+                timeout = None  # first round uses vad.no_speech_timeout_s
+            return await self._capture_utterance(frames, no_speech_timeout_s=timeout)
+        finally:
+            self._broadcaster.unsubscribe(frames)
+
     async def _capture_utterance(
-        self, no_speech_timeout_s: float | None = None
+        self,
+        frames: asyncio.Queue[np.ndarray | None],
+        no_speech_timeout_s: float | None = None,
     ) -> Transcript | None:
         """LISTENING record + THINKING transcribe. None = no/empty speech.
 
-        The caller sets State.LISTENING and plays the entry earcon.
+        The caller sets State.LISTENING, owns the `frames` subscription
+        (opened before the entry earcon) and releases it afterwards.
         """
-        frames = self._broadcaster.subscribe()
         try:
             pcm = await record_utterance(
                 frames,
@@ -193,8 +213,6 @@ class Pipeline:
         except NoSpeechError:
             log.info("no speech detected, back to idle")
             return None
-        finally:
-            self._broadcaster.unsubscribe(frames)
 
         log.info(
             "utterance captured: %.1fs rms=%d",

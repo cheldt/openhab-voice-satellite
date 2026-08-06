@@ -46,7 +46,8 @@ async def env():
 
 def _make_pipeline(config, openhab, broadcaster, sink, speaker,
                    states: list[State], transcriber: FakeTranscriber | None = None,
-                   endpointer: FakeEndpointer | None = None) -> Pipeline:
+                   endpointer: FakeEndpointer | None = None,
+                   earcons=None) -> Pipeline:
     return Pipeline(
         config=config,
         broadcaster=broadcaster,
@@ -54,7 +55,7 @@ def _make_pipeline(config, openhab, broadcaster, sink, speaker,
         transcriber=transcriber or FakeTranscriber(),
         openhab=openhab,
         speaker=speaker,
-        earcons=NullEarcons(),
+        earcons=earcons or NullEarcons(),
         set_state=states.append,
     )
 
@@ -180,6 +181,64 @@ async def test_dialog_follow_up_no_speech_ends(env):
     assert speaker.spoken == [("Welches Licht meinst du?", "de")]
     await _await_cleanup(pipeline)
     assert fake_oh.deleted == [fake_oh.conversations[0]]
+
+
+async def test_mic_subscribed_before_earcons(env):
+    # speech during/right after the entry earcon must land in the queue;
+    # previously the subscription was created only after the earcon finished
+    config, fake_oh, openhab, broadcaster = env
+    config.dialog.followup_timeout_s = 0.3
+    sink = BufferAudioSink()
+    speaker = FakeSpeaker(sink)
+    states: list[State] = []
+
+    class RecordingEarcons:
+        def __init__(self) -> None:
+            self.subscribers_at_play: list[tuple[str, int]] = []
+
+        async def play(self, name: str) -> None:
+            self.subscribers_at_play.append((name, len(broadcaster._subscribers)))
+
+    earcons = RecordingEarcons()
+    endpointer = FakeEndpointer(speech_at=2, endpoint_at=5, later=[(None, None)])
+    pipeline = _make_pipeline(config, openhab, broadcaster, sink, speaker, states,
+                              endpointer=endpointer, earcons=earcons)
+
+    await pipeline.run_interaction()
+
+    entry_earcons = [
+        (name, n) for name, n in earcons.subscribers_at_play if name != "ack"
+    ]
+    assert entry_earcons  # wake + dialog follow-up rounds
+    assert all(n >= 1 for _, n in entry_earcons)
+    assert broadcaster._subscribers == []  # every round released its queue
+
+
+async def test_barge_in_during_earcon_releases_subscription(env):
+    config, fake_oh, openhab, broadcaster = env
+    sink = BufferAudioSink()
+    speaker = FakeSpeaker(sink)
+    states: list[State] = []
+
+    class BlockingEarcons:
+        def __init__(self) -> None:
+            self.playing = asyncio.Event()
+
+        async def play(self, name: str) -> None:
+            self.playing.set()
+            await asyncio.sleep(30)
+
+    earcons = BlockingEarcons()
+    pipeline = _make_pipeline(config, openhab, broadcaster, sink, speaker, states,
+                              earcons=earcons)
+
+    task = asyncio.create_task(pipeline.run_interaction())
+    await asyncio.wait_for(earcons.playing.wait(), timeout=2.0)
+    assert broadcaster._subscribers != []  # subscription opened before the earcon
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert broadcaster._subscribers == []
 
 
 async def test_no_speech_first_round(env):
