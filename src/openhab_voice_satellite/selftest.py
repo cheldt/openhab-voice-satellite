@@ -27,9 +27,9 @@ def check_audio(config: Config) -> None:
 
 
 def check_wakeword(config: Config) -> None:
-    from .wakeword import WakewordDetector
+    from .wakeword import build_detector
 
-    detector = WakewordDetector(config.wakeword)
+    detector = build_detector(config)
     detector.process(np.zeros(config.audio.frame_samples, dtype=np.int16))
 
 

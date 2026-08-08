@@ -27,7 +27,7 @@ from .pipeline import Pipeline, SpeakerProtocol, TranscriberProtocol
 from .state import Event, State
 from .stt import Transcriber
 from .vad import SpeechEndpointer
-from .wakeword import WakewordDetector
+from .wakeword import WakewordProtocol, build_detector
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ WAKE_DUMP_PREROLL_S = 2.5  # audio kept before a detection, incl. the wakeword
 
 
 def _dump_wake_audio(
-    detector: WakewordDetector, detection: str | None, score: float, state: State
+    detector: WakewordProtocol, detection: str | None, score: float, state: State
 ) -> None:
     """Write the audio around a detection to $OVS_DUMP_WAKE for field debugging.
 
@@ -208,7 +208,7 @@ class App:
     async def run(self) -> None:
         config = self._config
         log.info("loading models...")
-        detector = WakewordDetector(config.wakeword)
+        detector = build_detector(config)
         endpointer = SpeechEndpointer(config.vad)
         transcriber = Transcriber(config.stt, config.tts.default_language)
 
@@ -240,7 +240,11 @@ class App:
                 set_state=self._set_state,
             )
 
-            log.info("ready — say the wakeword (%s)", config.wakeword.model)
+            log.info(
+                "ready — say the wakeword (%s via %s)",
+                config.wakeword.model,
+                config.wakeword.engine,
+            )
             link_check = asyncio.create_task(
                 verify_links(source.target, sink.target), name="verify-links"
             )
@@ -280,7 +284,7 @@ class App:
         log.info("interaction cancelled")
         return was_speaking
 
-    def _resync_detector(self, detector: WakewordDetector, wake_queue: asyncio.Queue) -> None:
+    def _resync_detector(self, detector: WakewordProtocol, wake_queue: asyncio.Queue) -> None:
         """Clear the detector and abandon the mic backlog that outran it.
 
         Nothing downstream reads wake_queue — an interaction subscribes for
@@ -300,7 +304,7 @@ class App:
     async def _interrupt_monitor(
         self,
         wake_queue: asyncio.Queue,
-        detector: WakewordDetector,
+        detector: WakewordProtocol,
         pipeline: Pipeline,
         sink: AudioSink,
         earcons: Earcons,

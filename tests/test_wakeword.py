@@ -1,63 +1,29 @@
-"""WakewordDetector edge-trigger/re-arm hysteresis with a stubbed openwakeword."""
+"""Decision logic shared by every engine: edge trigger, patience, thresholds.
+
+Both engines run the identical assertions. That is the point of the split —
+an engine contributes scores, never a decision, so swapping one must not
+change when the app sees a detection.
+"""
 
 from __future__ import annotations
-
-import sys
-import types
 
 import numpy as np
 import pytest
 
-from openhab_voice_satellite.config import WakewordConfig
+from .wakeword_stubs import ENGINES, make_detector, reset_stub_state
 
 FRAME = np.zeros(1280, dtype=np.int16)
 
 
-class StubModel:
-    """Scripted scores: each predict() pops the next score per model."""
-
-    scripts: dict[str, list[float]] = {}
-
-    outputs: dict[str, int] = {}
-
-    def __init__(self, wakeword_models, inference_framework, ncpu=1):
-        self.models = {name: object() for name in wakeword_models}
-        self.model_outputs = {m: self.outputs.get(m, 1) for m in self.models}
-        self.prediction_buffer: dict[str, list[float]] = {m: [0.0] for m in self.models}
-        self.custom_verifier_models: dict[str, object] = {}
-        self.custom_verifier_threshold = 0.1
-        self.reset_calls = 0
-
-    def predict(self, frame):
-        out = {}
-        for name in self.models:
-            script = self.scripts.get(name, [])
-            score = script.pop(0) if script else 0.0
-            self.prediction_buffer[name].append(score)
-            out[name] = score
-        return out
-
-    def reset(self):
-        self.reset_calls += 1
-
-
-@pytest.fixture
-def detector_factory(monkeypatch):
-    module = types.ModuleType("openwakeword.model")
-    module.Model = StubModel
-    package = types.ModuleType("openwakeword")
-    package.model = module
-    monkeypatch.setitem(sys.modules, "openwakeword", package)
-    monkeypatch.setitem(sys.modules, "openwakeword.model", module)
+@pytest.fixture(params=ENGINES)
+def detector_factory(request, monkeypatch):
+    reset_stub_state()
 
     def make(scripts: dict[str, list[float]], **config_kwargs):
-        from openhab_voice_satellite.wakeword import WakewordDetector
-
-        StubModel.scripts = {k: list(v) for k, v in scripts.items()}
-        return WakewordDetector(WakewordConfig(**config_kwargs))
+        return make_detector(request.param, monkeypatch, scripts, **config_kwargs)
 
     yield make
-    StubModel.outputs = {}
+    reset_stub_state()
 
 
 def test_edge_trigger_fires_once_then_rearms(detector_factory):
@@ -97,14 +63,11 @@ def test_score_returns_the_latest_raw_score(detector_factory):
     assert detector.score("wake") == pytest.approx(0.42)
 
 
-def test_detector_survives_unpatchable_model(detector_factory, caplog):
-    # StubModel has no .preprocessor: the ring-buffer patch must fail open
-    # (warning + stock behavior), never break detector construction
-    with caplog.at_level("WARNING"):
-        detector = detector_factory({"wake": [0.9]}, model="wake")
-    assert "preprocessor patch skipped" in caplog.text
-    assert detector.process(FRAME) == "wake"
-    assert detector.tail(1.0) is None  # no ring to read a pre-roll from
+def test_score_falls_back_to_wake_without_a_stop_model(detector_factory):
+    # app.py reads score("stop") unconditionally; no stop model must not KeyError
+    detector = detector_factory({"wake": [0.42]}, model="wake")
+    detector.process(FRAME)
+    assert detector.score("stop") == pytest.approx(0.42)
 
 
 def test_stop_threshold_speaking_defaults_to_stop_threshold(detector_factory):
@@ -154,12 +117,16 @@ def test_score_stays_raw_while_patience_suppresses(detector_factory):
     assert detector.score("wake") == pytest.approx(0.9)
 
 
-def test_duplicate_model_basenames_fail_fast(detector_factory):
-    with pytest.raises(ValueError, match="share a basename"):
-        detector_factory({"wake": [0.9]}, model="wake", stop_model="wake")
+def test_detection_survives_playback(detector_factory):
+    """Barge-in: speaking only raises the bar, it never blocks a detection.
 
-
-def test_multi_output_model_rejected(detector_factory):
-    StubModel.outputs = {"wake": 3}
-    with pytest.raises(ValueError, match="multiple outputs"):
-        detector_factory({"wake": [0.9]}, model="wake")
+    violawake's own detect() rejects unconditionally while audio is playing;
+    routing around that gate is the reason this adapter uses process().
+    """
+    detector = detector_factory(
+        {"wake": [0.9], "stop": [0.9]},
+        model="wake", stop_model="stop", threshold_speaking=0.7,
+    )
+    assert detector.process(FRAME, speaking=True) == "stop"
+    detector = detector_factory({"wake": [0.9]}, model="wake", threshold_speaking=0.7)
+    assert detector.process(FRAME, speaking=True) == "wake"

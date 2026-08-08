@@ -137,6 +137,81 @@ def test_piper_default_language_must_have_voice():
     Config.model_validate({"tts": {"default_language": "en"}, "piper": en_only})
 
 
+def test_wakeword_engine_defaults_to_openwakeword():
+    assert Config().wakeword.engine == "openwakeword"
+
+
+def test_violawake_needs_frames_it_can_actually_score():
+    # violawake scores whole 20 ms units; a remainder makes it return 0.0 for
+    # every frame, so a dead detector has to be a config error instead
+    viola = {"engine": "violawake", "model": "wake.onnx"}
+    with pytest.raises(ValueError, match="frame_ms"):
+        Config.model_validate({"wakeword": viola, "audio": {"frame_ms": 30}})
+    with pytest.raises(ValueError, match="frame_ms"):
+        Config.model_validate({"wakeword": viola, "audio": {"frame_ms": 240}})
+    # multiples of 20 up to violawake's 200 ms ceiling are fine
+    Config.model_validate({"wakeword": viola, "audio": {"frame_ms": 80}})
+    Config.model_validate({"wakeword": viola, "audio": {"frame_ms": 20}})
+    # openwakeword is unaffected by any of it
+    Config.model_validate({"audio": {"frame_ms": 30}})
+
+
+def test_violawake_rejects_openwakeword_only_settings():
+    with pytest.raises(ValueError, match="verifier_model"):
+        Config.model_validate(
+            {"wakeword": {"engine": "violawake", "model": "w.onnx",
+                          "verifier_model": "v.pkl"}}
+        )
+    with pytest.raises(ValueError, match="verifier_model"):
+        Config.model_validate(
+            {"wakeword": {"engine": "violawake", "model": "w.onnx",
+                          "stop_verifier_model": "v.pkl"}}
+        )
+
+
+def test_violawake_rejects_the_openwakeword_default_model():
+    # switching engine without touching model would otherwise look for an
+    # openwakeword phrase name in violawake's registry
+    with pytest.raises(ValueError, match="openwakeword phrase"):
+        Config.model_validate({"wakeword": {"engine": "violawake"}})
+
+
+def test_violawake_adaptive_band_must_be_ordered():
+    with pytest.raises(ValueError, match="min_threshold"):
+        Config.model_validate(
+            {
+                "wakeword": {
+                    "engine": "violawake",
+                    "model": "w.onnx",
+                    "viola": {"adaptive": {"min_threshold": 0.9, "max_threshold": 0.6}},
+                }
+            }
+        )
+
+
+def test_wakeword_model_paths_resolve_relative_to_the_config_file(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+wakeword:
+  model: models/wake.onnx
+  stop_model: /abs/stop.onnx
+  verifier_model: models/verifier.pkl
+"""
+    )
+    config = load_config(path)
+    assert config.wakeword.model == str(tmp_path / "models/wake.onnx")
+    assert config.wakeword.stop_model == "/abs/stop.onnx"
+    assert config.wakeword.verifier_model == str(tmp_path / "models/verifier.pkl")
+
+
+def test_pretrained_wakeword_names_are_not_treated_as_paths(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("wakeword:\n  model: hey_jarvis\n")
+    # openwakeword phrases and violawake registry names must stay verbatim
+    assert load_config(path).wakeword.model == "hey_jarvis"
+
+
 def test_empty_languages_rejected():
     with pytest.raises(ValueError):
         Config.model_validate({"stt": {"languages": []}})

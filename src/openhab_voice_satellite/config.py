@@ -13,6 +13,12 @@ from pydantic import AfterValidator, BaseModel, Field, field_validator, model_va
 # all hardwired to 16 kHz.
 SAMPLE_RATE = 16000
 
+# violawake's streaming unit (violawake_sdk._constants.FRAME_SAMPLES) and the
+# largest chunk its _process_core accepts before raising
+VIOLA_FRAME_MS = 20
+VIOLA_FRAME_SAMPLES = SAMPLE_RATE * VIOLA_FRAME_MS // 1000
+VIOLA_MAX_FRAME_SAMPLES = VIOLA_FRAME_SAMPLES * 10
+
 # URL fields: no trailing slash so f"{base_url}/path" composes cleanly
 BaseUrl = Annotated[str, AfterValidator(lambda v: v.rstrip("/"))]
 
@@ -43,7 +49,55 @@ class AudioConfig(BaseModel):
         return self.sample_rate * self.frame_ms // 1000
 
 
+class ViolaAdaptiveConfig(BaseModel):
+    """Noise-adaptive threshold (violawake's NoiseProfiler).
+
+    Tracks a rolling noise floor and moves the wake threshold with the SNR.
+    Off by default: it overrides `wakeword.threshold`, so enabling it hands
+    tuning to the profiler's [min_threshold, max_threshold] band.
+    """
+
+    enabled: bool = False
+    noise_window_s: float = Field(5.0, gt=0.0)
+    min_threshold: float = Field(0.6, ge=0.0, le=1.0)
+    max_threshold: float = Field(0.95, ge=0.0, le=1.0)
+    snr_boost_db: float = 6.0
+    snr_penalty_db: float = 3.0
+
+    @model_validator(mode="after")
+    def _band_ordered(self) -> ViolaAdaptiveConfig:
+        if self.min_threshold > self.max_threshold:
+            raise ValueError(
+                f"min_threshold {self.min_threshold} exceeds max_threshold {self.max_threshold}"
+            )
+        return self
+
+
+class ViolaPowerConfig(BaseModel):
+    """Frame skipping (violawake's PowerManager).
+
+    Silence skipping is the useful part here; duty_cycle_n above 1 drops
+    frames the model has already committed to streaming over, so leave it at
+    1 unless you have measured what the discontinuity costs in recall.
+    """
+
+    enabled: bool = False
+    duty_cycle_n: int = Field(1, ge=1)
+    silence_rms: float = Field(10.0, ge=0.0)  # int16 scale, matching upstream
+    activity_threshold: float = Field(0.3, ge=0.0, le=1.0)
+    active_window_s: float = Field(3.0, gt=0.0)
+
+
+class ViolaConfig(BaseModel):
+    adaptive: ViolaAdaptiveConfig = Field(default_factory=ViolaAdaptiveConfig)
+    power: ViolaPowerConfig = Field(default_factory=ViolaPowerConfig)
+
+
 class WakewordConfig(BaseModel):
+    # "openwakeword": pretrained phrase name or custom .onnx.
+    # "violawake": registry name ("temporal_cnn") or a path to a .onnx you
+    # trained — it ships no pretrained phrase library.
+    engine: Literal["openwakeword", "violawake"] = "openwakeword"
     model: str = "hey_jarvis"
     threshold: float = Field(0.5, ge=0.0, le=1.0)
     threshold_speaking: float = Field(0.7, ge=0.0, le=1.0)
@@ -63,6 +117,8 @@ class WakewordConfig(BaseModel):
     verifier_model: str | None = None
     stop_verifier_model: str | None = None
     verifier_threshold: float = Field(0.1, ge=0.0, le=1.0)
+    # engine == "violawake" only; ignored otherwise
+    viola: ViolaConfig = Field(default_factory=ViolaConfig)
 
     @property
     def effective_stop_threshold_speaking(self) -> float:
@@ -218,6 +274,36 @@ class Config(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _violawake_supported(self) -> Config:
+        """Reject the violawake settings that fail silently at runtime."""
+        if self.wakeword.engine != "violawake":
+            return self
+        frame = self.audio.frame_samples
+        # violawake scores whole 20 ms frames; a remainder makes it log once
+        # per frame and return 0.0 forever, i.e. a detector that never fires
+        if frame % VIOLA_FRAME_SAMPLES or frame > VIOLA_MAX_FRAME_SAMPLES:
+            raise ValueError(
+                f"engine 'violawake' needs audio.frame_ms a multiple of "
+                f"{VIOLA_FRAME_MS} and at most "
+                f"{VIOLA_MAX_FRAME_SAMPLES * 1000 // SAMPLE_RATE}; "
+                f"{self.audio.frame_ms} gives {frame} samples"
+            )
+        if self.wakeword.verifier_model or self.wakeword.stop_verifier_model:
+            raise ValueError(
+                "wakeword.verifier_model is an openwakeword feature and has no "
+                "effect with engine 'violawake' — remove it or switch engines"
+            )
+        if self.wakeword.model == WakewordConfig.model_fields["model"].default:
+            # the default is an openwakeword phrase name; violawake ships no
+            # pretrained phrases, so leaving it alone is always a mistake
+            raise ValueError(
+                f"engine 'violawake' needs wakeword.model set to a violawake "
+                f"registry name or a path to a .onnx trained with violawake-train; "
+                f"{self.wakeword.model!r} is an openwakeword phrase"
+            )
+        return self
+
 
 def _resolve_config_paths(config: Config, base: Path) -> Config:
     """Rewrite config-relative paths to absolute ones, relative to `base`.
@@ -229,6 +315,13 @@ def _resolve_config_paths(config: Config, base: Path) -> Config:
     config.piper.voices = {
         lang: _resolve_path(p, base) for lang, p in config.piper.voices.items()
     }
+    wakeword = config.wakeword
+    # only path-shaped values: pretrained openwakeword phrases ("hey_jarvis")
+    # and violawake registry names ("temporal_cnn") must pass through verbatim
+    for field in ("model", "stop_model", "verifier_model", "stop_verifier_model"):
+        value = getattr(wakeword, field)
+        if value and value.endswith((".onnx", ".tflite", ".pkl")):
+            setattr(wakeword, field, _resolve_path(value, base))
     earcons = config.earcons
     earcons.wake, earcons.ack, earcons.error, earcons.idle = (
         _resolve_path(p, base)

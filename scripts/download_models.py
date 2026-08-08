@@ -48,6 +48,22 @@ def download_openwakeword() -> None:
     print("  done (shared feature models + pretrained wakewords)")
 
 
+def download_violawake(model: str) -> None:
+    """Fetch a violawake registry model (custom .onnx paths are yours to place).
+
+    The openWakeWord melspectrogram + embedding backbone violawake runs on top
+    of is already covered by download_openwakeword() above.
+    """
+    print(f"violawake model ({model}):")
+    if model.endswith((".onnx", ".tflite")):
+        exists = "" if Path(model).exists() else " — MISSING, train it first"
+        print(f"  custom model, not downloadable: {model}{exists}")
+        return
+    from violawake_sdk.models import get_model_path
+
+    print(f"  ready: {get_model_path(model)}")
+
+
 def download_piper(models_dir: Path) -> None:
     print("Piper TTS models:")
     for name, url in PIPER_FILES.items():
@@ -68,13 +84,20 @@ def main() -> None:
     args = parser.parse_args()
 
     stt_model, compute_type = "small", "int8"
+    wakeword = None
     if args.config.exists():
         from openhab_voice_satellite.config import load_config
 
         config = load_config(args.config)
         stt_model, compute_type = config.stt.model, config.stt.compute_type
+        wakeword = config.wakeword
 
+    # violawake runs on openWakeWord's feature models either way
     download_openwakeword()
+    if wakeword is not None and wakeword.engine == "violawake":
+        for model in (wakeword.model, wakeword.stop_model):
+            if model:
+                download_violawake(model)
     download_piper(REPO_ROOT / "models")
     warm_whisper(stt_model, compute_type)
     print("all models ready")

@@ -53,6 +53,55 @@ A custom wakeword model (`wakeword.model` pointing at a local `.onnx`, e.g.
 `download_models.py` — copy the file into place yourself before `--check`,
 which otherwise fails with a missing-model error.
 
+### Optional: the violawake engine (`wakeword.engine: violawake`)
+
+[ViolaWake](https://github.com/GeeIHadAGoodTime/ViolaWake) (Apache-2.0) runs a
+TemporalCNN head on top of the same openWakeWord melspectrogram + embedding
+backbone, and benchmarks better than openWakeWord's own heads (5.49 % vs
+8.24 % EER on its published comparison). The trade-offs are real, so read all
+four before switching:
+
+- **It ships no pretrained phrases.** openWakeWord gives you `hey_jarvis`,
+  `alexa` and friends for free; violawake gives you a training pipeline
+  (`violawake-train`, or their browser console) and expects a `.onnx` of your
+  own. `wakeword.model` must point at one, or at a registry name like
+  `temporal_cnn`.
+- **`stop_model` costs roughly double here.** openWakeWord shares one feature
+  backbone across every model; violawake builds one per `WakeDetector`, so a
+  stop model means the melspectrogram and embedding networks run twice per
+  frame. Measure with `--probe-mic` before committing to it.
+- **`audio.frame_ms` must be a multiple of 20** (and at most 200). Anything
+  else is rejected at config load, because violawake would otherwise score
+  0.0 on every frame and never fire.
+- **It is a young project** (v0.2.10 at the time of writing). Pin the version.
+
+```bash
+# --no-deps for the same reason as openwakeword: the [oww] extra pulls plain
+# openwakeword, whose metadata demands the unbuildable tflite-runtime. Its
+# other runtime needs (onnxruntime, numpy, scipy) are already installed; pysbd
+# is the only one missing.
+.venv/bin/pip install --no-deps 'violawake==0.2.10'
+.venv/bin/pip install pysbd
+```
+
+The app forces violawake's ONNX sessions to a single non-spinning thread
+(`src/openhab_voice_satellite/violawake_ort.py`), because upstream builds them
+with no `SessionOptions` at all and ORT would otherwise size its intra-op pool
+to the core count — the same idle multi-core burn the `ncpu=1` pin above
+avoids on the openWakeWord path. Measured on an 8-core x86 box, loading one
+detector: **+9 OS threads stock, +0 patched**. If a future violawake release
+moves that seam, the patch logs a warning at startup and keeps going: watch
+for `violawake ONNX thread patch skipped` and check idle CPU if you see it.
+
+Model provisioning: `scripts/download_models.py` reads `wakeword.engine` from
+your config and fetches registry models automatically; custom `.onnx` files it
+only checks for. The shared openWakeWord backbone is downloaded either way.
+Set the cache location for the service user, since the default is `~/.violawake`:
+
+```bash
+export VIOLAWAKE_MODEL_DIR=/opt/openhab-voice-satellite/models/violawake
+```
+
 ### Optional: per-speaker verifier models
 
 If the base model false-triggers on the TV, the radio or passers-by, a custom

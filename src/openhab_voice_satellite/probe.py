@@ -32,7 +32,7 @@ import numpy as np
 
 from .audio.wav import rms
 from .config import Config
-from .wakeword import WakewordDetector
+from .wakeword import WakewordProtocol, build_detector
 
 RUN_S = 30
 EARCON_AT_S = (8, 18)  # seconds at which the wake earcon is played
@@ -121,7 +121,7 @@ class _SecondStats:
 
 
 async def _capture_loop(
-    config: Config, source, sink, detector: WakewordDetector,
+    config: Config, source, sink, detector: WakewordProtocol,
     captured: list[np.ndarray], on_second: "Callable[[int], None]",
 ) -> tuple[float, float]:
     """Print per-second stats until RUN_S; returns the peak wake/stop scores."""
@@ -141,7 +141,7 @@ async def _probe(config: Config) -> None:
     from .audio.io import audio_io, verify_links
 
     _print_sources(config)
-    detector = WakewordDetector(config.wakeword)
+    detector = build_detector(config)
     earcon, earcon_rate = _load_earcon(config)
 
     async with audio_io(config.audio) as (source, sink):

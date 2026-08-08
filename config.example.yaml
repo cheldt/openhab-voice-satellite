@@ -9,6 +9,7 @@ audio:
   wakeup_preamble_idle_s: 60  # gap that counts as idle; match the speaker's mute delay (0 = preamble before every sound)
 
 wakeword:
+  engine: "openwakeword"    # or "violawake" (better benchmarks, but no pretrained phrases — you train the model)
   model: "hey_jarvis"       # openWakeWord pretrained name or path to a custom .onnx
   threshold: 0.5
   threshold_speaking: 0.7   # raised while TTS is audible (echo mitigation)
@@ -20,6 +21,24 @@ wakeword:
   verifier_model: null      # optional per-speaker openWakeWord custom verifier; UNPICKLED AT STARTUP, treat as executable code
   stop_verifier_model: null
   verifier_threshold: 0.1   # base score above which the verifier is consulted; it then REPLACES the score, so re-check thresholds
+  # Only used when engine is "violawake". Both blocks are off by default.
+  # NOTE: engine "violawake" needs audio.frame_ms to be a multiple of 20, and
+  # every model gets its own feature backbone — setting stop_model here costs
+  # roughly twice the per-frame CPU that openWakeWord would.
+  # viola:
+  #   adaptive:               # move the wake threshold with the room's noise floor
+  #     enabled: false        # when on, this REPLACES wakeword.threshold
+  #     noise_window_s: 5.0
+  #     min_threshold: 0.6    # the band the adapted threshold stays inside
+  #     max_threshold: 0.95
+  #     snr_boost_db: 6.0
+  #     snr_penalty_db: 3.0
+  #   power:                  # skip scoring frames that are clearly silence
+  #     enabled: false
+  #     duty_cycle_n: 1       # >1 also drops speech frames mid-stream; recall suffers
+  #     silence_rms: 10.0
+  #     activity_threshold: 0.3
+  #     active_window_s: 3.0
 
 vad:
   threshold: 0.5

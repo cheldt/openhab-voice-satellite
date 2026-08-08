@@ -61,6 +61,8 @@ Audio I/O needs GStreamer + PyGObject; install the system packages first
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev,gst]"
 .venv/bin/pip install --no-deps 'openwakeword==0.6.0'   # see note in pyproject.toml
+# optional second wakeword engine (wakeword.engine: violawake), see deploy/install.md:
+# .venv/bin/pip install --no-deps 'violawake==0.2.10' && .venv/bin/pip install pysbd
 .venv/bin/python scripts/download_models.py
 cp config.example.yaml config.yaml             # edit devices + openHAB url/token
 .venv/bin/openhab-voice-satellite --list-devices
@@ -122,11 +124,13 @@ Everything lives in one YAML file — see the extensively commented
 |---|---|
 | `audio.input_device` / `output_device` | substring of a PipeWire node name or description (`--list-devices`); `null` = default node |
 | `audio.wakeup_preamble_ms` / `wakeup_preamble_idle_s` | ramped-noise lead-in that wakes powered speakers whose signal-sensing mute swallows the first sound after an idle period (details in [deploy/install.md](deploy/install.md)) |
-| `wakeword.model` | pretrained openWakeWord name or path to custom `.onnx` |
+| `wakeword.engine` | `openwakeword` (default) or `violawake` — see [deploy/install.md](deploy/install.md) before switching |
+| `wakeword.model` | pretrained openWakeWord name or path to custom `.onnx` (violawake: a model you trained, it ships no phrases) |
 | `wakeword.threshold_speaking` | raised threshold while our own output is audible (echo mitigation) |
 | `wakeword.stop_threshold_speaking` | same for the stop model, which by definition runs during playback; `null` = reuse `stop_threshold` |
 | `wakeword.patience` / `stop_patience` | consecutive frames above threshold before firing; `2` rejects single-frame spikes for 80 ms of latency |
 | `wakeword.verifier_model` / `stop_verifier_model` | optional per-speaker openWakeWord custom verifier; **unpickled at startup**, see [deploy/install.md](deploy/install.md) |
+| `wakeword.viola.*` | violawake-only extras, both off by default: noise-adaptive threshold and silence-based frame skipping |
 | `stt.engine` | `local` (faster-whisper), `gemini` or `deepgram` (cloud STT, falls back to local on failure) |
 | `stt.model` | `small` (default) or `base` for lower latency |
 | `stt.languages` | language candidates for detection (default `[de, en]`); a single entry skips whisper's per-utterance language-detection pass — recommended on constrained boxes |
