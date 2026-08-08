@@ -14,6 +14,12 @@ wakeword:
   threshold_speaking: 0.7   # raised while TTS is audible (echo mitigation)
   stop_model: null          # optional: path to a custom-trained "stop" model (.onnx)
   stop_threshold: 0.5
+  stop_threshold_speaking: null  # null = same as stop_threshold; the stop model is the one that must run during playback
+  patience: 1               # consecutive frames above threshold before firing; 2 rejects single-frame spikes for 80 ms of latency
+  stop_patience: 1
+  verifier_model: null      # optional per-speaker openWakeWord custom verifier; UNPICKLED AT STARTUP, treat as executable code
+  stop_verifier_model: null
+  verifier_threshold: 0.1   # base score above which the verifier is consulted; it then REPLACES the score, so re-check thresholds
 
 vad:
   threshold: 0.5

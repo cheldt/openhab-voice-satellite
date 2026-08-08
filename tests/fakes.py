@@ -129,12 +129,14 @@ class BufferAudioSink:
         self.stopped = False
         self.duck_calls: list[float] = []
         self.unduck_calls = 0
+        self.is_playing = False  # tests set this to drive echo mitigation
 
     async def play(self, pcm: np.ndarray, sample_rate: int) -> None:
         self.played.append((pcm, sample_rate))
 
     def stop(self) -> None:
         self.stopped = True
+        self.is_playing = False
 
     def duck(self, factor: float) -> None:
         self.duck_calls.append(factor)
@@ -167,6 +169,9 @@ class ScriptedDetector:
 
     def score(self, key: str = "wake") -> float:
         return self._last_score
+
+    def tail(self, seconds: float) -> np.ndarray | None:
+        return np.zeros(int(seconds * 16000), dtype=np.int16)
 
     def reset(self) -> None:
         self.resets += 1

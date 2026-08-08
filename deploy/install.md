@@ -53,6 +53,41 @@ A custom wakeword model (`wakeword.model` pointing at a local `.onnx`, e.g.
 `download_models.py` — copy the file into place yourself before `--check`,
 which otherwise fails with a missing-model error.
 
+### Optional: per-speaker verifier models
+
+If the base model false-triggers on the TV, the radio or passers-by, a custom
+verifier is the cheapest fix available. It is a small logistic regression that
+re-scores a candidate detection using the embeddings openWakeWord already
+computed, so it costs nothing at idle and one `predict_proba` on a hot frame.
+It is speaker-*dependent* by design: it learns your household's voices and
+rejects everyone else — guests included.
+
+Training needs only sklearn/scipy/tqdm, which the `--no-deps` install above
+already provides (openWakeWord's full `train.py` does not run here — it needs
+torch and an external `piper_sample_generator` checkout). Record a handful of
+16 kHz mono WAVs of each person saying the wakeword, plus some of them saying
+other things, then:
+
+```python
+from openwakeword.custom_verifier_model import train_custom_verifier
+train_custom_verifier(
+    positive_reference_clips=["me-wake-1.wav", "me-wake-2.wav", ...],
+    negative_reference_clips=["me-other-1.wav", ...],
+    output_path="models/wakeword/shodan_listen_verifier.pkl",
+    model_path="models/wakeword/shodan_listen.onnx",
+)
+```
+
+Point `wakeword.verifier_model` at the result. Two warnings:
+
+- **The verifier replaces the score, it does not gate it.** Every threshold in
+  `config.yaml` then applies to a logistic probability with a different
+  distribution than the base model's output. Re-run `--probe-mic` and re-tune
+  `threshold`, `threshold_speaking` and `stop_threshold` after enabling one.
+- **Verifier files are unpickled at startup, which is arbitrary code
+  execution.** Only load files you trained yourself; treat one appearing in
+  `models/` the way you would treat a new executable on the box.
+
 ## 4. Configure
 
 ```bash

@@ -12,7 +12,7 @@ from typing import Callable, Protocol
 
 import numpy as np
 
-from .audio.broadcast import AudioBroadcaster
+from .audio.broadcast import AudioBroadcaster, drain_stale
 from .audio.earcons import Earcons
 from .audio.wav import rms, write_wav
 from .config import Config
@@ -204,11 +204,7 @@ class Pipeline:
     def _drain_earcon_echo(self, frames: asyncio.Queue) -> None:
         """Drop queued mic frames older than the echo guard window."""
         keep = -(-EARCON_ECHO_GUARD_MS // self._config.audio.frame_ms)  # ceil
-        while frames.qsize() > keep:
-            if frames.get_nowait() is None:
-                # end-of-stream sentinel: keep it for the recorder
-                frames.put_nowait(None)
-                break
+        drain_stale(frames, keep)
 
     async def _capture_utterance(
         self,

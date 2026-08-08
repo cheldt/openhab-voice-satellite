@@ -26,6 +26,24 @@ class SubscriberQueue(asyncio.Queue):
         self.dropped = 0  # frames evicted under backpressure
 
 
+def drain_stale(queue: asyncio.Queue, keep: int = 0) -> int:
+    """Discard all but the newest `keep` queued frames; returns how many went.
+
+    For deliberately abandoning audio that is known to be stale — echo of a
+    sound we just played, or the backlog that piled up while the consumer was
+    busy elsewhere. `SubscriberQueue.dropped` is left alone on purpose: that
+    counter means "lost to backpressure", and these losses are intentional.
+    The end-of-stream sentinel is never consumed.
+    """
+    dropped = 0
+    while queue.qsize() > keep:
+        if queue.get_nowait() is None:
+            queue.put_nowait(None)
+            break
+        dropped += 1
+    return dropped
+
+
 class AudioBroadcaster:
     """Reads frames from an AudioSource and fans them out to subscriber queues.
 

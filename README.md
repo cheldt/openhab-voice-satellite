@@ -70,13 +70,18 @@ cp config.example.yaml config.yaml             # edit devices + openHAB url/toke
 
 If the wakeword or audio path misbehaves in the field,
 `openhab-voice-satellite --probe-mic` runs a 30 s diagnostic: per-second mic
-RMS/peak and wakeword score, earcon playback through the configured output,
-stream-link verification, and a `diagnose_capture.wav` dump of exactly what
-the app heard.
+RMS/peak plus wake and stop scores, earcon playback through the configured
+output, stream-link verification, and a `diagnose_capture.wav` dump of exactly
+what the app heard. Speech at the intended distance should read roughly
+1000–5000 RMS — openWakeWord does no input normalization, so a quiet mic
+degrades recall in a way no threshold can compensate for.
 
 Tests: `.venv/bin/pytest` (fast; the GStreamer tests skip without PyGObject).
-Recorded utterances can be dumped for debugging by setting the
-`OVS_DUMP_UTTERANCES` env var to a directory.
+Three env vars dump audio for debugging, each taking a directory:
+`OVS_DUMP_UTTERANCES` (the recorded utterance, after the wakeword) and
+`OVS_DUMP_WAKE` (the audio *around* a detection, which is the only way to
+collect real false accepts). Add `OVS_DUMP_WAKE_SCORE=0.3` to also capture
+near misses — frames that almost fired.
 
 Pi installation + systemd service: see [deploy/install.md](deploy/install.md).
 
@@ -118,7 +123,10 @@ Everything lives in one YAML file — see the extensively commented
 | `audio.input_device` / `output_device` | substring of a PipeWire node name or description (`--list-devices`); `null` = default node |
 | `audio.wakeup_preamble_ms` / `wakeup_preamble_idle_s` | ramped-noise lead-in that wakes powered speakers whose signal-sensing mute swallows the first sound after an idle period (details in [deploy/install.md](deploy/install.md)) |
 | `wakeword.model` | pretrained openWakeWord name or path to custom `.onnx` |
-| `wakeword.threshold_speaking` | raised threshold while TTS is audible (echo mitigation) |
+| `wakeword.threshold_speaking` | raised threshold while our own output is audible (echo mitigation) |
+| `wakeword.stop_threshold_speaking` | same for the stop model, which by definition runs during playback; `null` = reuse `stop_threshold` |
+| `wakeword.patience` / `stop_patience` | consecutive frames above threshold before firing; `2` rejects single-frame spikes for 80 ms of latency |
+| `wakeword.verifier_model` / `stop_verifier_model` | optional per-speaker openWakeWord custom verifier; **unpickled at startup**, see [deploy/install.md](deploy/install.md) |
 | `stt.engine` | `local` (faster-whisper), `gemini` or `deepgram` (cloud STT, falls back to local on failure) |
 | `stt.model` | `small` (default) or `base` for lower latency |
 | `stt.languages` | language candidates for detection (default `[de, en]`); a single entry skips whisper's per-utterance language-detection pass — recommended on constrained boxes |
@@ -137,8 +145,11 @@ Everything lives in one YAML file — see the extensively commented
 ## Barge-in and echo
 
 During playback the mic hears the speaker. Mitigations built in: raised
-wakeword threshold in SPEAKING, automatic volume ducking when the detector
-starts to trigger. For robust hands-free interruption, run PipeWire's WebRTC
+wakeword threshold for as long as the sink reports audio is audible (which
+covers earcons in any state, and stops the moment a barge-in flushes
+playback), automatic volume ducking when the detector starts to trigger, and
+abandoning the mic backlog that piled up during a cancel so our own tail is
+never re-scored. For robust hands-free interruption, run PipeWire's WebRTC
 echo canceller and point `audio.input_device` / `audio.output_device` at its
 echo-cancel nodes (they appear in `--list-devices` like any other PipeWire
 node) — setup in [deploy/install.md](deploy/install.md).

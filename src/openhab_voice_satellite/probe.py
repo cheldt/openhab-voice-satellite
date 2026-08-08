@@ -82,41 +82,59 @@ class _SecondStats:
         self._buf: list[np.ndarray] = []
         self._samples = 0
         self._best = 0.0
+        self._best_stop = 0.0
+        self._audible = False
         self.t = 0
         self.peak_score = 0.0
+        self.peak_stop_score = 0.0
 
-    def add(self, frame: np.ndarray, score: float) -> bool:
+    def add(
+        self, frame: np.ndarray, score: float, stop_score: float, audible: bool
+    ) -> bool:
         """Accumulate one frame; True when a full second was printed."""
         self._buf.append(frame)
         self._samples += len(frame)
         self._best = max(self._best, score)
+        self._best_stop = max(self._best_stop, stop_score)
+        self._audible = self._audible or audible
         if self._samples < self._config.audio.sample_rate:
             return False
         pcm = np.concatenate(self._buf)
-        mark = "  <-- WAKE" if self._best >= self._config.wakeword.threshold else ""
-        print(f"{self.t:>4} {rms(pcm):>7} {int(np.abs(pcm).max()):>7} {self._best:>10.3f}{mark}")
+        wakeword = self._config.wakeword
+        # the live threshold is state-dependent; a probe that always prints
+        # the idle one would mark hits the running app would have rejected
+        threshold = wakeword.threshold_speaking if self._audible else wakeword.threshold
+        mark = "  <-- WAKE" if self._best >= threshold else ""
+        if self._audible:
+            mark += " (playback)"
+        print(f"{self.t:>4} {rms(pcm):>7} {int(np.abs(pcm).max()):>7} "
+              f"{self._best:>10.3f} {self._best_stop:>10.3f}{mark}")
         self.peak_score = max(self.peak_score, self._best)
+        self.peak_stop_score = max(self.peak_stop_score, self._best_stop)
         self._buf.clear()
         self._samples = 0
         self._best = 0.0
+        self._best_stop = 0.0
+        self._audible = False
         self.t += 1
         return True
 
 
 async def _capture_loop(
-    config: Config, source, detector: WakewordDetector,
+    config: Config, source, sink, detector: WakewordDetector,
     captured: list[np.ndarray], on_second: "Callable[[int], None]",
-) -> float:
-    """Print per-second stats until RUN_S; returns the peak wake score."""
+) -> tuple[float, float]:
+    """Print per-second stats until RUN_S; returns the peak wake/stop scores."""
     stats = _SecondStats(config)
     async for frame in source.frames():
         captured.append(frame)
-        detector.process(frame)
-        if stats.add(frame, detector.score("wake")):
+        audible = sink.is_playing
+        detector.process(frame, speaking=audible)
+        if stats.add(frame, detector.score("wake"), detector.score("stop"), audible):
             on_second(stats.t)
             if stats.t >= RUN_S:
                 break
-    return stats.peak_score
+    return stats.peak_score, stats.peak_stop_score
 
 
 async def _probe(config: Config) -> None:
@@ -129,7 +147,7 @@ async def _probe(config: Config) -> None:
     async with audio_io(config.audio) as (source, sink):
         print(f"listening for {RUN_S}s — say the wakeword "
               f"({config.wakeword.model}) a few times")
-        print(f"{'sec':>4} {'rms':>7} {'peak':>7} {'wake_score':>10}")
+        print(f"{'sec':>4} {'rms':>7} {'peak':>7} {'wake_score':>10} {'stop_score':>10}")
         captured: list[np.ndarray] = []
         side_tasks = [asyncio.create_task(verify_links(source.target, sink.target))]
 
@@ -139,10 +157,10 @@ async def _probe(config: Config) -> None:
                     _play_earcon(sink, earcon, earcon_rate, f"t={t}")
                 ))
 
-        peak_score = 0.0
+        peak_score = peak_stop_score = 0.0
         try:
-            peak_score = await asyncio.wait_for(
-                _capture_loop(config, source, detector, captured, on_second),
+            peak_score, peak_stop_score = await asyncio.wait_for(
+                _capture_loop(config, source, sink, detector, captured, on_second),
                 timeout=RUN_S + 10,
             )
         except asyncio.TimeoutError:
@@ -154,8 +172,14 @@ async def _probe(config: Config) -> None:
     if captured:
         from .audio.wav import write_wav
 
+        wakeword = config.wakeword
         write_wav(DUMP_WAV, np.concatenate(captured), config.audio.sample_rate)
-        print(f"\npeak wake score: {peak_score:.3f} (threshold {config.wakeword.threshold})")
+        print(f"\npeak wake score: {peak_score:.3f} "
+              f"(threshold {wakeword.threshold}, {wakeword.threshold_speaking} during playback)")
+        if wakeword.stop_model:
+            print(f"peak stop score: {peak_stop_score:.3f} "
+                  f"(threshold {wakeword.stop_threshold}, "
+                  f"{wakeword.effective_stop_threshold_speaking} during playback)")
         print(f"captured audio written to {DUMP_WAV} — play it back to hear what the app hears")
 
 

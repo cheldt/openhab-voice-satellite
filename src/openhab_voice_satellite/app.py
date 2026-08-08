@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from contextlib import AsyncExitStack
+from pathlib import Path
 
 import aiohttp
 import numpy as np
 
-from .audio.broadcast import AudioBroadcaster
+from .audio.broadcast import AudioBroadcaster, drain_stale
 from .audio.earcons import Earcons
 from .audio.io import audio_io, verify_links
 from .audio.sink import AudioSink
-from .audio.wav import rms
-from .config import Config
+from .audio.wav import rms, write_wav
+from .config import SAMPLE_RATE, Config
 from .deepgram import DeepgramClient, DeepgramSpeaker, DeepgramTranscriber
 from .fallback import FallbackSpeaker, FallbackTranscriber, LazySpeaker
 from .gemini import GeminiClient, GeminiSpeaker, GeminiTranscriber
@@ -37,6 +39,37 @@ MIC_STALL_WARN_S = 10.0  # no frames for this long -> loud warning
 HEARTBEAT_S = 10.0  # capture-health DEBUG line interval
 
 
+WAKE_DUMP_PREROLL_S = 2.5  # audio kept before a detection, incl. the wakeword
+
+
+def _dump_wake_audio(
+    detector: WakewordDetector, detection: str | None, score: float, state: State
+) -> None:
+    """Write the audio around a detection to $OVS_DUMP_WAKE for field debugging.
+
+    Unlike the utterance dump this captures what actually fired the detector,
+    which is the only way to collect real false accepts. $OVS_DUMP_WAKE_SCORE
+    additionally catches near misses — the frames that almost triggered.
+    """
+    dump_dir = os.environ.get("OVS_DUMP_WAKE")
+    if not dump_dir:
+        return
+    if detection is None:
+        floor = os.environ.get("OVS_DUMP_WAKE_SCORE")
+        if not floor or score < float(floor):
+            return
+    label = detection or "near"
+    path = Path(dump_dir) / f"{label}-{score:.2f}-{state.name}-{time.strftime('%H%M%S')}.wav"
+    pcm = detector.tail(WAKE_DUMP_PREROLL_S)
+    if pcm is None or not len(pcm):
+        return
+    try:
+        write_wav(path, pcm, SAMPLE_RATE)
+        log.info("wake audio dumped: %s", path)
+    except OSError:
+        log.exception("wake audio dump failed")
+
+
 class _CaptureHealth:
     """Frame-rate/RMS bookkeeping behind the heartbeat + degraded-capture logs."""
 
@@ -45,22 +78,24 @@ class _CaptureHealth:
         self._frames = 0
         self._rms = 0
         self._score = 0.0
+        self._dropped = 0  # queue evictions seen at the start of this window
         self._start = time.monotonic()
 
     def restart(self) -> None:
         """Reset the window clock (after a stall, so the gap isn't counted)."""
         self._start = time.monotonic()
 
-    def observe(self, frame: np.ndarray, score: float) -> None:
+    def observe(self, frame: np.ndarray, score: float, dropped: int = 0) -> None:
         self._frames += 1
         self._rms = max(self._rms, rms(frame))
         self._score = max(self._score, score)
         now = time.monotonic()
         if now - self._start < HEARTBEAT_S:
             return
+        evicted = dropped - self._dropped
         log.debug(
-            "monitor: %d frames in %.1fs, peak rms=%d, peak wake score=%.3f",
-            self._frames, now - self._start, self._rms, self._score,
+            "monitor: %d frames in %.1fs, peak rms=%d, peak wake score=%.3f, dropped=%d",
+            self._frames, now - self._start, self._rms, self._score, evicted,
         )
         expected = self._expected_fps * (now - self._start)
         if self._frames < 0.8 * expected:
@@ -69,9 +104,18 @@ class _CaptureHealth:
                 "— wakeword detection will be unreliable",
                 self._frames, int(expected), now - self._start,
             )
+        if evicted:
+            # the wake queue holds 4 s; losing frames means the loop stalled
+            # that long, and the spliced audio silently breaks a wakeword
+            log.warning(
+                "%d mic frames evicted from the wakeword queue — the event "
+                "loop stalled; detection was deaf across the gap",
+                evicted,
+            )
         self._frames = 0
         self._rms = 0
         self._score = 0.0
+        self._dropped = dropped
         self._start = now
 
 
@@ -236,6 +280,23 @@ class App:
         log.info("interaction cancelled")
         return was_speaking
 
+    def _resync_detector(self, detector: WakewordDetector, wake_queue: asyncio.Queue) -> None:
+        """Clear the detector and abandon the mic backlog that outran it.
+
+        Nothing downstream reads wake_queue — an interaction subscribes for
+        itself — so everything queued here is audio the detector has already
+        fallen behind on, most of it our own playback from just before a
+        barge-in. Replaying it after the reset would score TTS echo against
+        the IDLE threshold, which is exactly how the assistant wakes itself.
+        """
+        detector.reset()
+        stale = drain_stale(wake_queue)
+        if stale:
+            log.debug(
+                "dropped %d stale mic frames (%.1fs) after detector reset",
+                stale, stale * self._config.audio.frame_ms / 1000,
+            )
+
     async def _interrupt_monitor(
         self,
         wake_queue: asyncio.Queue,
@@ -262,24 +323,27 @@ class App:
                     log.info("audio source closed, monitor exiting")
                     return
 
-                speaking = self.state in (State.THINKING, State.SPEAKING)
-                detection = detector.process(frame, speaking=speaking)
+                # the sink, not the state, knows whether the room is loud:
+                # THINKING is silent for its whole whisper roundtrip, while
+                # the wake and ack earcons are audible outside SPEAKING
+                detection = detector.process(frame, speaking=sink.is_playing)
                 score = detector.score("wake")
-                health.observe(frame, score)
+                health.observe(frame, score, getattr(wake_queue, "dropped", 0))
                 duck.update(self.state is State.SPEAKING, score, sink)
+                _dump_wake_audio(detector, detection, score, self.state)
 
                 if detection is None:
                     continue
 
                 if self.state is State.IDLE and detection == "wake":
                     log.info("wakeword detected (score %.2f)", score)
-                    detector.reset()
+                    self._resync_detector(detector, wake_queue)
                     self._start_pipeline(pipeline, earcons)
                 elif self.state in (State.LISTENING, State.THINKING, State.SPEAKING):
                     # wakeword or stop-word during an interaction = barge-in
                     was_speaking = await self._cancel_pipeline(sink)
                     duck.release(sink)
-                    detector.reset()
+                    self._resync_detector(detector, wake_queue)
                     if (
                         detection == "wake"
                         and was_speaking
@@ -288,6 +352,11 @@ class App:
                         self._start_pipeline(pipeline, earcons, play_wake_earcon=True)
                     else:
                         await earcons.play("idle")
+                else:
+                    # "stop" with no interaction running: nothing to stop, and
+                    # the hysteresis re-arms on its own a few frames later
+                    log.debug("stop word ignored while idle (score %.2f)",
+                              detector.score("stop"))
         finally:
             # shutdown (source closed or Ctrl-C): a still-running interaction
             # must die, and its conversation cleanup finish, before App.run's

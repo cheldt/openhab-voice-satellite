@@ -49,6 +49,26 @@ class WakewordConfig(BaseModel):
     threshold_speaking: float = Field(0.7, ge=0.0, le=1.0)
     stop_model: str | None = None
     stop_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    # None = reuse stop_threshold. The stop model runs during playback by
+    # definition and usually carries the lowest threshold in the system, so
+    # it is the first place echo false-accepts show up.
+    stop_threshold_speaking: float | None = Field(None, ge=0.0, le=1.0)
+    # consecutive frames above threshold before a detection fires. 1 keeps
+    # the historical single-frame trigger; 2 costs one frame of latency and
+    # rejects the transient spikes that make up most false accepts.
+    patience: int = Field(1, ge=1, le=10)
+    stop_patience: int = Field(1, ge=1, le=10)
+    # optional per-speaker verifier models (openwakeword custom verifiers).
+    # These are unpickled at startup: treat them like executable code.
+    verifier_model: str | None = None
+    stop_verifier_model: str | None = None
+    verifier_threshold: float = Field(0.1, ge=0.0, le=1.0)
+
+    @property
+    def effective_stop_threshold_speaking(self) -> float:
+        if self.stop_threshold_speaking is None:
+            return self.stop_threshold
+        return self.stop_threshold_speaking
 
 
 class VadConfig(BaseModel):
