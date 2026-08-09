@@ -119,14 +119,24 @@ class _SecondStats:
         self._config = config
         self._buf: list[np.ndarray] = []
         self._samples = 0
+        self._frames = 0
+        self._row_start = time.monotonic()
         self._best = 0.0
         self._best_stop = 0.0
         self._audible = False
         self._cost = _Cost()
+        self._run_frames = 0
+        self._run_start = self._row_start
         self.t = 0
         self.peak_score = 0.0
         self.peak_stop_score = 0.0
         self.cost = _Cost()  # the whole run, not just the current second
+
+    @property
+    def fps(self) -> float:
+        """Frames actually delivered per second, over the whole run."""
+        elapsed = time.monotonic() - self._run_start
+        return self._run_frames / elapsed if elapsed else 0.0
 
     def add(
         self, frame: np.ndarray, score: float, stop_score: float, audible: bool,
@@ -135,13 +145,20 @@ class _SecondStats:
         """Accumulate one frame; True when a full second was printed."""
         self._buf.append(frame)
         self._samples += len(frame)
+        self._frames += 1
+        self._run_frames += 1
         self._best = max(self._best, score)
         self._best_stop = max(self._best_stop, stop_score)
         self._audible = self._audible or audible
         self._cost.add(wall_s, cpu_s)
         self.cost.add(wall_s, cpu_s)
-        if self._samples < self._config.audio.sample_rate:
+        # a row per elapsed second, not per second of *audio*: pacing on the
+        # sample count would stretch the run under-delivery instead of showing
+        # it, which is exactly the failure this probe exists to catch
+        elapsed = time.monotonic() - self._row_start
+        if elapsed < 1.0:
             return False
+        fps = self._frames / elapsed
         pcm = np.concatenate(self._buf)
         wakeword = self._config.wakeword
         # the live threshold is state-dependent; a probe that always prints
@@ -151,12 +168,14 @@ class _SecondStats:
         if self._audible:
             mark += " (playback)"
         print(f"{self.t:>4} {rms(pcm):>7} {int(np.abs(pcm).max()):>7} "
-              f"{self._best:>10.3f} {self._best_stop:>10.3f} "
+              f"{self._best:>10.3f} {self._best_stop:>10.3f} {fps:>7.1f} "
               f"{self._cost.wall_ms:>8.1f} {self._cost.cpu_ms:>7.1f}{mark}")
         self.peak_score = max(self.peak_score, self._best)
         self.peak_stop_score = max(self.peak_stop_score, self._best_stop)
         self._buf.clear()
         self._samples = 0
+        self._frames = 0
+        self._row_start = time.monotonic()
         self._best = 0.0
         self._best_stop = 0.0
         self._audible = False
@@ -197,7 +216,7 @@ async def _probe(config: Config) -> None:
         print(f"listening for {RUN_S}s — say the wakeword "
               f"({config.wakeword.model}) a few times")
         print(f"{'sec':>4} {'rms':>7} {'peak':>7} {'wake_score':>10} "
-              f"{'stop_score':>10} {'ms/frame':>8} {'cpu_ms':>7}")
+              f"{'stop_score':>10} {'fps':>7} {'ms/frame':>8} {'cpu_ms':>7}")
         stats = _SecondStats(config)
         captured: list[np.ndarray] = []
         side_tasks = [asyncio.create_task(verify_links(source.target, sink.target))]
@@ -216,6 +235,7 @@ async def _probe(config: Config) -> None:
         except asyncio.TimeoutError:
             print("TIMED OUT waiting for audio frames — capture stream is stalled/unlinked")
         finally:
+            capture = source.stats()  # read before audio_io closes the source
             for task in side_tasks:
                 task.cancel()
 
@@ -230,9 +250,14 @@ async def _probe(config: Config) -> None:
             print(f"peak stop score: {stats.peak_stop_score:.3f} "
                   f"(threshold {wakeword.stop_threshold}, "
                   f"{wakeword.effective_stop_threshold_speaking} during playback)")
+        expected_fps = config.audio.sample_rate / config.audio.frame_samples
+        short = "  <-- capture is under-delivering" if stats.fps < 0.8 * expected_fps else ""
+        print(f"capture rate: {stats.fps:.1f} of {expected_fps:.1f} frames/s"
+              f"{short}")
         print(f"{wakeword.engine} cost: {stats.cost.wall_ms:.1f} ms wall, "
               f"{stats.cost.cpu_ms:.1f} ms process CPU per frame "
               f"(budget {config.audio.frame_ms} ms)")
+        print(f"capture accounting — {capture.describe()}")
         print(f"captured audio written to {DUMP_WAV} — play it back to hear what the app hears")
 
 

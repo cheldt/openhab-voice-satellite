@@ -14,8 +14,10 @@ import numpy as np
 
 from .audio.broadcast import AudioBroadcaster, drain_stale
 from .audio.earcons import Earcons
+from .audio.gst_source import CaptureStats
 from .audio.io import audio_io, verify_links
 from .audio.sink import AudioSink
+from .audio.source import AudioSource
 from .audio.wav import rms, write_wav
 from .config import SAMPLE_RATE, Config
 from .deepgram import DeepgramClient, DeepgramSpeaker, DeepgramTranscriber
@@ -73,19 +75,32 @@ def _dump_wake_audio(
 class _CaptureHealth:
     """Frame-rate/RMS bookkeeping behind the heartbeat + degraded-capture logs."""
 
-    def __init__(self, expected_fps: float) -> None:
+    def __init__(self, expected_fps: float, capture: CaptureStats | None = None) -> None:
         self._expected_fps = expected_fps
         self._frames = 0
         self._rms = 0
         self._score = 0.0
         self._dropped = 0  # queue evictions seen at the start of this window
+        self._capture = capture or CaptureStats()
         self._start = time.monotonic()
 
-    def restart(self) -> None:
-        """Reset the window clock (after a stall, so the gap isn't counted)."""
+    def restart(self, capture: CaptureStats | None = None) -> None:
+        """Reset the window clock (after a stall, so the gap isn't counted).
+
+        The capture baseline moves with it: a window that is not counted must
+        not lend its buffers to the next one.
+        """
+        if capture is not None:
+            self._capture = capture
         self._start = time.monotonic()
 
-    def observe(self, frame: np.ndarray, score: float, dropped: int = 0) -> None:
+    def observe(
+        self,
+        frame: np.ndarray,
+        score: float,
+        dropped: int = 0,
+        capture: CaptureStats | None = None,
+    ) -> None:
         self._frames += 1
         self._rms = max(self._rms, rms(frame))
         self._score = max(self._score, score)
@@ -93,16 +108,23 @@ class _CaptureHealth:
         if now - self._start < HEARTBEAT_S:
             return
         evicted = dropped - self._dropped
+        capture = capture or CaptureStats()
+        window = capture.since(self._capture)
         log.debug(
-            "monitor: %d frames in %.1fs, peak rms=%d, peak wake score=%.3f, dropped=%d",
+            "monitor: %d frames in %.1fs, peak rms=%d, peak wake score=%.3f, "
+            "dropped=%d, %s",
             self._frames, now - self._start, self._rms, self._score, evicted,
+            window.describe(),
         )
         expected = self._expected_fps * (now - self._start)
         if self._frames < 0.8 * expected:
+            # the capture line names the stage: buffers short of the frame
+            # count means the graph under-fed us, buffers full means we lost
+            # them ourselves between the appsink and this loop
             log.warning(
                 "degraded capture: %d of %d expected mic frames in %.0fs "
-                "— wakeword detection will be unreliable",
-                self._frames, int(expected), now - self._start,
+                "(%s) — wakeword detection will be unreliable",
+                self._frames, int(expected), now - self._start, window.describe(),
             )
         if evicted:
             # the wake queue holds 4 s; losing frames means the loop stalled
@@ -116,6 +138,7 @@ class _CaptureHealth:
         self._rms = 0
         self._score = 0.0
         self._dropped = dropped
+        self._capture = capture
         self._start = now
 
 
@@ -249,7 +272,9 @@ class App:
                 verify_links(source.target, sink.target), name="verify-links"
             )
             try:
-                await self._interrupt_monitor(wake_queue, detector, pipeline, sink, earcons)
+                await self._interrupt_monitor(
+                    wake_queue, detector, pipeline, sink, earcons, source
+                )
             finally:
                 link_check.cancel()
                 await broadcaster.stop()
@@ -308,10 +333,11 @@ class App:
         pipeline: Pipeline,
         sink: AudioSink,
         earcons: Earcons,
+        source: AudioSource,
     ) -> None:
         """Always-on wakeword loop; starts or cancels the interaction task."""
         audio = self._config.audio
-        health = _CaptureHealth(audio.sample_rate / audio.frame_samples)
+        health = _CaptureHealth(audio.sample_rate / audio.frame_samples, source.stats())
         duck = _DuckController()
         try:
             while True:
@@ -319,9 +345,10 @@ class App:
                     frame = await asyncio.wait_for(wake_queue.get(), timeout=MIC_STALL_WARN_S)
                 except asyncio.TimeoutError:
                     log.warning(
-                        "no mic frames for %.0fs — capture stream stalled?", MIC_STALL_WARN_S
+                        "no mic frames for %.0fs — capture stream stalled? (%s)",
+                        MIC_STALL_WARN_S, source.stats().describe(),
                     )
-                    health.restart()
+                    health.restart(source.stats())
                     continue
                 if frame is None:
                     log.info("audio source closed, monitor exiting")
@@ -332,7 +359,9 @@ class App:
                 # the wake and ack earcons are audible outside SPEAKING
                 detection = detector.process(frame, speaking=sink.is_playing)
                 score = detector.score("wake")
-                health.observe(frame, score, getattr(wake_queue, "dropped", 0))
+                health.observe(
+                    frame, score, getattr(wake_queue, "dropped", 0), source.stats()
+                )
                 duck.update(self.state is State.SPEAKING, score, sink)
                 _dump_wake_audio(detector, detection, score, self.state)
 

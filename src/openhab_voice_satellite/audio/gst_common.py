@@ -29,14 +29,17 @@ def s16_mono_caps(rate: int) -> str:
 def capture_description(target: str | None, sample_rate: int) -> str:
     """The capture pipeline, shared by the app and byte-for-byte by --check.
 
-    appsink max-buffers/drop is only a safety net; the drop-oldest policy
-    lives in the consumer's asyncio queue.
+    The appsink neither buffers nor discards (max-buffers=0 drop=false): the
+    new-sample handler only hands the frames to the event loop and returns, so
+    a queue in front of it protects nothing — it can only lose buffers where
+    nothing counts them. The drop-oldest policy lives in the consumer's asyncio
+    queue, where the loss is accounted for.
     """
     t = f'target-object="{target}" ' if target else ""
     return (
         f"pipewiresrc client-name={CLIENT_NAME} {t}"
         f"! audioconvert ! audioresample ! {s16_mono_caps(sample_rate)} "
-        f"! appsink name=sink emit-signals=true sync=false max-buffers=8 drop=true"
+        f"! appsink name=sink emit-signals=true sync=false max-buffers=0 drop=false"
     )
 
 

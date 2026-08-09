@@ -3,10 +3,15 @@ import asyncio
 import numpy as np
 import pytest
 
+# the accounting is pure python; only the pipeline tests below need gi
+from openhab_voice_satellite.audio.gst_source import NS, CaptureStats, _Counters
+
 gi = pytest.importorskip("gi")
 
 from openhab_voice_satellite.audio.gst_common import s16_mono_caps  # noqa: E402
 from openhab_voice_satellite.audio.gst_source import PipewireSource  # noqa: E402
+
+RATE = 16000
 
 
 def _testsrc_describe(target, sample_rate):
@@ -14,7 +19,7 @@ def _testsrc_describe(target, sample_rate):
     return (
         f"audiotestsrc is-live=true samplesperbuffer=800 ! audioconvert ! audioresample "
         f"! {s16_mono_caps(sample_rate)} "
-        f"! appsink name=sink emit-signals=true sync=false max-buffers=8 drop=true"
+        f"! appsink name=sink emit-signals=true sync=false max-buffers=0 drop=false"
     )
 
 
@@ -43,6 +48,75 @@ async def test_close_ends_frame_iteration(monkeypatch):
             pass
 
     await asyncio.wait_for(drain(), timeout=5.0)
+
+
+async def test_stats_count_what_the_graph_delivered(monkeypatch):
+    monkeypatch.setattr(PipewireSource, "_describe", staticmethod(_testsrc_describe))
+    source = PipewireSource(sample_rate=RATE, frame_samples=1280, device=None)
+    try:
+        it = source.frames()
+        for _ in range(3):
+            await asyncio.wait_for(anext(it), timeout=5.0)
+        stats = source.stats()
+        assert stats.buffers > 0
+        assert stats.samples >= 3 * 1280  # at least what we already consumed
+        assert stats.dropped == 0
+    finally:
+        source.close()
+
+
+# -- accounting, without a pipeline ------------------------------------
+
+
+def _push(counters, pts_s, n=800):
+    counters.observe(int(pts_s * NS), n)
+
+
+def test_contiguous_buffers_are_not_a_gap():
+    counters = _Counters(RATE)
+    for i in range(5):
+        _push(counters, i * 800 / RATE)
+    stats = counters.snapshot()
+    assert (stats.buffers, stats.samples) == (5, 4000)
+    assert stats.pts_gaps == 0
+
+
+def test_a_skipped_buffer_is_counted_as_a_gap():
+    """The one fact that separates 'the graph skipped it' from 'we lost it'."""
+    counters = _Counters(RATE)
+    _push(counters, 0.0)
+    _push(counters, 0.05 + 800 / RATE)  # 50 ms of audio never arrived
+    stats = counters.snapshot()
+    assert stats.pts_gaps == 1
+    assert stats.pts_gap_s == pytest.approx(0.05)
+    assert stats.buffers == 2  # the gap is not a buffer we received
+
+
+def test_timestamp_jitter_is_not_reported_as_loss():
+    counters = _Counters(RATE)
+    _push(counters, 0.0)
+    _push(counters, 800 / RATE + 0.0005)  # 0.5 ms late, under the tolerance
+    assert counters.snapshot().pts_gaps == 0
+
+
+def test_an_untimed_buffer_cannot_manufacture_a_gap():
+    counters = _Counters(RATE)
+    _push(counters, 0.0)
+    counters.observe(None, 800)  # GST_CLOCK_TIME_NONE in practice
+    _push(counters, 99.0)  # a wild jump, but nothing to measure it against
+    stats = counters.snapshot()
+    assert stats.pts_gaps == 0
+    assert stats.buffers == 3
+
+
+def test_a_window_is_the_difference_of_two_snapshots():
+    early = CaptureStats(buffers=10, samples=8000, pts_gaps=1, pts_gap_s=0.5, dropped=2)
+    later = CaptureStats(buffers=25, samples=20000, pts_gaps=4, pts_gap_s=2.0, dropped=3)
+    window = later.since(early)
+    assert (window.buffers, window.samples) == (15, 12000)
+    assert (window.pts_gaps, window.dropped) == (3, 1)
+    assert window.pts_gap_s == pytest.approx(1.5)
+    assert "15 buffers / 12000 samples" in window.describe()
 
 
 async def test_unstartable_pipeline_raises(monkeypatch):

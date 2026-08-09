@@ -10,6 +10,7 @@ from typing import AsyncIterator
 import numpy as np
 from aiohttp import web
 
+from openhab_voice_satellite.audio.gst_source import CaptureStats
 from openhab_voice_satellite.stt import Transcript
 
 FRAME = 1280  # 80 ms at 16 kHz
@@ -111,11 +112,16 @@ class SilenceAudioSource:
     def __init__(self, frame_samples: int = 1280) -> None:
         self._frame_samples = frame_samples
         self.closed = False
+        self.capture = CaptureStats()
 
     async def frames(self) -> AsyncIterator[np.ndarray]:
         while not self.closed:
             await asyncio.sleep(0)
             yield np.zeros(self._frame_samples, dtype=np.int16)
+
+    def stats(self) -> CaptureStats:
+        """Whatever a test set on `capture`; the monitor only reports it."""
+        return self.capture
 
     def close(self) -> None:
         self.closed = True

@@ -16,6 +16,7 @@ import pytest
 import openhab_voice_satellite.app as app_module
 from openhab_voice_satellite.app import App, _build_engines, _build_speaker
 from openhab_voice_satellite.audio.broadcast import SubscriberQueue
+from openhab_voice_satellite.audio.gst_source import CaptureStats
 from openhab_voice_satellite.config import Config
 from openhab_voice_satellite.fallback import (
     FallbackSpeaker,
@@ -31,6 +32,7 @@ from .fakes import (
     LocalTranscriberStub,
     RecordingEarcons,
     ScriptedDetector,
+    SilenceAudioSource,
 )
 
 FRAME = np.zeros(1280, dtype=np.int16)
@@ -46,12 +48,14 @@ class Monitor:
         self.sink = BufferAudioSink()
         self.earcons = RecordingEarcons()
         self.pipeline = FakePipeline(set_state=self.app._set_state, **(pipeline_kwargs or {}))
+        self.source = SilenceAudioSource()  # only its stats() is used here
         self.task: asyncio.Task | None = None
 
     async def __aenter__(self):
         self.task = asyncio.create_task(
             self.app._interrupt_monitor(
-                self.queue, self.detector, self.pipeline, self.sink, self.earcons
+                self.queue, self.detector, self.pipeline, self.sink, self.earcons,
+                self.source,
             )
         )
         return self
@@ -301,6 +305,48 @@ async def test_degraded_capture_warning(monkeypatch, caplog):
             await asyncio.sleep(0.3)  # far fewer frames than expected_fps
             await m.feed()
         assert "degraded capture" in caplog.text
+
+
+async def test_degraded_capture_names_the_losing_stage(monkeypatch, caplog):
+    """The warning has to say whether the graph or we lost the frames."""
+    monkeypatch.setattr(app_module, "HEARTBEAT_S", 0.05)
+    async with Monitor() as m:
+        await m.feed()  # the monitor takes its baseline on the first pass
+        m.source.capture = CaptureStats(
+            buffers=400, samples=512000, pts_gaps=3, pts_gap_s=9.5, dropped=7
+        )
+        with caplog.at_level(logging.WARNING):
+            await asyncio.sleep(0.3)
+            await m.feed()
+        assert "400 buffers / 512000 samples" in caplog.text
+        assert "3 PTS gaps totalling 9.5s" in caplog.text
+        assert "source queue drops 7" in caplog.text
+
+
+def _closed_window(health, capture: CaptureStats) -> None:
+    """Push one frame with the window already expired, so it reports."""
+    health._start -= app_module.HEARTBEAT_S
+    health.observe(FRAME, 0.0, 0, capture)
+
+
+def test_capture_accounting_is_per_window(caplog):
+    """A window reports its own buffers, not everything since startup."""
+    health = app_module._CaptureHealth(12.5, CaptureStats())
+    with caplog.at_level(logging.WARNING):
+        _closed_window(health, CaptureStats(buffers=100, samples=128000))
+        _closed_window(health, CaptureStats(buffers=130, samples=166400))
+    assert "100 buffers / 128000 samples" in caplog.messages[0]
+    assert "30 buffers / 38400 samples" in caplog.messages[1]
+
+
+def test_a_stall_does_not_lend_its_buffers_to_the_next_window(caplog):
+    health = app_module._CaptureHealth(12.5, CaptureStats())
+    # frames that arrived during the stall belong to the window that was
+    # thrown away, not to the one starting now
+    health.restart(CaptureStats(buffers=500, samples=640000))
+    with caplog.at_level(logging.WARNING):
+        _closed_window(health, CaptureStats(buffers=500, samples=640000))
+    assert "0 buffers / 0 samples" in caplog.messages[0]
 
 
 # --- engine wiring ---------------------------------------------------------
