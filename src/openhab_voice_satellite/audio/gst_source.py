@@ -99,6 +99,7 @@ class PipewireSource:
         frame_samples: int = 1280,
         device: str | None = None,
         queue_size: int = 50,
+        autostart: bool = True,
     ) -> None:
         Gst = gst_init()
         self._Gst = Gst
@@ -111,15 +112,36 @@ class PipewireSource:
         self._caps_logged = False
         self._counters = _Counters(sample_rate)
         self._last_drop_warn = float("-inf")
+        self._sample_rate = sample_rate
+        self._frame_samples = frame_samples
+        self._started = False
         self._pipeline = Gst.parse_launch(self._describe(target, sample_rate))
         self._pipeline.get_by_name("sink").connect("new-sample", self._on_sample)
         install_sync_handler(Gst, self._pipeline.get_bus(), self._on_error, self._on_eos)
+        if autostart:
+            self.start()
+
+    def start(self) -> None:
+        """Begin capturing. Idempotent.
+
+        Separate from construction so a caller with slow startup work left can
+        keep the stream out of the graph until it is ready to consume. A live
+        capture stream whose client stops servicing it accumulates xruns —
+        measured on a Pi 5, ~110 of them across a 3.5 s model load — and
+        PipeWire does not always restore normal scheduling afterwards: the
+        stream then delivers a burst of buffers a second and the wakeword goes
+        deaf for the life of the process.
+        """
+        if self._started:
+            return
+        Gst = self._Gst
         if self._pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
             self._pipeline.set_state(Gst.State.NULL)
             raise RuntimeError("capture pipeline failed to start (is PipeWire running?)")
-        self._loop.call_later(FIRST_FRAME_TIMEOUT_S, self._warn_if_stalled, target)
+        self._started = True
+        self._loop.call_later(FIRST_FRAME_TIMEOUT_S, self._warn_if_stalled, self.target)
         log.info("audio input open: node=%s rate=%d frame=%d",
-                 target or "default", sample_rate, frame_samples)
+                 self.target or "default", self._sample_rate, self._frame_samples)
 
     @staticmethod
     def _describe(target: str | None, sample_rate: int) -> str:

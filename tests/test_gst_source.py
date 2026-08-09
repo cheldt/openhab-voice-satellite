@@ -50,6 +50,23 @@ async def test_close_ends_frame_iteration(monkeypatch):
     await asyncio.wait_for(drain(), timeout=5.0)
 
 
+async def test_capture_can_be_held_out_of_the_graph_until_start(monkeypatch):
+    """A stream nobody services xruns its way out of PipeWire's scheduling."""
+    monkeypatch.setattr(PipewireSource, "_describe", staticmethod(_testsrc_describe))
+    source = PipewireSource(
+        sample_rate=RATE, frame_samples=1280, device=None, autostart=False
+    )
+    try:
+        await asyncio.sleep(0.3)
+        assert source.stats().buffers == 0  # nothing captured before start()
+        source.start()
+        source.start()  # idempotent: a second call must not restart anything
+        frame = await asyncio.wait_for(anext(source.frames()), timeout=5.0)
+        assert len(frame) == 1280
+    finally:
+        source.close()
+
+
 async def test_stats_count_what_the_graph_delivered(monkeypatch):
     monkeypatch.setattr(PipewireSource, "_describe", staticmethod(_testsrc_describe))
     source = PipewireSource(sample_rate=RATE, frame_samples=1280, device=None)

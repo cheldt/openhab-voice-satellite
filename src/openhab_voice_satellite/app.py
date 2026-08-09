@@ -236,7 +236,12 @@ class App:
         transcriber = Transcriber(config.stt, config.tts.default_language)
 
         async with AsyncExitStack() as stack:
-            source, sink = await stack.enter_async_context(audio_io(config.audio))
+            # capture starts once everything else is loaded: piper alone blocks
+            # this loop for ~3.5s, and a live mic stream that nobody services
+            # xruns its way out of PipeWire's scheduling for good
+            source, sink = await stack.enter_async_context(
+                audio_io(config.audio, start_capture=False)
+            )
             earcons = Earcons(config.earcons, sink)
             speaker = _build_speaker(config, sink)
 
@@ -263,6 +268,7 @@ class App:
                 set_state=self._set_state,
             )
 
+            source.start()  # nothing blocking left; the monitor is next
             log.info(
                 "ready — say the wakeword (%s via %s)",
                 config.wakeword.model,
