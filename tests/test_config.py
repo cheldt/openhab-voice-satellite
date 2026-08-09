@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from openhab_voice_satellite.config import Config, load_config
@@ -187,6 +189,34 @@ def test_violawake_adaptive_band_must_be_ordered():
                 }
             }
         )
+
+
+def test_speaking_threshold_below_the_idle_one_warns(caplog):
+    # raising `threshold` and leaving `threshold_speaking` at its default
+    # inverts the echo margin: the bar drops while our own output is audible
+    with caplog.at_level(logging.WARNING):
+        config = Config.model_validate(
+            {"wakeword": {"threshold": 0.9, "threshold_speaking": 0.7}}
+        )
+    assert "threshold_speaking (0.70) is below wakeword.threshold (0.90)" in caplog.text
+    # a warning, not a rejection — a lower bar is a legitimate barge-in choice
+    assert config.wakeword.threshold_speaking == 0.7
+
+
+def test_stop_threshold_speaking_below_the_idle_one_warns(caplog):
+    with caplog.at_level(logging.WARNING):
+        Config.model_validate(
+            {"wakeword": {"stop_threshold": 0.6, "stop_threshold_speaking": 0.3}}
+        )
+    assert "stop_threshold_speaking (0.30)" in caplog.text
+
+
+def test_raised_speaking_thresholds_are_silent(caplog):
+    # the shipped defaults (0.5 / 0.7) and the stop_threshold_speaking=None
+    # fallback both keep the speaking bar at or above the idle one
+    with caplog.at_level(logging.WARNING):
+        Config.model_validate({"wakeword": {"stop_threshold": 0.5}})
+    assert "is below wakeword." not in caplog.text
 
 
 def test_wakeword_model_paths_resolve_relative_to_the_config_file(tmp_path):

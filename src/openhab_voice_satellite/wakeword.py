@@ -38,14 +38,63 @@ class WakewordProtocol(Protocol):
     def reset(self) -> None: ...
 
 
+class EdgeTrigger:
+    """One model's score history and armed state.
+
+    Edge-triggered: once the score crosses `threshold` the trigger disarms and
+    only re-arms once the score falls below half of it, so one spoken wakeword
+    yields one event even though scores stay high for several frames. A
+    `patience` above 1 additionally requires the crossing to hold for that many
+    consecutive frames, which rejects single-frame transients.
+
+    Observing a score and deciding on it are separate calls because a detector
+    with a stop model advances *every* model's history per frame but stops
+    checking once one of them fires — a gap in the history would corrupt the
+    patience window. `feed` is the shorthand for the single-model case.
+
+    This lives apart from the detectors so the offline evaluator can replay
+    recorded scores through the rule the app actually runs, rather than a copy
+    of it that drifts.
+    """
+
+    def __init__(self) -> None:
+        self.scores: deque[float] = deque(maxlen=RECENT_SCORES)
+        self.armed = True
+
+    def observe(self, score: float) -> None:
+        """Advance the history by one frame without deciding anything."""
+        self.scores.append(float(score))
+
+    def fired(self, threshold: float, patience: int) -> bool:
+        """Whether the newest observed score completes a detection."""
+        if self.armed:
+            window = list(self.scores)[-patience:]
+            if len(window) == patience and all(s >= threshold for s in window):
+                self.armed = False
+                return True
+            return False
+        if self.scores and self.scores[-1] < threshold / 2:
+            self.armed = True
+        return False
+
+    def feed(self, score: float, threshold: float, patience: int) -> bool:
+        """observe + fired, for callers tracking a single model."""
+        self.observe(score)
+        return self.fired(threshold, patience)
+
+    @property
+    def last(self) -> float:
+        return float(self.scores[-1]) if self.scores else 0.0
+
+    def reset(self) -> None:
+        self.scores.clear()
+        self.armed = True
+
+
 class BaseWakewordDetector:
     """Turns per-frame model scores into at most one event per spoken phrase.
 
-    Detection is edge-triggered: once a model crosses its threshold it must
-    fall below half the threshold before it can fire again, so one spoken
-    wakeword yields one event even though scores stay high for several frames.
-    With `patience` above 1 the crossing must also hold for that many
-    consecutive frames, which rejects single-frame transients.
+    The decision itself lives in `EdgeTrigger`, one per configured model.
 
     Subclasses implement `_scores` and `_engine_reset`; `tail` is optional.
     """
@@ -53,10 +102,7 @@ class BaseWakewordDetector:
     def __init__(self, config: WakewordConfig) -> None:
         self._config = config
         keys = [WAKE] + ([STOP] if config.stop_model else [])
-        self._armed: dict[str, bool] = {key: True for key in keys}
-        self._recent: dict[str, deque] = {
-            key: deque(maxlen=RECENT_SCORES) for key in keys
-        }
+        self._triggers: dict[str, EdgeTrigger] = {key: EdgeTrigger() for key in keys}
 
     # -- engine hooks ---------------------------------------------------
 
@@ -99,17 +145,7 @@ class BaseWakewordDetector:
         return config.threshold_speaking if speaking else config.threshold
 
     def _check(self, key: str, threshold: float, patience: int) -> bool:
-        recent = self._recent[key]
-        score = recent[-1]
-        if self._armed[key]:
-            window = list(recent)[-patience:]
-            if len(window) == patience and all(s >= threshold for s in window):
-                self._armed[key] = False
-                return True
-            return False
-        if score < threshold / 2:
-            self._armed[key] = True
-        return False
+        return self._triggers[key].fired(threshold, patience)
 
     def process(self, frame: np.ndarray, speaking: bool = False) -> str | None:
         """Return 'wake' or 'stop' on detection, else None."""
@@ -118,11 +154,11 @@ class BaseWakewordDetector:
             return None
         # every model's history advances on every frame, even when an earlier
         # model already fired — a gap would corrupt the patience window
-        for key, history in self._recent.items():
-            history.append(float(scores[key]))
+        for key, trigger in self._triggers.items():
+            trigger.observe(scores[key])
 
         config = self._config
-        if STOP in self._recent:
+        if STOP in self._triggers:
             if self._check(STOP, self._threshold(STOP, speaking), config.stop_patience):
                 return STOP
         if self._check(WAKE, self._threshold(WAKE, speaking), config.patience):
@@ -130,14 +166,13 @@ class BaseWakewordDetector:
         return None
 
     def score(self, key: str = WAKE) -> float:
-        history = self._recent.get(key) or self._recent[WAKE]
-        return float(history[-1]) if history else 0.0
+        trigger = self._triggers.get(key) or self._triggers[WAKE]
+        return trigger.last
 
     def reset(self) -> None:
         self._engine_reset()
-        for key in self._armed:
-            self._armed[key] = True
-            self._recent[key].clear()
+        for trigger in self._triggers.values():
+            trigger.reset()
 
 
 def build_detector(config: Config) -> WakewordProtocol:

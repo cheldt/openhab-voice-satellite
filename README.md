@@ -78,12 +78,41 @@ what the app heard. Speech at the intended distance should read roughly
 1000–5000 RMS — openWakeWord does no input normalization, so a quiet mic
 degrades recall in a way no threshold can compensate for.
 
+To judge a wakeword *model* rather than the audio path, `--score-wav` replays
+recorded 16 kHz mono WAVs through the configured engine and prints, per file,
+the score distribution and how many detections the app's own decision rule
+would have emitted:
+
+```bash
+# what does this model do on audio that must never fire?
+.venv/bin/openhab-voice-satellite --score-wav recordings/negatives/
+
+# same frames through a second model, so two engines are compared fairly
+.venv/bin/openhab-voice-satellite --score-wav recordings/negatives/ \
+    --compare openwakeword:models/wakeword/my_wake.onnx
+
+# the promotion gate: recall against false accepts per hour
+.venv/bin/openhab-voice-satellite --positives recordings/wake/ \
+    --negatives recordings/room/
+```
+
+The gate reports the best threshold/patience pair, or says
+`NO CLEAN OPERATING POINT` when no setting reaches recall without false
+accepts — which is what a model needs retraining, not retuning, looks like. A
+threshold high enough to reject everything is never counted as clean. Record
+positives in the voice and room that will actually use them: a model trained
+on your voice scores near zero on synthesized speech, so a TTS corpus is only
+valid as the negative half.
+
 Tests: `.venv/bin/pytest` (fast; the GStreamer tests skip without PyGObject).
+`OVS_TEST_VIOLA_MODEL=path/to/wake.onnx` additionally runs the violawake
+integration test against a real model instead of the stub.
 Three env vars dump audio for debugging, each taking a directory:
 `OVS_DUMP_UTTERANCES` (the recorded utterance, after the wakeword) and
 `OVS_DUMP_WAKE` (the audio *around* a detection, which is the only way to
 collect real false accepts). Add `OVS_DUMP_WAKE_SCORE=0.3` to also capture
-near misses — frames that almost fired.
+near misses — frames that almost fired. Those dumps are the hard negatives a
+retrain needs.
 
 Pi installation + systemd service: see [deploy/install.md](deploy/install.md).
 

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Annotated, ClassVar, Literal
 
 import yaml
 from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
+
+log = logging.getLogger(__name__)
 
 # Capture rate is not configurable: Silero VAD, openWakeWord and whisper are
 # all hardwired to 16 kHz.
@@ -125,6 +128,36 @@ class WakewordConfig(BaseModel):
         if self.stop_threshold_speaking is None:
             return self.stop_threshold
         return self.stop_threshold_speaking
+
+    @model_validator(mode="after")
+    def _speaking_thresholds_are_raised(self) -> WakewordConfig:
+        """Warn when the speaking threshold sits below the idle one.
+
+        The speaking variants exist to raise the bar while our own output is
+        audible; setting one lower makes the detector easiest to trigger
+        exactly when the room contains our TTS. Legal — a lower bar is how you
+        would deliberately favour barge-in — so this warns rather than raises,
+        but it is almost always a leftover from tuning the idle threshold up.
+        """
+        for name, idle, speaking in (
+            ("threshold", self.threshold, self.threshold_speaking),
+            (
+                "stop_threshold",
+                self.stop_threshold,
+                self.effective_stop_threshold_speaking,
+            ),
+        ):
+            if speaking < idle:
+                log.warning(
+                    "wakeword.%s_speaking (%.2f) is below wakeword.%s (%.2f): "
+                    "the bar drops while our own output is audible, so echo is "
+                    "more likely to trigger a detection than room speech is",
+                    name,
+                    speaking,
+                    name,
+                    idle,
+                )
+        return self
 
 
 class VadConfig(BaseModel):
