@@ -33,6 +33,26 @@ def test_one_engine_per_configured_model(detector_factory):
     reset_stub_state()
 
 
+def test_engines_are_built_inside_the_single_threaded_block(monkeypatch):
+    """Wherever violawake builds its sessions, they must be bound."""
+    from contextlib import contextmanager
+
+    from openhab_voice_satellite import wakeword_viola
+
+    reset_stub_state()
+    seen = []
+
+    @contextmanager
+    def recording():
+        seen.append(len(StubWakeDetector.instances))
+        yield
+        seen.append(len(StubWakeDetector.instances))
+
+    monkeypatch.setattr(wakeword_viola, "single_threaded_sessions", recording)
+    make_detector("violawake", monkeypatch, {"wake": [0.0]}, model="wake")
+    assert seen == [0, 1]  # constructed inside the block, not before or after
+
+
 def test_stop_model_adds_a_second_engine(detector_factory):
     detector_factory({"wake": [0.0], "stop": [0.0]}, model="wake", stop_model="stop")
     # each carries its own backbone; this is the doubled per-frame cost

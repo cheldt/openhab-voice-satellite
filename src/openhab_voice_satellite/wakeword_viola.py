@@ -20,7 +20,7 @@ import logging
 import numpy as np
 
 from .config import SAMPLE_RATE, WakewordConfig
-from .violawake_ort import patch_onnx_threads
+from .violawake_ort import patch_onnx_threads, single_threaded_sessions
 from .wakeword import STOP, WAKE, BaseWakewordDetector
 from .wakeword_buffer import Int16Ring
 
@@ -44,18 +44,22 @@ class ViolaWakeDetector(BaseWakewordDetector):
         models = {WAKE: config.model}
         if config.stop_model:
             models[STOP] = config.stop_model
-        self._engines = {
-            key: WakeDetector(
-                model=model,
-                # the policy these feed is never consulted; process() bypasses
-                # it. Passed so a stray detect() call would not misbehave.
-                threshold=config.threshold,
-                cooldown_s=0.0,
-                backend="onnx",
-                confirm_count=1,
-            )
-            for key, model in models.items()
-        }
+        # every session this builds is forced single-threaded, wherever
+        # violawake happens to construct it, and the block reports what it bound
+        with single_threaded_sessions():
+            self._engines = {
+                key: WakeDetector(
+                    model=model,
+                    # the policy these feed is never consulted; process()
+                    # bypasses it. Passed so a stray detect() call would not
+                    # misbehave.
+                    threshold=config.threshold,
+                    cooldown_s=0.0,
+                    backend="onnx",
+                    confirm_count=1,
+                )
+                for key, model in models.items()
+            }
         self._ring = Int16Ring(SAMPLE_RATE * TAIL_SECONDS)
         self._profiler = self._build_profiler(config, frame_ms)
         self._power = self._build_power_manager(config)

@@ -89,9 +89,23 @@ The app forces violawake's ONNX sessions to a single non-spinning thread
 with no `SessionOptions` at all and ORT would otherwise size its intra-op pool
 to the core count — the same idle multi-core burn the `ncpu=1` pin above
 avoids on the openWakeWord path. Measured on an 8-core x86 box, loading one
-detector: **+9 OS threads stock, +0 patched**. If a future violawake release
-moves that seam, the patch logs a warning at startup and keeps going: watch
-for `violawake ONNX thread patch skipped` and check idle CPU if you see it.
+detector: **+9 OS threads stock, +0 patched**.
+
+Two layers do it, because a seam that still exists is not a seam that is still
+used: the patch replaces `OnnxBackend.load`, and detector construction
+additionally runs inside a block that forces session options onto every ORT
+session built anywhere, then reports what happened:
+
+```
+violawake bound 3 ONNX sessions, no extra OS threads
+```
+
+That line is the one to check. `violawake ONNX thread patch skipped` means the
+seam moved; a `gained N OS threads` warning means ORT sized a pool anyway. Both
+keep the app running, and both mean idle CPU is about to be bad. `--probe-mic`
+prints the per-frame cost directly (`ms/frame` and `cpu_ms` columns) — on an
+8-core x86 box one violawake detector costs ~1.0 ms per 80 ms frame; `cpu_ms`
+far above `ms/frame` is a spinning thread pool.
 
 Model provisioning: `scripts/download_models.py` reads `wakeword.engine` from
 your config and fetches registry models automatically; custom `.onnx` files it

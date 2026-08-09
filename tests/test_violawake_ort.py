@@ -7,7 +7,12 @@ import types
 
 import pytest
 
-from openhab_voice_satellite.violawake_ort import patch_onnx_threads
+from openhab_voice_satellite import violawake_ort
+from openhab_voice_satellite.violawake_ort import (
+    patch_onnx_threads,
+    sessions_bound,
+    single_threaded_sessions,
+)
 
 
 class RecordingSession:
@@ -103,13 +108,111 @@ def test_load_failure_becomes_the_sdk_error(backend, monkeypatch):
 
     module, model = backend
     patch_onnx_threads()
-
-    def boom(*args, **kwargs):
-        raise RuntimeError("bad graph")
-
-    monkeypatch.setattr(ort, "InferenceSession", boom)
+    monkeypatch.setattr(ort, "InferenceSession", _boom)
     with pytest.raises(module.ModelLoadError, match="bad graph"):
         module.OnnxBackend().load(model)
+
+
+def test_a_bound_session_is_counted(backend):
+    """"Patch installed" and "patch used" have to be separate facts."""
+    module, model = backend
+    patch_onnx_threads()
+    before = sessions_bound()
+    module.OnnxBackend().load(model)
+    assert sessions_bound() == before + 1
+
+
+def test_a_failed_load_is_not_counted(backend, monkeypatch):
+    import onnxruntime as ort
+
+    module, model = backend
+    patch_onnx_threads()
+    monkeypatch.setattr(ort, "InferenceSession", _boom)
+    before = sessions_bound()
+    with pytest.raises(module.ModelLoadError):
+        module.OnnxBackend().load(model)
+    assert sessions_bound() == before
+
+
+def test_the_block_binds_sessions_built_off_the_seam(backend):
+    """A release that stops using OnnxBackend.load must still be covered."""
+    import onnxruntime as ort
+
+    module, model = backend
+    before = sessions_bound()
+    with single_threaded_sessions():
+        ort.InferenceSession(str(model))  # as stock violawake builds them
+
+    options = RecordingSession.calls[0]["options"]
+    assert options is not None
+    assert options.intra_op_num_threads == 1
+    assert options.inter_op_num_threads == 1
+    assert sessions_bound() == before + 1
+
+
+def test_the_block_leaves_explicit_options_alone(backend):
+    import onnxruntime as ort
+
+    module, model = backend
+    sentinel = object()
+    before = sessions_bound()
+    with single_threaded_sessions():
+        ort.InferenceSession(str(model), sess_options=sentinel)
+    assert RecordingSession.calls[0]["options"] is sentinel
+    assert sessions_bound() == before  # ours to count, not everyone's
+
+
+def test_the_block_is_scoped_to_itself(backend):
+    """faster-whisper and piper build ORT sessions too; leave them alone."""
+    import onnxruntime as ort
+
+    module, model = backend
+    with single_threaded_sessions():
+        pass
+    assert ort.InferenceSession is RecordingSession
+    ort.InferenceSession(str(model))
+    assert RecordingSession.calls[0]["options"] is None
+
+
+def test_the_block_restores_the_session_class_after_a_failure(backend):
+    import onnxruntime as ort
+
+    with pytest.raises(RuntimeError, match="model load blew up"):
+        with single_threaded_sessions():
+            raise RuntimeError("model load blew up")
+    assert ort.InferenceSession is RecordingSession
+
+
+def test_leaked_threads_are_reported(backend, monkeypatch, caplog):
+    """The failure this module exists to prevent must not be silent."""
+    counts = iter([12, 21])
+    monkeypatch.setattr(violawake_ort, "_thread_count", lambda: next(counts))
+    with caplog.at_level("WARNING"), single_threaded_sessions():
+        pass
+    assert "gained 9 OS threads" in caplog.text
+    assert "burn cores" in caplog.text
+
+
+def test_a_clean_block_reports_no_extra_threads(backend, monkeypatch, caplog):
+    counts = iter([12, 12])
+    monkeypatch.setattr(violawake_ort, "_thread_count", lambda: next(counts))
+    with caplog.at_level("INFO"), single_threaded_sessions():
+        pass
+    assert "no extra OS threads" in caplog.text
+
+
+def test_an_untested_version_warns(backend, monkeypatch, caplog):
+    import importlib.metadata
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "0.3.0")
+    with caplog.at_level("WARNING"):
+        assert patch_onnx_threads() is True  # a warning, never a refusal
+    assert "0.3.0" in caplog.text
+    assert violawake_ort.TESTED_VERSION in caplog.text
+
+
+def _boom(*args, **kwargs):
+    raise RuntimeError("bad graph")
 
 
 def test_fails_open_when_the_seam_moved(monkeypatch, caplog):
