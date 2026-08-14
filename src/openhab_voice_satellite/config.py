@@ -91,9 +91,33 @@ class ViolaPowerConfig(BaseModel):
     active_window_s: float = Field(3.0, gt=0.0)
 
 
+class ViolaVerifierConfig(BaseModel):
+    """Stage-2 verifier: a mel-PCEN CNN re-scoring each wake trigger.
+
+    The stage-1 temporal_cnn trades false accepts against recall on a hard
+    frontier (its OWW embeddings cannot separate confusables). Running it at
+    a low threshold and letting a larger CNN re-score the captured 1.5 s
+    window breaks that trade: measured 0.73 FA/hour at 2 % FRR versus
+    0.73 FA/hour at 28 % FRR for stage 1 alone. Training and calibration:
+    violawakeword/TRAINING.md.
+
+    `model` and `mel_basis` come as a pair — the .onnx scores (40, 151)
+    mel-PCEN features, and the .npy is the mel filterbank the librosa-free
+    frontend (verifier_mel.py) needs to produce them. The delay exists
+    because stage 1 crosses its threshold before the phrase is finished;
+    verifying immediately would score a truncated phrase.
+    """
+
+    model: str | None = None
+    mel_basis: str | None = None
+    threshold: float = Field(0.1, ge=0.0, le=1.0)
+    delay_ms: int = Field(300, ge=0, le=1000)
+
+
 class ViolaConfig(BaseModel):
     adaptive: ViolaAdaptiveConfig = Field(default_factory=ViolaAdaptiveConfig)
     power: ViolaPowerConfig = Field(default_factory=ViolaPowerConfig)
+    verifier: ViolaVerifierConfig = Field(default_factory=ViolaVerifierConfig)
 
 
 class WakewordConfig(BaseModel):
@@ -327,6 +351,13 @@ class Config(BaseModel):
                 "wakeword.verifier_model is an openwakeword feature and has no "
                 "effect with engine 'violawake' — remove it or switch engines"
             )
+        verifier = self.wakeword.viola.verifier
+        if bool(verifier.model) != bool(verifier.mel_basis):
+            raise ValueError(
+                "wakeword.viola.verifier needs `model` and `mel_basis` as a "
+                "pair — the .onnx scores features only the .npy filterbank "
+                "can produce; set both or neither"
+            )
         if self.wakeword.model == WakewordConfig.model_fields["model"].default:
             # the default is an openwakeword phrase name; violawake ships no
             # pretrained phrases, so leaving it alone is always a mistake
@@ -355,6 +386,11 @@ def _resolve_config_paths(config: Config, base: Path) -> Config:
         value = getattr(wakeword, field)
         if value and value.endswith((".onnx", ".tflite", ".pkl")):
             setattr(wakeword, field, _resolve_path(value, base))
+    verifier = wakeword.viola.verifier
+    for field in ("model", "mel_basis"):
+        value = getattr(verifier, field)
+        if value:
+            setattr(verifier, field, _resolve_path(value, base))
     earcons = config.earcons
     earcons.wake, earcons.ack, earcons.error, earcons.idle = (
         _resolve_path(p, base)

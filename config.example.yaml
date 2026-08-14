@@ -39,6 +39,15 @@ wakeword:
   #     silence_rms: 10.0
   #     activity_threshold: 0.3
   #     active_window_s: 3.0
+  #   verifier:               # stage-2 CNN re-scoring the 1.5 s behind each trigger;
+  #                           # lets wakeword.threshold sit low (recall) while the
+  #                           # verifier keeps false accepts out. Needs the model
+  #                           # AND its mel filterbank as a pair — see
+  #                           # violawakeword/TRAINING.md for training both.
+  #     model: null           # path to a verifier .onnx (input: 40x151 mel-PCEN)
+  #     mel_basis: null       # path to the matching verifier_melfb_40.npy
+  #     threshold: 0.1        # verifier score needed to release a wake
+  #     delay_ms: 300         # audio gathered past the trigger before scoring
 
 vad:
   threshold: 0.5
