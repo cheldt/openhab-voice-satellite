@@ -151,7 +151,7 @@ def test_a_double_sigmoid_head_is_rejected(runner_factory, monkeypatch):
     runner = runner_factory(logits=[0.1, 2.0, 0.9])
     monkeypatch.setattr(wakeword_wakeforge, "WakeforgeRunner", lambda *a, **k: runner)
     with pytest.raises(ValueError, match="never scores below 0.5"):
-        WakeforgeDetector(WakewordConfig(engine="wakeforge", model="d"))
+        WakeforgeDetector(WakewordConfig(engine="wakeforge", model="d"), 80)
 
 
 def test_a_model_that_merely_scores_noise_high_is_not_rejected(runner_factory, monkeypatch):
@@ -159,7 +159,7 @@ def test_a_model_that_merely_scores_noise_high_is_not_rejected(runner_factory, m
     # Refusing to load here would reject a healthy model on synthetic noise.
     runner = runner_factory(logits=[3.0, -4.0, 3.0])
     monkeypatch.setattr(wakeword_wakeforge, "WakeforgeRunner", lambda *a, **k: runner)
-    WakeforgeDetector(WakewordConfig(engine="wakeforge", model="d", threshold=0.5))
+    WakeforgeDetector(WakewordConfig(engine="wakeforge", model="d", threshold=0.5), 80)
 
 
 def test_a_featurizer_that_produces_nothing_is_rejected(monkeypatch):
@@ -169,7 +169,7 @@ def test_a_featurizer_that_produces_nothing_is_rejected(monkeypatch):
 
     monkeypatch.setattr(wakeword_wakeforge, "WakeforgeRunner", lambda *a, **k: Deaf())
     with pytest.raises(ValueError, match="produced no frames"):
-        WakeforgeDetector(WakewordConfig(engine="wakeforge", model="d"))
+        WakeforgeDetector(WakewordConfig(engine="wakeforge", model="d"), 80)
 
 
 # -- the detector -------------------------------------------------------

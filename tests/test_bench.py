@@ -66,8 +66,8 @@ def _viola_config(monkeypatch, scripts, **kwargs):
     return make_config("violawake", model="wake", **kwargs)
 
 
-VERIFIER = {"verifier": {"model": "v.onnx", "mel_basis": "m.npy",
-                         "threshold": 0.5, "delay_ms": 300}}
+STAGE2 = {"model": "v.onnx", "mel_basis": "m.npy",
+          "threshold": 0.5, "delay_ms": 300}
 
 
 def _two_stage_config(monkeypatch, scripts, verdict, **kwargs):
@@ -77,16 +77,16 @@ def _two_stage_config(monkeypatch, scripts, verdict, **kwargs):
     scoring quality belongs to the violawakeword repo, and what matters here is
     only that a swallowed WAKE never reaches the `live` count.
     """
-    from openhab_voice_satellite import wakeword_viola
+    from openhab_voice_satellite import wakeword
 
     monkeypatch.setattr(
-        wakeword_viola.ViolaWakeDetector, "_build_verifier",
+        wakeword.BaseWakewordDetector, "_build_verifier",
         staticmethod(lambda config: ("session", "frontend")),
     )
     monkeypatch.setattr(
-        wakeword_viola.ViolaWakeDetector, "_verify", lambda self: verdict
+        wakeword.BaseWakewordDetector, "_verify", lambda self: verdict
     )
-    return _viola_config(monkeypatch, scripts, viola=VERIFIER, **kwargs)
+    return _viola_config(monkeypatch, scripts, stage2=STAGE2, **kwargs)
 
 
 # -- the decision replay ------------------------------------------------
@@ -178,19 +178,18 @@ def test_override_revalidates_instead_of_copying(tmp_path, monkeypatch):
                    model="wake.onnx")
 
 
-def test_switching_engine_drops_the_previous_engine_s_block(monkeypatch):
-    # the headline A/B is a two-stage violawake config against a single-stage
-    # engine. Carrying viola.verifier onto that engine is both meaningless and
-    # a hard config error, so --compare would fail on the one config it exists
-    # to compare against.
+def test_switching_engine_keeps_the_second_stage_but_drops_engine_settings(monkeypatch):
+    # the second stage is engine-neutral and has to survive the swap: comparing
+    # two two-stage systems is the whole point. viola.adaptive belongs to the
+    # engine that read it and must not, or the receiving engine rejects it.
     config = make_config(
         "violawake", model="w.onnx",
-        viola={"verifier": {"model": "v.onnx", "mel_basis": "m.npy"}},
+        stage2={"model": "v.onnx", "mel_basis": "m.npy"},
+        viola={"adaptive": {"enabled": True}},
     )
     swapped = _override(config, "wakeforge", "some_dir")
-    assert swapped.wakeword.viola.verifier.model is None
-    # a model-only override is not an engine change and must keep it
-    assert _override(config, None, "other.onnx").wakeword.viola.verifier.model
+    assert swapped.wakeword.stage2.model == "v.onnx"
+    assert not swapped.wakeword.viola.adaptive.enabled
 
 
 def test_compare_needs_engine_and_model(tmp_path, monkeypatch):
@@ -359,12 +358,12 @@ def test_a_gated_run_says_how_much_it_skipped(tmp_path, monkeypatch, capsys):
     assert "vad gate:" in out and "suppressed)" in out
 
 
-def test_compare_refuses_a_verdict_across_a_verifier_asymmetry(
+def test_compare_refuses_a_sweep_verdict_when_a_second_stage_is_configured(
     tmp_path, monkeypatch, capsys
 ):
-    # the whole point of --compare: a two-stage violawake config against a
-    # single-stage engine. Both columns are stage-1 sweeps, but only one of
-    # them is the whole detector.
+    # the second stage is engine-neutral, so --compare carries it onto both
+    # columns. Every best: line is then stage 1 alone, and ranking two stage 1s
+    # is not the question --compare was asked.
     config = _two_stage_config(monkeypatch, {"wake": [0.5] * 40}, verdict=1.0)
     install_openwakeword(monkeypatch)
     StubModel.scripts = {"other": [0.5] * 40}
@@ -372,5 +371,5 @@ def test_compare_refuses_a_verdict_across_a_verifier_asymmetry(
         config, [_wav(tmp_path / "a.wav")], compare="openwakeword:other.onnx"
     ) == 0
     out = capsys.readouterr().out
-    assert "NOT COMPARABLE" in out
-    assert "stage-2 verifier the sweep cannot model" in out
+    assert "NOT COMPARABLE from the sweep" in out
+    assert "Compare the live lines" in out

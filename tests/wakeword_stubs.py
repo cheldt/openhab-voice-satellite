@@ -171,14 +171,14 @@ def make_detector(engine: str, monkeypatch, scripts: dict[str, list[float]],
         StubModel.scripts = scripts
         from openhab_voice_satellite.wakeword_oww import OpenWakewordDetector
 
-        return OpenWakewordDetector(config)
+        return OpenWakewordDetector(config, frame_ms)
 
     if engine == "wakeforge":
         install_wakeforge(monkeypatch)
         StubWakeforgeRunner.scripts = scripts
         from openhab_voice_satellite.wakeword_wakeforge import WakeforgeDetector
 
-        return WakeforgeDetector(config)
+        return WakeforgeDetector(config, frame_ms)
 
     install_violawake(monkeypatch)
     StubWakeDetector.scripts = scripts

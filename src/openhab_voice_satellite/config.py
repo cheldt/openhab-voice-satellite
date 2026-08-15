@@ -76,21 +76,25 @@ class ViolaAdaptiveConfig(BaseModel):
         return self
 
 
-class ViolaVerifierConfig(BaseModel):
+class Stage2Config(BaseModel):
     """Stage-2 verifier: a mel-PCEN CNN re-scoring each wake trigger.
 
-    The stage-1 temporal_cnn trades false accepts against recall on a hard
-    frontier (its OWW embeddings cannot separate confusables). Running it at
-    a low threshold and letting a larger CNN re-score the captured 1.5 s
-    window breaks that trade: measured 0.73 FA/hour at 2 % FRR versus
-    0.73 FA/hour at 28 % FRR for stage 1 alone. Training and calibration:
-    violawakeword/TRAINING.md.
+    Engine-neutral on purpose. A single stage trades false accepts against
+    recall on a hard frontier, and that is a property of running one model over
+    a stream rather than of any one architecture: violawake's temporal_cnn
+    needs threshold 0.90 for <1 FA/hour and loses 28 % of positives there, and
+    a wakeforge model trained on the same corpus fires 128 times an hour at the
+    threshold where it keeps every positive. Letting a larger CNN re-score the
+    captured 1.5 s window breaks the trade for both — measured on 5.48 h of
+    LibriSpeech test-clean, it rejects 99 % of either engine's triggers.
 
     `model` and `mel_basis` come as a pair — the .onnx scores (40, 151)
     mel-PCEN features, and the .npy is the mel filterbank the librosa-free
     frontend (verifier_mel.py) needs to produce them. The delay exists
     because stage 1 crosses its threshold before the phrase is finished;
     verifying immediately would score a truncated phrase.
+
+    Training and calibration: violawakeword/TRAINING.md.
     """
 
     model: str | None = None
@@ -98,15 +102,38 @@ class ViolaVerifierConfig(BaseModel):
     threshold: float = Field(0.1, ge=0.0, le=1.0)
     delay_ms: int = Field(300, ge=0, le=1000)
 
+    @model_validator(mode="after")
+    def _pair(self) -> Stage2Config:
+        if bool(self.model) != bool(self.mel_basis):
+            raise ValueError(
+                "wakeword.stage2 needs `model` and `mel_basis` as a pair — the "
+                ".onnx scores features only the .npy filterbank can produce; "
+                "set both or neither"
+            )
+        return self
+
 
 class ViolaConfig(BaseModel):
-    # `power` used to live here (violawake's PowerManager). It duty-cycled
-    # frames on an RMS floor, which splices the backbone exactly as described
-    # at ENGINE_CONTEXT_MS below; wakeword.vad_gate replaces it and replays the
-    # context. A stale `power:` block is ignored, as pydantic ignores any
-    # unknown key — same as the removed kokoro block.
+    # Two blocks used to live here. `power` was violawake's PowerManager, which
+    # duty-cycled frames on an RMS floor and spliced the backbone exactly as
+    # described at ENGINE_CONTEXT_MS below; wakeword.vad_gate replaces it and
+    # replays the context. `verifier` moved to wakeword.stage2, which is
+    # engine-neutral — it works behind wakeforge just as well. A stale `power:`
+    # is ignored like any unknown key, but a stale `verifier:` is rejected
+    # below: silently dropping it would take this deployment from 0.7 false
+    # accepts an hour to 67, with nothing in the logs to say why.
     adaptive: ViolaAdaptiveConfig = Field(default_factory=ViolaAdaptiveConfig)
-    verifier: ViolaVerifierConfig = Field(default_factory=ViolaVerifierConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _verifier_moved(cls, data):
+        if isinstance(data, dict) and data.get("verifier"):
+            raise ValueError(
+                "wakeword.viola.verifier has moved to wakeword.stage2 — it is "
+                "engine-neutral now. Move the block up one level; the fields "
+                "are unchanged."
+            )
+        return data
 
 
 # How much continuous audio each engine needs before its scores mean anything.
@@ -191,6 +218,8 @@ class WakewordConfig(BaseModel):
     verifier_model: str | None = None
     stop_verifier_model: str | None = None
     verifier_threshold: float = Field(0.1, ge=0.0, le=1.0)
+    # engine-neutral second stage; unset = single stage
+    stage2: Stage2Config = Field(default_factory=Stage2Config)
     # engine == "violawake" only; ignored otherwise
     viola: ViolaConfig = Field(default_factory=ViolaConfig)
     # engine == "wakeforge" only; ignored otherwise
@@ -408,13 +437,6 @@ class Config(BaseModel):
                 "wakeword.verifier_model is an openwakeword feature and has no "
                 "effect with engine 'violawake' — remove it or switch engines"
             )
-        verifier = self.wakeword.viola.verifier
-        if bool(verifier.model) != bool(verifier.mel_basis):
-            raise ValueError(
-                "wakeword.viola.verifier needs `model` and `mel_basis` as a "
-                "pair — the .onnx scores features only the .npy filterbank "
-                "can produce; set both or neither"
-            )
         if self.wakeword.model == WakewordConfig.model_fields["model"].default:
             # the default is an openwakeword phrase name; violawake ships no
             # pretrained phrases, so leaving it alone is always a mistake
@@ -506,11 +528,10 @@ def _resolve_config_paths(config: Config, base: Path) -> Config:
         directory = wakeword.engine == "wakeforge" and field in ("model", "stop_model")
         if value and (directory or value.endswith((".onnx", ".tflite", ".pkl"))):
             setattr(wakeword, field, _resolve_path(value, base))
-    verifier = wakeword.viola.verifier
     for field in ("model", "mel_basis"):
-        value = getattr(verifier, field)
+        value = getattr(wakeword.stage2, field)
         if value:
-            setattr(verifier, field, _resolve_path(value, base))
+            setattr(wakeword.stage2, field, _resolve_path(value, base))
     earcons = config.earcons
     earcons.wake, earcons.ack, earcons.error, earcons.idle = (
         _resolve_path(p, base)

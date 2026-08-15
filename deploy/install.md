@@ -118,6 +118,26 @@ Set the cache location for the service user, since the default is `~/.violawake`
 export VIOLAWAKE_MODEL_DIR=/opt/openhab-voice-satellite/models/violawake
 ```
 
+### The stage-2 verifier (`wakeword.stage2`)
+
+A mel-PCEN CNN that re-scores the 1.5 s window behind every stage-1 trigger,
+so stage 1 can run low for recall while false accepts are somebody else's
+problem. It runs roughly once a minute and rejects ~99 % of what reaches it.
+On the shipped model that is the difference between 0.7 false accepts an hour
+at 99 % recall and 37.6 an hour at 94 %.
+
+**Engine-neutral.** It used to live at `wakeword.viola.verifier` and now sits at
+`wakeword.stage2`, because it is not a violawake feature: measured on the same
+5.48 h, the same verifier rejects 99 % of violawake's triggers and 99 % of a
+wakeforge model's. A config still carrying `viola.verifier` is **rejected at
+load** rather than ignored — a silently dropped verifier takes this deployment
+from 0.7 false accepts an hour to 67, and nothing in the logs would say why.
+The fields are unchanged; move the block up one level.
+
+`model` and `mel_basis` come as a pair. Training and calibration live in
+`violawakeword/TRAINING.md`; regenerate the filterbank and the golden fixtures
+with its `scripts/export_verifier_frontend.py` after retraining.
+
 ### Optional: the wakeforge engine (`wakeword.engine: wakeforge`)
 
 [wakeforge](https://github.com/TigreGotico/wakeforge) (Apache-2.0) trains a
@@ -155,19 +175,32 @@ same corpus as `showdaan_listen_v3` (4144 positives, 38 786 negatives), judged
 on the same held-out set — 200 piper clips and 5.48 h of LibriSpeech
 test-clean:
 
-| | recall | false/h |
-|---|---|---|
-| violawake v3 + mel-PCEN verifier (shipped, two-stage) | 99 % | **0.7** |
-| wakeforge `small`, single-stage | 100 % | 128.6 |
+| | stage 1 | recall | false/h |
+|---|---|---|---|
+| violawake v3, single stage | 0.5 / pat 2 | 94 % | 37.6 |
+| wakeforge `small`, single stage | 0.4 / pat 2 | 100 % | 128.6 |
+| **violawake v3 + `stage2`** (shipped) | 0.4 / pat 2 | **99 %** | **0.7** |
+| **wakeforge `small` + `stage2`** | 0.3 / pat 3 | **98 %** | **0.9** |
 
-Single stage against single stage, from the sweep tables, wakeforge is behind
-violawake's stage 1 at every operating point: 67 % vs 86 % recall at ~13 FA/h,
-31 % vs 58 % at ~2.5 FA/h. Recall is not its problem — it holds 100 % down to
-0.5 — discrimination against continuous speech is, which is the same frontier
-`violawakeword/TRAINING.md` documents for single-stage v3 and the reason stage 2
-exists. So wakeforge is not a drop-in replacement for the two-stage system on
-this phrase; the promising direction is wakeforge as stage 1 behind the existing
-verifier, not wakeforge alone.
+Two things worth separating there.
+
+**Single stage, wakeforge loses.** It trails violawake's stage 1 at every point
+on the sweep — 67 % vs 86 % recall at ~13 FA/h, 31 % vs 58 % at ~2.5 FA/h.
+Recall is not the weakness; it holds 100 % down to 0.5. Discrimination against
+continuous speech is, which is the frontier `violawakeword/TRAINING.md`
+documents for single-stage v3 and the reason `stage2` exists at all.
+
+**Behind the verifier, it lands on the same operating point** — and that was
+not a given. The verifier's hardest negatives were mined from *v3's* triggers
+(`violawakeword/scripts/mine_v3_triggers.py`), so nothing guaranteed it would
+generalise to a different architecture's false accepts. It rejects 347 of
+wakeforge's 351 triggers over those 5.48 h. Read that as evidence the second
+stage is genuinely engine-neutral, not as a reason to switch: violawake is
+still a point ahead on both axes, and it is the model this deployment is
+calibrated against.
+
+The trade wakeforge does offer is cost — 0.565 ms per frame against violawake's
+0.887, both single-threaded — for one point of recall and 0.2 FA/h.
 
 Caveats worth keeping with those numbers: this is one architecture (mfcc+gru)
 at default hyperparameters after a single 16-epoch run, against a violawake

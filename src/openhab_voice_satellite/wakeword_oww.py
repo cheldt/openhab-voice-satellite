@@ -18,10 +18,10 @@ log = logging.getLogger(__name__)
 class OpenWakewordDetector(BaseWakewordDetector):
     """Feeds 80 ms int16 frames to openWakeWord and reports detections."""
 
-    def __init__(self, config: WakewordConfig) -> None:
+    def __init__(self, config: WakewordConfig, frame_ms: int) -> None:
         from openwakeword.model import Model
 
-        super().__init__(config)
+        super().__init__(config, frame_ms)
         models = [config.model]
         if config.stop_model:
             models.append(config.stop_model)

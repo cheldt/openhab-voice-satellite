@@ -21,7 +21,18 @@ wakeword:
   verifier_model: null      # optional per-speaker openWakeWord custom verifier; UNPICKLED AT STARTUP, treat as executable code
   stop_verifier_model: null
   verifier_threshold: 0.1   # base score above which the verifier is consulted; it then REPLACES the score, so re-check thresholds
-  # Only used when engine is "violawake". Both blocks are off by default.
+  # Stage 2: a mel-PCEN CNN re-scoring the 1.5 s window behind each trigger.
+  # Engine-neutral — it works behind any of the three, and it is what lets
+  # wakeword.threshold sit low for recall while false accepts stay out.
+  # Measured on 5.5 h of continuous speech it rejects ~99 % of either
+  # violawake's or wakeforge's triggers. Needs the model AND its mel
+  # filterbank as a pair; see violawakeword/TRAINING.md for training both.
+  # stage2:
+  #   model: null             # path to a verifier .onnx (input: 40x151 mel-PCEN)
+  #   mel_basis: null         # path to the matching verifier_melfb_40.npy
+  #   threshold: 0.1          # verifier score needed to release a wake
+  #   delay_ms: 300           # audio gathered past the trigger before scoring
+  # Only used when engine is "violawake". Off by default.
   # NOTE: engine "violawake" needs audio.frame_ms to be a multiple of 20, and
   # every model gets its own feature backbone — setting stop_model here costs
   # roughly twice the per-frame CPU that openWakeWord would.
@@ -33,15 +44,6 @@ wakeword:
   #     max_threshold: 0.95
   #     snr_boost_db: 6.0
   #     snr_penalty_db: 3.0
-  #   verifier:               # stage-2 CNN re-scoring the 1.5 s behind each trigger;
-  #                           # lets wakeword.threshold sit low (recall) while the
-  #                           # verifier keeps false accepts out. Needs the model
-  #                           # AND its mel filterbank as a pair — see
-  #                           # violawakeword/TRAINING.md for training both.
-  #     model: null           # path to a verifier .onnx (input: 40x151 mel-PCEN)
-  #     mel_basis: null       # path to the matching verifier_melfb_40.npy
-  #     threshold: 0.1        # verifier score needed to release a wake
-  #     delay_ms: 300         # audio gathered past the trigger before scoring
   # Only used when engine is "wakeforge". wakeword.model names the directory
   # ww_trainer wrote; these are the two filenames inside it. The defaults are
   # what ww_trainer-quickstart writes, ww_trainer-train names them after the

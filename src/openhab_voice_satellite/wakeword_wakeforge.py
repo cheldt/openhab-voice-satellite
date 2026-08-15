@@ -156,8 +156,8 @@ class WakeforgeRunner:
 class WakeforgeDetector(BaseWakewordDetector):
     """Feeds int16 frames to one wakeforge model pair per key."""
 
-    def __init__(self, config: WakewordConfig) -> None:
-        super().__init__(config)
+    def __init__(self, config: WakewordConfig, frame_ms: int) -> None:
+        super().__init__(config, frame_ms)
         directories = {WAKE: config.model}
         if config.stop_model:
             directories[STOP] = config.stop_model

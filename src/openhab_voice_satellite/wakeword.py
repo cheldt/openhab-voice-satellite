@@ -27,6 +27,9 @@ RECENT_SCORES = 16  # per-model score history; must exceed the patience cap
 # wake-audio dumps look the same whichever engine produced the detection
 TAIL_SECONDS = 10
 
+# the stage-2 verifier scores exactly the 1.5 s window its training used
+VERIFIER_CLIP_SAMPLES = int(1.5 * SAMPLE_RATE)
+
 WAKE = "wake"
 STOP = "stop"
 
@@ -183,12 +186,16 @@ class BaseWakewordDetector:
     detection dump is supposed to show.
     """
 
-    def __init__(self, config: WakewordConfig) -> None:
+    def __init__(self, config: WakewordConfig, frame_ms: int) -> None:
         self._config = config
         keys = [WAKE] + ([STOP] if config.stop_model else [])
         self._triggers: dict[str, EdgeTrigger] = {key: EdgeTrigger() for key in keys}
         self._ring = Int16Ring(SAMPLE_RATE * TAIL_SECONDS)
         self._gate = self._build_gate(config)
+        self._verifier = self._build_verifier(config)
+        self._verify_delay_frames = max(1, -(-config.stage2.delay_ms // frame_ms))
+        self._verify_countdown: int | None = None
+        self.last_verifier_score: float | None = None
         # every consumer of score() needs to know whether it is looking at this
         # frame's score or the last scored frame's — see app.py's monitor loop
         self.scored_last_frame = True
@@ -210,6 +217,35 @@ class BaseWakewordDetector:
             config.gate_preroll_ms,
         )
         return gate
+
+    @staticmethod
+    def _build_verifier(config: WakewordConfig):
+        """The stage-2 verifier (session, frontend), or None if unconfigured.
+
+        The verifier ONNX must never go through an engine's own loader —
+        violawake's routes architectures by input rank and would silently
+        misread the (batch, 40, 151) verifier as a temporal embedding model. A
+        plain ORT session is the contract, with the same explicit single-thread
+        options every other session here gets.
+        """
+        stage2 = config.stage2
+        if not stage2.model:
+            return None
+        import onnxruntime as ort
+
+        from .verifier_mel import MelPcenFrontend
+        from .violawake_ort import _session_options
+
+        session = ort.InferenceSession(
+            stage2.model,
+            sess_options=_session_options(ort),
+            providers=["CPUExecutionProvider"],
+        )
+        log.info(
+            "wakeword stage-2 verifier loaded: %s (threshold %.2f, delay %d ms)",
+            stage2.model, stage2.threshold, stage2.delay_ms,
+        )
+        return session, MelPcenFrontend(stage2.mel_basis)
 
     # -- engine hooks ---------------------------------------------------
 
@@ -260,6 +296,13 @@ class BaseWakewordDetector:
         # the ring first, unconditionally: tail() must show what the mic heard
         # even on a frame the engine declines to score
         self._ring.extend(frame)
+        result = self._score_frame(frame, speaking)
+        if self._verifier is None:
+            return result
+        return self._stage2(result)
+
+    def _score_frame(self, frame: np.ndarray, speaking: bool) -> str | None:
+        """Stage 1: gate, score, decide."""
         admitted = self._gate.admit(frame, speaking) if self._gate else (frame,)
         if not admitted:
             self.scored_last_frame = False
@@ -273,6 +316,43 @@ class BaseWakewordDetector:
         if scores is None:
             return None
         return self._decide(scores, speaking)
+
+    def _stage2(self, result: str | None) -> str | None:
+        """Hold each WAKE until the verifier has a finished phrase to score.
+
+        Stage 1 crosses its threshold before the phrase ends, so the verifier
+        waits `delay_ms` of further audio and then scores the last 1.5 s from
+        the ring. STOP is never deferred — stopping playback late defeats the
+        purpose, and the stop model has no verifier anyway.
+
+        The countdown ticks on every call, including frames the VAD gate
+        declined to score: the ring records them either way, so it stays in
+        real time rather than in scored frames.
+        """
+        if result == WAKE:
+            # a second stage-1 trigger while one is pending keeps the first
+            # countdown — restarting it would push the window past the phrase
+            if self._verify_countdown is None:
+                self._verify_countdown = self._verify_delay_frames
+            result = None
+        if self._verify_countdown is not None:
+            self._verify_countdown -= 1
+            if self._verify_countdown <= 0:
+                self._verify_countdown = None
+                score = self._verify()
+                self.last_verifier_score = score
+                if score >= self._config.stage2.threshold:
+                    return WAKE
+                log.info("wake candidate rejected by verifier (score %.3f)", score)
+        return result
+
+    def _verify(self) -> float:
+        session, frontend = self._verifier
+        pcm = self._ring.tail(VERIFIER_CLIP_SAMPLES)
+        if len(pcm) < VERIFIER_CLIP_SAMPLES:
+            pcm = np.pad(pcm, (VERIFIER_CLIP_SAMPLES - len(pcm), 0))
+        features = frontend(pcm.astype(np.float32) / 32768.0)[np.newaxis]
+        return float(session.run(None, {"features": features})[0].flatten()[0])
 
     def _decide(self, scores: dict[str, float], speaking: bool) -> str | None:
         """Advance every trigger with this frame's scores and read the verdict."""
@@ -299,6 +379,8 @@ class BaseWakewordDetector:
         if self._gate is not None:
             self._gate.reset()
         self.scored_last_frame = True
+        self._verify_countdown = None
+        self.last_verifier_score = None
         for trigger in self._triggers.values():
             trigger.reset()
 
@@ -309,14 +391,15 @@ def build_detector(config: Config) -> WakewordProtocol:
     Imported lazily per engine so an uninstalled stack reports as one failed
     --check step rather than killing the process at import time.
     """
+    frame_ms = config.audio.frame_ms
     if config.wakeword.engine == "violawake":
         from .wakeword_viola import ViolaWakeDetector
 
-        return ViolaWakeDetector(config.wakeword, config.audio.frame_ms)
+        return ViolaWakeDetector(config.wakeword, frame_ms)
     if config.wakeword.engine == "wakeforge":
         from .wakeword_wakeforge import WakeforgeDetector
 
-        return WakeforgeDetector(config.wakeword)
+        return WakeforgeDetector(config.wakeword, frame_ms)
     from .wakeword_oww import OpenWakewordDetector
 
-    return OpenWakewordDetector(config.wakeword)
+    return OpenWakewordDetector(config.wakeword, frame_ms)

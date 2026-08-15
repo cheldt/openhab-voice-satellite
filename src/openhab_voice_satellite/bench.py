@@ -166,12 +166,11 @@ def _label(config: Config) -> str:
 def _is_two_stage(config: Config) -> bool:
     """Whether this config runs a second stage the sweep cannot model.
 
-    The engine check is not redundant: `--compare` swaps engine and model but
-    carries the rest of the config across, so a `viola.verifier` block survives
-    onto an engine that has never heard of it and ignores it entirely.
+    Engine-independent, because the verifier is: `--compare` swapping engines
+    now carries the second stage across on purpose, which is what makes a
+    two-stage comparison between two engines possible at all.
     """
-    wakeword = config.wakeword
-    return wakeword.engine == "violawake" and bool(wakeword.viola.verifier.model)
+    return bool(config.wakeword.stage2.model)
 
 
 # -- reporting ----------------------------------------------------------
@@ -380,17 +379,17 @@ def score_wavs(
 
 
 def _warn_on_asymmetry(configs: list[Config]) -> None:
-    """Refuse a head-to-head verdict when the two sides are not the same shape.
+    """Refuse a head-to-head verdict the sweep is not entitled to give.
 
-    A two-stage config's sweep rows are its stage 1 only, which is deliberately
-    detuned because the verifier is the real gate. Ranking those rows against a
-    single-stage model's rows flatters the single-stage model by roughly the
-    verifier's rejection rate.
+    With a second stage configured, every `best:` line above describes stage 1
+    alone — deliberately detuned, because the verifier is the real gate. Two
+    such lines side by side rank two stage 1s, which is not the question
+    `--compare` was asked.
     """
-    if len(configs) < 2 or len({_is_two_stage(c) for c in configs}) < 2:
+    if len(configs) < 2 or not any(_is_two_stage(c) for c in configs):
         return
-    two = ", ".join(_label(c) for c in configs if _is_two_stage(c))
-    one = ", ".join(_label(c) for c in configs if not _is_two_stage(c))
-    print(f"\nNOT COMPARABLE: {two} runs a stage-2 verifier the sweep cannot model; "
-          f"{one} does not. Compare the live lines instead, or unset "
-          f"wakeword.viola.verifier.model for a stage-1 against stage-1 run.")
+    labels = " and ".join(_label(c) for c in configs)
+    print(f"\nNOT COMPARABLE from the sweep: {labels} run a stage-2 verifier the "
+          f"sweep cannot model, so every `best:` line above is stage 1 only. "
+          f"Compare the live lines, or unset wakeword.stage2.model for a "
+          f"stage-1 against stage-1 run.")

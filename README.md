@@ -113,12 +113,17 @@ on your voice scores near zero on synthesized speech, so a TTS corpus is only
 valid as the negative half.
 
 Two things to read carefully. The sweep replays `EdgeTrigger` over stage-1
-scores, so on a config with `viola.verifier` set it counts stage-1 triggers,
+scores, so on a config with `wakeword.stage2` set it counts stage-1 triggers,
 most of which the verifier then swallows — every report therefore also carries
 a `live` count, which is what the detector itself returned, and `--compare`
-across that asymmetry prints both tables and refuses to name a winner. And
-`--compare` paths resolve against the working directory, not against the
+refuses to name a winner from the sweep, pointing at the live lines instead.
+And `--compare` paths resolve against the working directory, not against the
 config file.
+
+`wakeword.stage2` is engine-neutral, so `--compare` carries it onto both
+columns: two engines are compared as the two-stage systems they would actually
+be deployed as. Measured on 5.48 h of continuous speech, the same verifier
+rejects 99 % of violawake's stage-1 triggers and 99 % of wakeforge's.
 
 Tests: `.venv/bin/pytest` (fast; the GStreamer tests skip without PyGObject).
 `OVS_TEST_VIOLA_MODEL=path/to/wake.onnx` additionally runs the violawake
@@ -177,7 +182,8 @@ Everything lives in one YAML file — see the extensively commented
 | `wakeword.stop_threshold_speaking` | same for the stop model, which by definition runs during playback; `null` = reuse `stop_threshold` |
 | `wakeword.patience` / `stop_patience` | consecutive frames above threshold before firing; `2` rejects single-frame spikes for 80 ms of latency |
 | `wakeword.verifier_model` / `stop_verifier_model` | optional per-speaker openWakeWord custom verifier; **unpickled at startup**, see [deploy/install.md](deploy/install.md) |
-| `wakeword.viola.*` | violawake-only extras, off by default: noise-adaptive threshold and the stage-2 verifier |
+| `wakeword.stage2.*` | engine-neutral second stage: a mel-PCEN CNN re-scoring the 1.5 s behind each trigger, so stage 1 can run low for recall. Unset = single stage |
+| `wakeword.viola.*` | violawake-only extra, off by default: noise-adaptive threshold |
 | `wakeword.vad_gate.*` | Silero in front of the model, so silent frames are never scored; off by default, and not available on `openwakeword` — see [deploy/install.md](deploy/install.md) before enabling |
 | `stt.engine` | `local` (faster-whisper), `gemini` or `deepgram` (cloud STT, falls back to local on failure) |
 | `stt.model` | `small` (default) or `base` for lower latency |
