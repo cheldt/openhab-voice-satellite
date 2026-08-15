@@ -76,21 +76,6 @@ class ViolaAdaptiveConfig(BaseModel):
         return self
 
 
-class ViolaPowerConfig(BaseModel):
-    """Frame skipping (violawake's PowerManager).
-
-    Silence skipping is the useful part here; duty_cycle_n above 1 drops
-    frames the model has already committed to streaming over, so leave it at
-    1 unless you have measured what the discontinuity costs in recall.
-    """
-
-    enabled: bool = False
-    duty_cycle_n: int = Field(1, ge=1)
-    silence_rms: float = Field(10.0, ge=0.0)  # int16 scale, matching upstream
-    activity_threshold: float = Field(0.3, ge=0.0, le=1.0)
-    active_window_s: float = Field(3.0, gt=0.0)
-
-
 class ViolaVerifierConfig(BaseModel):
     """Stage-2 verifier: a mel-PCEN CNN re-scoring each wake trigger.
 
@@ -115,9 +100,52 @@ class ViolaVerifierConfig(BaseModel):
 
 
 class ViolaConfig(BaseModel):
+    # `power` used to live here (violawake's PowerManager). It duty-cycled
+    # frames on an RMS floor, which splices the backbone exactly as described
+    # at ENGINE_CONTEXT_MS below; wakeword.vad_gate replaces it and replays the
+    # context. A stale `power:` block is ignored, as pydantic ignores any
+    # unknown key — same as the removed kokoro block.
     adaptive: ViolaAdaptiveConfig = Field(default_factory=ViolaAdaptiveConfig)
-    power: ViolaPowerConfig = Field(default_factory=ViolaPowerConfig)
     verifier: ViolaVerifierConfig = Field(default_factory=ViolaVerifierConfig)
+
+
+# How much continuous audio each engine needs before its scores mean anything.
+# Skipping a frame does not pause these backbones, it splices them: both
+# openWakeWord and violawake compute their streaming melspectrogram over
+# `tail(n_samples + 480)`, so a frame that never entered the ring puts audio
+# from 80 ms earlier directly against the next one, and the mel frames across
+# that seam read like a plosive. Contamination clears only once a full context
+# has passed: 76 mel frames (760 ms) behind the head's own window, which is
+# 9 embeddings for violawake and 16 for openWakeWord. wakeforge featurises each
+# chunk independently, so only its 50-frame feature cache is affected.
+ENGINE_CONTEXT_MS = {"violawake": 1480, "openwakeword": 2040, "wakeforge": 500}
+
+
+class WakewordVadGateConfig(BaseModel):
+    """Silero in front of the wakeword model, to skip scoring silence.
+
+    Off by default, and it stays off until the saving is measured on the
+    hardware in question: Silero runs on every frame, so the gate only pays for
+    itself above roughly a 15-20 % skip fraction, and a pre-roll burst on every
+    speech onset eats into that.
+
+    `preroll_ms` is the frames replayed when the gate opens, and `None` means
+    the engine's own context requirement — see ENGINE_CONTEXT_MS. Setting it
+    lower is rejected rather than warned about: Silero decides on 32 ms chunks
+    and will clip a phrase's onset, so a short pre-roll passes every scripted
+    test and quietly loses recall in the room.
+
+    `bypass_while_speaking` skips the gate entirely during playback. Silero
+    calls our own TTS speech, so the gate would be open anyway; what it buys is
+    that barge-in never pays onset-clipping latency, which is the one detection
+    that cannot afford it.
+    """
+
+    enabled: bool = False
+    threshold: float = Field(0.5, ge=0.0, le=1.0)
+    hangover_ms: int = Field(1000, ge=0)
+    preroll_ms: int | None = Field(None, ge=0)
+    bypass_while_speaking: bool = True
 
 
 class WakeforgeConfig(BaseModel):
@@ -167,6 +195,14 @@ class WakewordConfig(BaseModel):
     viola: ViolaConfig = Field(default_factory=ViolaConfig)
     # engine == "wakeforge" only; ignored otherwise
     wakeforge: WakeforgeConfig = Field(default_factory=WakeforgeConfig)
+    vad_gate: WakewordVadGateConfig = Field(default_factory=WakewordVadGateConfig)
+
+    @property
+    def gate_preroll_ms(self) -> int:
+        """The pre-roll the gate will actually use, engine default resolved."""
+        if self.vad_gate.preroll_ms is not None:
+            return self.vad_gate.preroll_ms
+        return ENGINE_CONTEXT_MS[self.engine]
 
     @property
     def effective_stop_threshold_speaking(self) -> float:
@@ -416,6 +452,38 @@ class Config(BaseModel):
         # SDK constant, but wakeforge's feature hop is a property of the model
         # you trained. The equivalent check runs against the real .onnx at
         # detector construction, which is what --check exercises.
+        return self
+
+    @model_validator(mode="after")
+    def _vad_gate_supported(self) -> Config:
+        """Reject a gate configuration that would cost recall silently."""
+        gate = self.wakeword.vad_gate
+        if not gate.enabled:
+            return self
+        engine = self.wakeword.engine
+        context = ENGINE_CONTEXT_MS[engine]
+        if engine == "openwakeword":
+            # 26 frames of pre-roll is 81-108 ms of burst on a Pi against an
+            # 80 ms frame budget, and this is not the engine the gate is for
+            raise ValueError(
+                f"wakeword.vad_gate is not supported on engine 'openwakeword': "
+                f"its {context} ms of context makes every gate opening a burst "
+                f"longer than one frame period"
+            )
+        if gate.preroll_ms is not None and gate.preroll_ms < context:
+            raise ValueError(
+                f"wakeword.vad_gate.preroll_ms {gate.preroll_ms} is below the "
+                f"{context} ms engine '{engine}' needs to recover from a gap "
+                f"(760 ms of mel context behind its head window) — a shorter "
+                f"pre-roll scores the wake phrase on spliced audio. Leave it "
+                f"null to take the engine's own figure."
+            )
+        if gate.hangover_ms < 700:
+            log.warning(
+                "wakeword.vad_gate.hangover_ms (%d) is shorter than a wake "
+                "phrase; a pause between words can close the gate mid-phrase",
+                gate.hangover_ms,
+            )
         return self
 
 

@@ -209,6 +209,61 @@ def test_wakeforge_takes_any_frame_size():
         )
 
 
+def test_stale_viola_power_block_ignored():
+    # viola.power was violawake's PowerManager, replaced by wakeword.vad_gate.
+    # An old config must still load, as it does for the removed kokoro block
+    config = Config.model_validate(
+        {"wakeword": {"engine": "violawake", "model": "w.onnx",
+                      "viola": {"power": {"enabled": True, "duty_cycle_n": 4}}}}
+    )
+    assert not hasattr(config.wakeword.viola, "power")
+
+
+def test_gate_is_off_by_default():
+    assert not Config().wakeword.vad_gate.enabled
+
+
+def test_gate_preroll_defaults_to_the_engine_context():
+    viola = Config.model_validate(
+        {"wakeword": {"engine": "violawake", "model": "w.onnx",
+                      "vad_gate": {"enabled": True}}}
+    )
+    assert viola.wakeword.gate_preroll_ms == 1480
+    forge = Config.model_validate(
+        {"wakeword": {"engine": "wakeforge", "model": "d",
+                      "vad_gate": {"enabled": True}}}
+    )
+    assert forge.wakeword.gate_preroll_ms == 500
+
+
+def test_gate_rejects_a_preroll_shorter_than_the_engine_context():
+    # a skipped frame splices the melspectrogram rather than pausing it, so
+    # anything less than a full context scores the phrase on spliced audio —
+    # invisible in every scripted test, and a recall loss in the room
+    with pytest.raises(ValueError, match="preroll_ms"):
+        Config.model_validate(
+            {"wakeword": {"engine": "violawake", "model": "w.onnx",
+                          "vad_gate": {"enabled": True, "preroll_ms": 400}}}
+        )
+
+
+def test_gate_is_rejected_on_openwakeword():
+    # 2040 ms of context makes every gate opening a burst longer than one
+    # frame period on a Pi
+    with pytest.raises(ValueError, match="not supported on engine 'openwakeword'"):
+        Config.model_validate({"wakeword": {"vad_gate": {"enabled": True}}})
+
+
+def test_gate_warns_on_a_hangover_shorter_than_a_phrase(caplog):
+    with caplog.at_level(logging.WARNING):
+        config = Config.model_validate(
+            {"wakeword": {"engine": "violawake", "model": "w.onnx",
+                          "vad_gate": {"enabled": True, "hangover_ms": 200}}}
+        )
+    assert "shorter than a wake phrase" in caplog.text
+    assert config.wakeword.vad_gate.hangover_ms == 200  # a warning, not a rejection
+
+
 def test_wakeforge_model_directory_resolves_relative_to_the_config_file(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text("wakeword:\n  engine: wakeforge\n  model: models/my_wake\n")

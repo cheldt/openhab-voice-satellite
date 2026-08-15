@@ -177,7 +177,8 @@ Everything lives in one YAML file — see the extensively commented
 | `wakeword.stop_threshold_speaking` | same for the stop model, which by definition runs during playback; `null` = reuse `stop_threshold` |
 | `wakeword.patience` / `stop_patience` | consecutive frames above threshold before firing; `2` rejects single-frame spikes for 80 ms of latency |
 | `wakeword.verifier_model` / `stop_verifier_model` | optional per-speaker openWakeWord custom verifier; **unpickled at startup**, see [deploy/install.md](deploy/install.md) |
-| `wakeword.viola.*` | violawake-only extras, both off by default: noise-adaptive threshold and silence-based frame skipping |
+| `wakeword.viola.*` | violawake-only extras, off by default: noise-adaptive threshold and the stage-2 verifier |
+| `wakeword.vad_gate.*` | Silero in front of the model, so silent frames are never scored; off by default, and not available on `openwakeword` — see [deploy/install.md](deploy/install.md) before enabling |
 | `stt.engine` | `local` (faster-whisper), `gemini` or `deepgram` (cloud STT, falls back to local on failure) |
 | `stt.model` | `small` (default) or `base` for lower latency |
 | `stt.languages` | language candidates for detection (default `[de, en]`); a single entry skips whisper's per-utterance language-detection pass — recommended on constrained boxes |

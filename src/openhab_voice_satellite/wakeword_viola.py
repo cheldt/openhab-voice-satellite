@@ -72,7 +72,6 @@ class ViolaWakeDetector(BaseWakewordDetector):
         self._verify_countdown: int | None = None
         self.last_verifier_score: float | None = None
         self._profiler = self._build_profiler(config, frame_ms)
-        self._power = self._build_power_manager(config)
         self._adapted: float | None = None
         log.info("wakeword models loaded (violawake): %s", list(models.values()))
 
@@ -133,36 +132,10 @@ class ViolaWakeDetector(BaseWakewordDetector):
         )
         return profiler
 
-    @staticmethod
-    def _build_power_manager(config: WakewordConfig):
-        power = config.viola.power
-        if not power.enabled:
-            return None
-        from violawake_sdk import PowerManager
-
-        if power.duty_cycle_n > 1:
-            log.warning(
-                "violawake duty_cycle_n=%d drops frames mid-stream; the model "
-                "sees a discontinuity and recall suffers",
-                power.duty_cycle_n,
-            )
-        return PowerManager(
-            duty_cycle_n=power.duty_cycle_n,
-            silence_rms=power.silence_rms,
-            activity_threshold=power.activity_threshold,
-            active_window_s=power.active_window_s,
-        )
-
     def _scores(self, frame: np.ndarray) -> dict[str, float] | None:
-        # the tail ring is filled by BaseWakewordDetector.process before this
-        # runs, so the frames the power manager declines to score still reach it
-        if self._power is not None or self._profiler is not None:
-            # both expect the int16-scale float array violawake builds internally
-            pcm = frame.astype(np.float32)
-            if self._power is not None and not self._power.should_process(pcm):
-                return None
-            if self._profiler is not None:
-                self._adapted = float(self._profiler.update(pcm))
+        if self._profiler is not None:
+            # expects the int16-scale float array violawake builds internally
+            self._adapted = float(self._profiler.update(frame.astype(np.float32)))
         return {key: float(engine.process(frame)) for key, engine in self._engines.items()}
 
     def _threshold(self, key: str, speaking: bool) -> float:
@@ -182,9 +155,10 @@ class ViolaWakeDetector(BaseWakewordDetector):
         verifier waits `delay_ms` of further audio and then scores the last
         1.5 s from the ring. STOP is never deferred — stopping playback late
         defeats its purpose, and the stop model has no verifier anyway. The
-        countdown ticks on every frame, including ones the power manager
-        declines to score: the ring records them, so the audio the verifier
-        needs is there either way.
+        countdown ticks on every frame, including ones the VAD gate declines
+        to score: the ring records them, so the audio the verifier needs is
+        there either way, and the countdown stays in real time rather than in
+        scored frames.
         """
         # super().process runs unconditionally first: every model's score
         # history must advance on every frame (see BaseWakewordDetector),

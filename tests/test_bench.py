@@ -97,6 +97,21 @@ def test_count_detections_leaves_no_state_between_calls():
     assert count_detections(scores, 0.8, 1) == count_detections(scores, 0.8, 1) == 1
 
 
+def test_a_gated_frame_does_not_extend_a_patience_window():
+    # NaN is a frame the detector never scored. Recording the previous score
+    # instead would satisfy patience 3 from a single real crossing, which is
+    # how a gated run reads as a better model than it is
+    scores = np.array([0.9, np.nan, np.nan, np.nan])
+    assert count_detections(scores, 0.8, 3) == 0
+    assert count_detections(scores, 0.8, 1) == 1
+
+
+def test_a_gap_does_not_break_a_patience_window():
+    # the other half of the same rule: _scores() -> None leaves the history
+    # untouched live, so the sweep must not treat a gap as a reset either
+    assert count_detections(np.array([0.9, np.nan, 0.9]), 0.8, 2) == 1
+
+
 def test_edge_trigger_feed_is_observe_plus_fired():
     a, b = EdgeTrigger(), EdgeTrigger()
     for score in (0.9, 0.1, 0.9):
@@ -277,6 +292,19 @@ def test_live_counts_what_process_returned_not_what_the_sweep_swept(
     out = capsys.readouterr().out
     assert "live (two-stage, at the configured threshold 0.4" in out
     assert "recall 0%, 0.0 false/h" in out
+
+
+def test_a_gated_run_says_how_much_it_skipped(tmp_path, monkeypatch, capsys):
+    # real Silero over real digital silence: after the hangover the gate shuts
+    # and most of the file is never scored. Without the line this prints, a
+    # gated run just looks like a model with fewer false accepts.
+    config = _viola_config(
+        monkeypatch, {"wake": [0.1] * 80},
+        vad_gate={"enabled": True, "hangover_ms": 700},
+    )
+    assert score_wavs(config, [_wav(tmp_path / "quiet.wav", seconds=4.0)]) == 0
+    out = capsys.readouterr().out
+    assert "vad gate:" in out and "suppressed)" in out
 
 
 def test_compare_refuses_a_verdict_across_a_verifier_asymmetry(

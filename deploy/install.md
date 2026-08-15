@@ -155,6 +155,51 @@ That is not a hypothetical: a head exported with its own sigmoid gets squashed
 into [0.5, 0.73] by the sigmoid applied here, which fires constantly rather
 than never — the failure that looks like working software.
 
+### Optional: the Silero VAD gate (`wakeword.vad_gate`)
+
+Silero decides which frames are worth scoring, so an idle room stops paying for
+the wakeword model. Off by default, because it trades CPU against recall and
+only one side of that trade is cheap to measure.
+
+What it costs, measured on an x86 dev box with single-threaded ORT:
+
+| per 80 ms frame | |
+|---|---|
+| `pysilero-vad`, 2.5 × 512-sample chunks | 0.168 ms |
+| violawake `process` | 0.887 ms |
+| openWakeWord `predict` | 1.192 ms |
+
+Silero runs on **every** frame, so the gate is only ahead above roughly a 19 %
+skip fraction against violawake (14 % against openWakeWord). A quiet room is
+far past that — a 30 s recording of a low noise floor scores 12 of 375 frames,
+97 % suppressed — but a room with a television in it is not, because Silero
+calls that speech and the gate stays open. **Re-measure on your own hardware
+with `--probe-mic` before enabling it**; if `cpu_ms` does not drop, it is not
+earning its place there.
+
+Two things are not tunable, for the same reason:
+
+- **`preroll_ms` cannot go below the engine's context** (violawake 1480 ms,
+  wakeforge 500 ms; `null` takes the right one). Skipping a frame does not
+  pause these models, it *splices* them: the streaming melspectrogram is
+  computed over `tail(n_samples + 480)`, so a frame that never entered the ring
+  puts audio from 80 ms earlier directly against the next one, and the mel
+  frames across that seam look like a plosive. It takes 76 mel frames plus the
+  head's own window to flush that out — longer than the wake phrase itself. The
+  gate therefore replays a full context when it opens, and a short pre-roll
+  would score the whole phrase on spliced audio while passing every test.
+- **openWakeWord is rejected outright.** Its 2040 ms of context is 26 frames of
+  replay, which on a Pi is longer than one frame period.
+
+The gate never runs during playback (`bypass_while_speaking`): Silero calls our
+own TTS speech, so it would be open anyway, and barge-in cannot afford the
+32 ms of onset granularity that opening costs.
+
+Recall is the half you have to measure yourself. `--score-wav` marks gated
+frames so the sweep cannot silently credit the gate's suppression to the model,
+and prints how much it skipped; A/B two config files over the same corpus and
+keep the gate only if recall holds.
+
 ### Optional: per-speaker verifier models
 
 If the base model false-triggers on the TV, the radio or passers-by, a custom

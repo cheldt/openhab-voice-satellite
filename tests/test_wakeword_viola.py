@@ -7,7 +7,6 @@ import pytest
 
 from .wakeword_stubs import (
     StubNoiseProfiler,
-    StubPowerManager,
     StubWakeDetector,
     make_detector,
     reset_stub_state,
@@ -88,7 +87,6 @@ def test_frames_reach_the_engine_unmodified(detector_factory):
 def test_no_extras_by_default(detector_factory):
     detector_factory({"wake": [0.0]}, model="wake")
     assert StubNoiseProfiler.instances == []
-    assert StubPowerManager.instances == []
 
 
 def test_adaptive_threshold_replaces_the_configured_one(detector_factory):
@@ -136,34 +134,6 @@ def test_adaptive_only_moves_the_wake_bar(detector_factory):
     )
     assert detector.process(FRAME) == "stop"  # 0.5 >= its own static 0.4
 
-
-def test_skipped_frame_does_not_advance_the_patience_window(detector_factory):
-    StubPowerManager.decisions = [True, False, True]
-    detector = detector_factory(
-        {"wake": [0.9, 0.9]},
-        model="wake", patience=2,
-        viola={"power": {"enabled": True}},
-    )
-    assert detector.process(FRAME) is None  # 1 of 2
-    assert detector.process(FRAME) is None  # skipped: no score, no progress
-    assert detector.process(FRAME) == "wake"  # 2 of 2, window unbroken
-
-
-def test_skipped_frame_still_reaches_the_tail_ring(detector_factory):
-    StubPowerManager.decisions = [False]
-    detector = detector_factory(
-        {"wake": [0.0]}, model="wake", viola={"power": {"enabled": True}}
-    )
-    frame = np.arange(1280, dtype=np.int16)
-    assert detector.process(frame) is None
-    # the mic still heard it, so a later dump must contain it
-    assert np.array_equal(detector.tail(1280 / 16000), frame)
-
-
-def test_skipped_frame_is_never_scored(detector_factory):
-    StubPowerManager.decisions = [False]
-    detector = detector_factory(
-        {"wake": [0.9]}, model="wake", viola={"power": {"enabled": True}}
-    )
-    detector.process(FRAME)
-    assert StubWakeDetector.instances[0].frames == []
+# The three frame-skipping invariants that used to live here belonged to
+# violawake's PowerManager. They now cover every engine, against the VAD gate
+# that replaced it, in tests/test_wakeword_gate.py.

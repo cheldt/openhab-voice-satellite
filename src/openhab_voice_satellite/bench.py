@@ -110,14 +110,28 @@ def score_file(config: Config, path: Path) -> FrameScores:
         # is stage 1, the return value is the whole detector
         if detector.process(pcm[i:i + n]) == WAKE:
             live += 1
-        scores.append(detector.score(WAKE))
+        # a gated frame gets NaN, not the previous score. Repeating it would
+        # both complete patience windows that never held and, since the gate
+        # closes on the silence after a phrase where the last score was high,
+        # keep EdgeTrigger from re-arming — inflating and suppressing counts in
+        # the same run
+        scored = getattr(detector, "scored_last_frame", True)
+        scores.append(detector.score(WAKE) if scored else float("nan"))
     return FrameScores(np.asarray(scores, dtype=np.float64), live)
 
 
 def count_detections(scores: np.ndarray, threshold: float, patience: int) -> int:
-    """How many events the app's decision rule would emit for this score run."""
+    """How many events the app's decision rule would emit for this score run.
+
+    NaN marks a frame the detector never scored, and is skipped rather than
+    observed — the same thing `_scores() -> None` does live, which is what
+    keeps a gap from breaking a patience window here as well.
+    """
     trigger = EdgeTrigger()
-    return sum(bool(trigger.feed(s, threshold, patience)) for s in scores)
+    return sum(
+        bool(trigger.feed(s, threshold, patience))
+        for s in scores if not np.isnan(s)
+    )
 
 
 def _label(config: Config) -> str:
@@ -146,8 +160,9 @@ def _report_files(
     scored: dict[Path, list[FrameScores]] = {}
     for config in configs:
         print(f"\n=== {_label(config)} ===")
-        print(f"{'file':<34} {'dur':>6} {'frames':>7} "
+        print(f"{'file':<34} {'dur':>6} {'frames':>7} {'scored':>7} "
               f"{'max':>7} {'p50':>7} {'p90':>7} {'p99':>7} {'fires':>6} {'live':>6}")
+        offered = gated = 0
         for path in paths:
             result = score_file(config, path)
             scored.setdefault(path, []).append(result)
@@ -155,18 +170,31 @@ def _report_files(
             if not len(scores):
                 print(f"{path.name[:34]:<34} {'(shorter than one frame)':>50}")
                 continue
+            offered += len(scores)
+            n_scored = int(np.count_nonzero(~np.isnan(scores)))
+            gated += len(scores) - n_scored
+            if not n_scored:
+                print(f"{path.name[:34]:<34} "
+                      f"{'(no frames scored — VAD gate closed throughout)':>50}")
+                continue
             fires = count_detections(
                 scores, config.wakeword.threshold, config.wakeword.patience
             )
             print(
                 f"{path.name[:34]:<34} {len(scores) * frame_ms / 1000:>5.1f}s "
-                f"{len(scores):>7} {scores.max():>7.3f} "
-                f"{np.percentile(scores, 50):>7.3f} {np.percentile(scores, 90):>7.3f} "
-                f"{np.percentile(scores, 99):>7.3f} {fires:>6} {result.live:>6}"
+                f"{len(scores):>7} {n_scored:>7} {np.nanmax(scores):>7.3f} "
+                f"{np.nanpercentile(scores, 50):>7.3f} "
+                f"{np.nanpercentile(scores, 90):>7.3f} "
+                f"{np.nanpercentile(scores, 99):>7.3f} {fires:>6} {result.live:>6}"
             )
         wakeword = config.wakeword
         print(f"  (fires = sweep detections at threshold {wakeword.threshold}, "
               f"patience {wakeword.patience}; live = what process() returned)")
+        if gated:
+            # without this line, a gated run reads as a better model rather
+            # than as a smaller measurement
+            print(f"  (vad gate: {offered - gated} of {offered} frames scored, "
+                  f"{gated / offered:.0%} suppressed)")
         if _is_two_stage(config):
             print("  (stage-2 verifier configured: fires counts stage-1 triggers, "
                   "live counts what survived the verifier)")
@@ -198,7 +226,11 @@ def _report_separation(
     threshold could separate the corpora at all.
     """
     peaks = {
-        name: [scored[p][column].scores.max() for p in group if len(scored[p][column].scores)]
+        name: [
+            np.nanmax(scored[p][column].scores)
+            for p in group
+            if np.any(~np.isnan(scored[p][column].scores))
+        ]
         for name, group in (("pos", positives), ("neg", negatives))
     }
     if not peaks["pos"] or not peaks["neg"]:

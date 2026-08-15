@@ -33,12 +33,6 @@ wakeword:
   #     max_threshold: 0.95
   #     snr_boost_db: 6.0
   #     snr_penalty_db: 3.0
-  #   power:                  # skip scoring frames that are clearly silence
-  #     enabled: false
-  #     duty_cycle_n: 1       # >1 also drops speech frames mid-stream; recall suffers
-  #     silence_rms: 10.0
-  #     activity_threshold: 0.3
-  #     active_window_s: 3.0
   #   verifier:               # stage-2 CNN re-scoring the 1.5 s behind each trigger;
   #                           # lets wakeword.threshold sit low (recall) while the
   #                           # verifier keeps false accepts out. Needs the model
@@ -56,6 +50,17 @@ wakeword:
   # wakeforge:
   #   featurizer: "best_f1_featurizer.onnx"
   #   head: "best_f1.onnx"
+  # Silero in front of the model, so silent frames are never scored. Off until
+  # you have measured the saving on your hardware with --probe-mic: Silero runs
+  # on every frame either way, so it only pays above roughly a 15-20 % skip
+  # fraction. Not available on engine "openwakeword" — its context is too long
+  # to replay inside one frame period.
+  # vad_gate:
+  #   enabled: false
+  #   threshold: 0.5          # silero speech probability, not vad.threshold
+  #   hangover_ms: 1000       # keep scoring this long after speech stops
+  #   preroll_ms: null        # null = the engine's own context (violawake 1480, wakeforge 500)
+  #   bypass_while_speaking: true   # never gate during playback; barge-in cannot pay onset latency
 
 vad:
   threshold: 0.5

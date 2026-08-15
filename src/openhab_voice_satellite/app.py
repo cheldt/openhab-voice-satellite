@@ -52,6 +52,10 @@ def _dump_wake_audio(
     Unlike the utterance dump this captures what actually fired the detector,
     which is the only way to collect real false accepts. $OVS_DUMP_WAKE_SCORE
     additionally catches near misses — the frames that almost triggered.
+
+    `score` must be this frame's, not the newest one the detector scored: a
+    stale score held above the near-miss floor across a shut VAD gate would
+    write one WAV per frame for as long as the gate stayed shut.
     """
     dump_dir = os.environ.get("OVS_DUMP_WAKE")
     if not dump_dir:
@@ -365,11 +369,19 @@ class App:
                 # the wake and ack earcons are audible outside SPEAKING
                 detection = detector.process(frame, speaking=sink.is_playing)
                 score = detector.score("wake")
+                # on a frame the VAD gate skipped, score() is the last *scored*
+                # frame's. Feeding that to the consumers below would hold a duck
+                # engaged after speech ended and flood the near-miss dump with a
+                # file per frame, so they only see frames that were scored.
+                scored = getattr(detector, "scored_last_frame", True)
+                observed = score if scored else 0.0
                 health.observe(
-                    frame, score, getattr(wake_queue, "dropped", 0), source.stats()
+                    frame, observed, getattr(wake_queue, "dropped", 0), source.stats()
                 )
-                duck.update(self.state is State.SPEAKING, score, sink)
-                _dump_wake_audio(detector, detection, score, self.state)
+                # the duck still gets a frame, at a score that lets its hold
+                # count down instead of freezing wherever the gate shut
+                duck.update(self.state is State.SPEAKING, observed, sink)
+                _dump_wake_audio(detector, detection, observed, self.state)
 
                 if detection is None:
                     continue

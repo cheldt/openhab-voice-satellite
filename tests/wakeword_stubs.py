@@ -98,23 +98,10 @@ class StubNoiseProfiler:
         return self.adapted.pop(0) if self.adapted else 0.5
 
 
-class StubPowerManager:
-    decisions: list[bool] = []
-    instances: list["StubPowerManager"] = []
-
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-        StubPowerManager.instances.append(self)
-
-    def should_process(self, pcm):
-        return self.decisions.pop(0) if self.decisions else True
-
-
 def install_violawake(monkeypatch) -> types.ModuleType:
     package = types.ModuleType("violawake_sdk")
     package.WakeDetector = StubWakeDetector
     package.NoiseProfiler = StubNoiseProfiler
-    package.PowerManager = StubPowerManager
     monkeypatch.setitem(sys.modules, "violawake_sdk", package)
     return package
 
@@ -167,8 +154,6 @@ def reset_stub_state() -> None:
     StubWakeDetector.instances = []
     StubNoiseProfiler.adapted = []
     StubNoiseProfiler.instances = []
-    StubPowerManager.decisions = []
-    StubPowerManager.instances = []
     StubWakeforgeRunner.scripts = {}
     StubWakeforgeRunner.instances = []
 

@@ -16,7 +16,7 @@ from typing import Protocol
 
 import numpy as np
 
-from .config import SAMPLE_RATE, Config, WakewordConfig
+from .config import SAMPLE_RATE, Config, WakewordConfig, WakewordVadGateConfig
 from .wakeword_buffer import Int16Ring
 
 log = logging.getLogger(__name__)
@@ -96,6 +96,79 @@ class EdgeTrigger:
         self.armed = True
 
 
+class VadGate:
+    """Silero deciding which frames are worth scoring.
+
+    Not a duty cycle: the engines behind this splice rather than pause when a
+    frame goes missing (see ENGINE_CONTEXT_MS), so the gate only ever closes
+    after sustained silence, and it replays a full context of buffered audio
+    when it opens. Those replayed frames prime the engine; they never reach a
+    trigger, so one `process()` call still produces exactly one decision.
+
+    Its Silero instance is its own. The app's `SpeechEndpointer` is reset once
+    per utterance by the recorder and latches `speech_started`; sharing it
+    would have a per-utterance state machine and an always-on one writing to
+    the same recurrent state.
+    """
+
+    def __init__(self, config: WakewordVadGateConfig, preroll_ms: int) -> None:
+        from .config import VadConfig
+        from .vad import SpeechEndpointer
+
+        # only `threshold` means anything to update(); the rest of VadConfig is
+        # endpointing, which is a different job with a different cost of error
+        self._vad = SpeechEndpointer(VadConfig(threshold=config.threshold))
+        self._config = config
+        self._preroll_samples = SAMPLE_RATE * preroll_ms // 1000
+        self._hangover_samples = SAMPLE_RATE * config.hangover_ms // 1000
+        self._live = True
+        self._preroll: deque[np.ndarray] = deque()
+        self._buffered = 0
+        self._budget = self._hangover_samples
+
+    def admit(self, frame: np.ndarray, speaking: bool) -> tuple[np.ndarray, ...]:
+        """The frames to score: none, this one, or a pre-roll then this one."""
+        if not self._live:
+            return (frame,)
+        bypass = speaking and self._config.bypass_while_speaking
+        if bypass or self._speech(frame):
+            # a speech frame is always scored; the hangover governs only how
+            # much of the trailing silence keeps being scored after it
+            self._budget = self._hangover_samples
+            admit = True
+        else:
+            self._budget = max(0, self._budget - len(frame))
+            admit = self._budget > 0
+        if admit:
+            admitted = (*self._preroll, frame)
+            self._preroll.clear()
+            self._buffered = 0
+            return admitted
+        self._preroll.append(frame)
+        self._buffered += len(frame)
+        while self._preroll and self._buffered - len(self._preroll[0]) >= self._preroll_samples:
+            self._buffered -= len(self._preroll.popleft())
+        return ()
+
+    def _speech(self, frame: np.ndarray) -> bool:
+        """Whether Silero heard speech, failing open and permanently on error."""
+        try:
+            return self._vad.update(frame)
+        except Exception:
+            log.exception("wakeword VAD gate failed; scoring every frame from here")
+            self._live = False
+            return True
+
+    def reset(self) -> None:
+        # open, not shut: reset() runs at every detection and barge-in and
+        # empties the pre-roll, so the next opening would have nothing to
+        # replay. Feed the engine continuously while its context refills.
+        self._vad.reset()
+        self._preroll.clear()
+        self._buffered = 0
+        self._budget = self._hangover_samples
+
+
 class BaseWakewordDetector:
     """Turns per-frame model scores into at most one event per spoken phrase.
 
@@ -115,6 +188,28 @@ class BaseWakewordDetector:
         keys = [WAKE] + ([STOP] if config.stop_model else [])
         self._triggers: dict[str, EdgeTrigger] = {key: EdgeTrigger() for key in keys}
         self._ring = Int16Ring(SAMPLE_RATE * TAIL_SECONDS)
+        self._gate = self._build_gate(config)
+        # every consumer of score() needs to know whether it is looking at this
+        # frame's score or the last scored frame's — see app.py's monitor loop
+        self.scored_last_frame = True
+
+    @staticmethod
+    def _build_gate(config: WakewordConfig) -> VadGate | None:
+        if not config.vad_gate.enabled:
+            return None
+        try:
+            gate = VadGate(config.vad_gate, config.gate_preroll_ms)
+        except Exception:
+            # an unimportable pysilero or a failed session must cost CPU, not
+            # detections: same posture as the ORT and preprocessor patches
+            log.exception("wakeword VAD gate unavailable; scoring every frame")
+            return None
+        log.info(
+            "wakeword VAD gate on: threshold %.2f, %d ms hangover, %d ms pre-roll",
+            config.vad_gate.threshold, config.vad_gate.hangover_ms,
+            config.gate_preroll_ms,
+        )
+        return gate
 
     # -- engine hooks ---------------------------------------------------
 
@@ -165,7 +260,16 @@ class BaseWakewordDetector:
         # the ring first, unconditionally: tail() must show what the mic heard
         # even on a frame the engine declines to score
         self._ring.extend(frame)
-        scores = self._scores(frame)
+        admitted = self._gate.admit(frame, speaking) if self._gate else (frame,)
+        if not admitted:
+            self.scored_last_frame = False
+            return None
+        # everything but the last is pre-roll: it primes the engine's streaming
+        # state and is deliberately not observed, so one call stays one decision
+        for warm in admitted[:-1]:
+            self._scores(warm)
+        scores = self._scores(admitted[-1])
+        self.scored_last_frame = scores is not None
         if scores is None:
             return None
         return self._decide(scores, speaking)
@@ -192,6 +296,9 @@ class BaseWakewordDetector:
     def reset(self) -> None:
         self._engine_reset()
         self._ring.clear()
+        if self._gate is not None:
+            self._gate.reset()
+        self.scored_last_frame = True
         for trigger in self._triggers.values():
             trigger.reset()
 
