@@ -20,7 +20,6 @@ only ever valid as the negative half. See README's --score-wav section.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import shutil
 import subprocess
 import sys
@@ -35,9 +34,15 @@ INSTALL_HINT = (
 
 
 def require_trainer() -> str:
-    """The trainer's console entry point, or a clear exit explaining the install."""
+    """The trainer's console entry point, or a clear exit explaining the install.
+
+    Only the console script is required, deliberately: ww_trainer drags in
+    PyTorch, so it usually lives in a venv of its own with nothing but its
+    `bin` on PATH. Checking that it is importable *here* would reject exactly
+    that arrangement.
+    """
     entry = shutil.which("ww_trainer-train")
-    if entry and importlib.util.find_spec("ww_trainer") is not None:
+    if entry:
         return entry
     print("ww_trainer is not installed in this environment.", file=sys.stderr)
     print(f"It is not published on PyPI; install it from git:\n\n  {INSTALL_HINT}\n",

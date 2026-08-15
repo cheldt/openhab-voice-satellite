@@ -35,7 +35,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from .config import SAMPLE_RATE, Config
+from .config import SAMPLE_RATE, Config, ViolaConfig
 from .wakeword import WAKE, EdgeTrigger, build_detector
 
 # the sweep axes: thresholds worth considering, and the patience values that
@@ -85,6 +85,12 @@ def _override(config: Config, engine: str | None, model: str | None) -> Config:
         return config
     data = config.model_dump()
     if engine is not None:
+        if engine != config.wakeword.engine:
+            # an engine-specific block belongs to the engine that reads it.
+            # Carrying a stage-2 verifier onto an engine that has never heard
+            # of one is the comparison error --compare exists to avoid, and
+            # the receiving engine's validator would reject it outright.
+            data["wakeword"]["viola"] = ViolaConfig().model_dump()
         data["wakeword"]["engine"] = engine
     if model is not None:
         data["wakeword"]["model"] = model

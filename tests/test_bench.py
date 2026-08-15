@@ -7,6 +7,7 @@ import pytest
 
 from openhab_voice_satellite.audio.wav import write_wav
 from openhab_voice_satellite.bench import (
+    _override,
     count_detections,
     score_file,
     score_wavs,
@@ -156,6 +157,21 @@ def test_override_revalidates_instead_of_copying(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="frame_ms"):
         score_wavs(config, [_wav(tmp_path / "a.wav")], engine="violawake",
                    model="wake.onnx")
+
+
+def test_switching_engine_drops_the_previous_engine_s_block(monkeypatch):
+    # the headline A/B is a two-stage violawake config against a single-stage
+    # engine. Carrying viola.verifier onto that engine is both meaningless and
+    # a hard config error, so --compare would fail on the one config it exists
+    # to compare against.
+    config = make_config(
+        "violawake", model="w.onnx",
+        viola={"verifier": {"model": "v.onnx", "mel_basis": "m.npy"}},
+    )
+    swapped = _override(config, "wakeforge", "some_dir")
+    assert swapped.wakeword.viola.verifier.model is None
+    # a model-only override is not an engine change and must keep it
+    assert _override(config, None, "other.onnx").wakeword.viola.verifier.model
 
 
 def test_compare_needs_engine_and_model(tmp_path, monkeypatch):
