@@ -130,7 +130,7 @@ class StubWakeforgeRunner:
         StubWakeforgeRunner.instances.append(self)
 
     def probe(self):
-        return 100.0, 0.0
+        return 100.0, [0.0, 0.0, 0.0]
 
     def score(self, frame):
         self.frames.append(frame)

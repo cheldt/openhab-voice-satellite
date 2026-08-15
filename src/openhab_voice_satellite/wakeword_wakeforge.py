@@ -44,6 +44,13 @@ WINDOW_FRAMES = 50
 # steady-state rate rather than a warm-up one
 PROBE_SECONDS = 1.0
 
+# int16 RMS levels for the startup probe: a very quiet room through a lively
+# one. Deliberately NOT digital zeros — an all-zero buffer drives the MFCC log
+# to its floor, which is an input no model is ever trained on, and a healthy
+# model can score it arbitrarily high. Measured on a good wakeforge model:
+# 0.79 on zeros against 0.01-0.26 on real room tone.
+PROBE_LEVELS = (5.0, 30.0, 200.0)
+
 
 def _sigmoid(x: float) -> float:
     """Logistic, computed on whichever side of zero cannot overflow."""
@@ -105,19 +112,29 @@ class WakeforgeRunner:
             self._warned = True
         return score
 
-    def probe(self) -> tuple[float, float]:
-        """Feature rate in fps, and the score this model gives to silence.
+    def probe(self) -> tuple[float, list[float]]:
+        """Feature rate in fps, and this model's scores for non-speech.
 
-        Both come from one pass over digital silence at construction. The rate
-        is the contract everything else rests on; the silence score catches a
-        head whose output convention does not match the sigmoid applied above,
-        which presents as a detector that fires constantly rather than one that
-        never fires.
+        The rate is the contract everything downstream rests on. The scores
+        exist to catch a head whose output convention does not match the
+        sigmoid applied above: sigmoid over an already-sigmoided head can only
+        land in [0.5, 0.731], so a model that never scores *anything* below 0.5
+        is reporting a probability we are squashing a second time. That is a
+        detector which fires constantly, and it is the failure that looks most
+        like working software.
+
+        Judging the model itself is not this function's job — that needs a
+        corpus, and `--score-wav` is where it happens.
         """
-        silence = np.zeros(int(PROBE_SECONDS * SAMPLE_RATE), dtype=np.float32)
-        features = self._features(silence)
-        fps = len(features) / PROBE_SECONDS
-        return fps, self._head_score(features[-WINDOW_FRAMES:])
+        rng = np.random.default_rng(0)
+        samples = int(PROBE_SECONDS * SAMPLE_RATE)
+        fps, scores = 0.0, []
+        for sigma in PROBE_LEVELS:
+            noise = rng.normal(0.0, sigma, samples).astype(np.float32) / 32768.0
+            features = self._features(noise)
+            fps = len(features) / PROBE_SECONDS
+            scores.append(self._head_score(features[-WINDOW_FRAMES:]))
+        return fps, scores
 
     def score(self, frame: np.ndarray) -> float:
         audio = frame.astype(np.float32) / 32768.0
@@ -150,36 +167,37 @@ class WakeforgeDetector(BaseWakewordDetector):
             for key, directory in directories.items()
         }
         for key, runner in self._runners.items():
-            self._check_contract(key, runner, config.threshold)
+            self._check_contract(key, runner)
         if STOP in self._runners:
             # no shared backbone, unlike openwakeword: the stop pair runs its
             # own featurizer, so it roughly doubles the per-frame cost
             log.info("wakeword stop model runs its own featurizer (double cost)")
 
     @staticmethod
-    def _check_contract(key: str, runner: WakeforgeRunner, threshold: float) -> None:
+    def _check_contract(key: str, runner: WakeforgeRunner) -> None:
         """Prove at startup that this pair scores probabilities at a sane rate.
 
         Named away from `_check`, which is BaseWakewordDetector's decision hook.
         """
-        fps, silence = runner.probe()
+        fps, scores = runner.probe()
         log.info(
             "wakeword model loaded (wakeforge, %s): featurizer %.1f fps, "
-            "%d-frame window ≈ %.0f ms, silence scores %.3f",
+            "%d-frame window ≈ %.0f ms, noise scores %s",
             key, fps, WINDOW_FRAMES, WINDOW_FRAMES * 1000 / fps if fps else 0.0,
-            silence,
+            ", ".join(f"{s:.3f}" for s in scores),
         )
         if not fps:
             raise ValueError(
                 f"wakeforge {key} featurizer produced no frames for "
                 f"{PROBE_SECONDS:.0f} s of audio — it cannot score anything"
             )
-        if silence >= threshold:
+        if min(scores) >= 0.5:
             raise ValueError(
-                f"wakeforge {key} model scores digital silence at {silence:.3f}, "
-                f"at or above wakeword.threshold {threshold} — this detector "
-                f"would fire on an empty room. A head exported with its own "
-                f"sigmoid does exactly this."
+                f"wakeforge {key} model never scores below 0.5 "
+                f"({', '.join(f'{s:.3f}' for s in scores)} on plain noise): its "
+                f"head already applies a sigmoid, and applying a second one "
+                f"squashes every output into [0.5, 0.731]. Export the head "
+                f"without its activation, or this detector fires constantly."
             )
 
     def _scores(self, frame: np.ndarray) -> dict[str, float]:

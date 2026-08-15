@@ -16,6 +16,7 @@ import pytest
 from openhab_voice_satellite import wakeword_wakeforge
 from openhab_voice_satellite.config import WakewordConfig
 from openhab_voice_satellite.wakeword_wakeforge import (
+    PROBE_LEVELS,
     WINDOW_FRAMES,
     WakeforgeDetector,
     WakeforgeRunner,
@@ -115,10 +116,20 @@ def test_reset_drops_the_cache(runner_factory):
     assert runner._cache is None
 
 
-def test_probe_reports_the_feature_rate(runner_factory):
-    fps, silence = runner_factory().probe()
+def test_probe_reports_the_feature_rate_and_one_score_per_level(runner_factory):
+    fps, scores = runner_factory(logits=[0.0, 1.0, 2.0]).probe()
     assert fps == pytest.approx(100.0)  # 16 kHz / hop 160
-    assert silence == pytest.approx(0.5)
+    assert len(scores) == len(PROBE_LEVELS)
+    assert scores[0] == pytest.approx(0.5)
+
+
+def test_the_probe_never_uses_digital_silence(runner_factory):
+    # an all-zero buffer drives the MFCC log to its floor, an input no model is
+    # ever trained on: a healthy wakeforge model scores 0.79 there against
+    # 0.01-0.26 on real room tone. Probing with it rejects good models.
+    runner = runner_factory(logits=[0.0, 0.0, 0.0])
+    runner.probe()
+    assert all(np.any(feed != 0.0) for feed in runner._ext.feeds)
 
 
 def test_missing_half_of_the_pair_names_the_directory(tmp_path, monkeypatch):
@@ -133,21 +144,28 @@ def test_missing_half_of_the_pair_names_the_directory(tmp_path, monkeypatch):
 # -- the startup contract -----------------------------------------------
 
 
-def test_a_model_that_scores_silence_is_rejected(runner_factory, monkeypatch):
+def test_a_double_sigmoid_head_is_rejected(runner_factory, monkeypatch):
     # a head exported with its own sigmoid: the second sigmoid maps [0,1] onto
-    # [0.5, 0.73], so it fires on an empty room rather than never firing
-    runner = runner_factory(logits=[3.0])
-    monkeypatch.setattr(
-        wakeword_wakeforge, "WakeforgeRunner", lambda *a, **k: runner
-    )
-    with pytest.raises(ValueError, match="scores digital silence"):
-        WakeforgeDetector(WakewordConfig(engine="wakeforge", model="d", threshold=0.5))
+    # [0.5, 0.731], so nothing can ever score below 0.5 and the detector fires
+    # constantly rather than never
+    runner = runner_factory(logits=[0.1, 2.0, 0.9])
+    monkeypatch.setattr(wakeword_wakeforge, "WakeforgeRunner", lambda *a, **k: runner)
+    with pytest.raises(ValueError, match="never scores below 0.5"):
+        WakeforgeDetector(WakewordConfig(engine="wakeforge", model="d"))
+
+
+def test_a_model_that_merely_scores_noise_high_is_not_rejected(runner_factory, monkeypatch):
+    # one high score is a model judgement, and judging models needs a corpus.
+    # Refusing to load here would reject a healthy model on synthetic noise.
+    runner = runner_factory(logits=[3.0, -4.0, 3.0])
+    monkeypatch.setattr(wakeword_wakeforge, "WakeforgeRunner", lambda *a, **k: runner)
+    WakeforgeDetector(WakewordConfig(engine="wakeforge", model="d", threshold=0.5))
 
 
 def test_a_featurizer_that_produces_nothing_is_rejected(monkeypatch):
     class Deaf:
         def probe(self):
-            return 0.0, 0.0
+            return 0.0, [0.0]
 
     monkeypatch.setattr(wakeword_wakeforge, "WakeforgeRunner", lambda *a, **k: Deaf())
     with pytest.raises(ValueError, match="produced no frames"):
