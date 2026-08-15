@@ -5,3 +5,4 @@ models/
 config.yaml
 .pytest_cache/
 .claude/
+.feature_cache/
