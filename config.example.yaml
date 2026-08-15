@@ -9,8 +9,8 @@ audio:
   wakeup_preamble_idle_s: 60  # gap that counts as idle; match the speaker's mute delay (0 = preamble before every sound)
 
 wakeword:
-  engine: "openwakeword"    # or "violawake" (better benchmarks, but no pretrained phrases — you train the model)
-  model: "hey_jarvis"       # openWakeWord pretrained name or path to a custom .onnx
+  engine: "openwakeword"    # or "violawake" / "wakeforge" (better benchmarks, but no pretrained phrases — you train the model)
+  model: "hey_jarvis"       # openWakeWord pretrained name, path to a custom .onnx, or (wakeforge) a model DIRECTORY
   threshold: 0.5
   threshold_speaking: 0.7   # raised while TTS is audible (echo mitigation)
   stop_model: null          # optional: path to a custom-trained "stop" model (.onnx)
@@ -48,6 +48,14 @@ wakeword:
   #     mel_basis: null       # path to the matching verifier_melfb_40.npy
   #     threshold: 0.1        # verifier score needed to release a wake
   #     delay_ms: 300         # audio gathered past the trigger before scoring
+  # Only used when engine is "wakeforge". wakeword.model names the directory
+  # ww_trainer wrote; these are the two filenames inside it. The defaults are
+  # what ww_trainer-quickstart writes, ww_trainer-train names them after the
+  # featurizer and head instead. Like violawake, stop_model here runs its own
+  # featurizer and roughly doubles the per-frame CPU.
+  # wakeforge:
+  #   featurizer: "best_f1_featurizer.onnx"
+  #   head: "best_f1.onnx"
 
 vad:
   threshold: 0.5

@@ -120,11 +120,30 @@ class ViolaConfig(BaseModel):
     verifier: ViolaVerifierConfig = Field(default_factory=ViolaVerifierConfig)
 
 
+class WakeforgeConfig(BaseModel):
+    """Filenames inside a wakeforge training output directory.
+
+    `wakeword.model` names the directory, not a file, because wakeforge exports
+    a featurizer and a head that only work as the pair they were trained as.
+    Pointing at one file and picking up the other from elsewhere in the config
+    is a mismatch nothing downstream can detect, so the pair is addressed by
+    the one thing that keeps them together.
+
+    The defaults are what `ww_trainer-quickstart` writes; `ww_trainer-train`
+    names them after the featurizer and head instead, hence the overrides.
+    An absolute override wins outright, since Path(dir) / "/abs" is "/abs".
+    """
+
+    featurizer: str = "best_f1_featurizer.onnx"
+    head: str = "best_f1.onnx"
+
+
 class WakewordConfig(BaseModel):
     # "openwakeword": pretrained phrase name or custom .onnx.
     # "violawake": registry name ("temporal_cnn") or a path to a .onnx you
     # trained — it ships no pretrained phrase library.
-    engine: Literal["openwakeword", "violawake"] = "openwakeword"
+    # "wakeforge": a training output directory holding a featurizer + head pair.
+    engine: Literal["openwakeword", "violawake", "wakeforge"] = "openwakeword"
     model: str = "hey_jarvis"
     threshold: float = Field(0.5, ge=0.0, le=1.0)
     threshold_speaking: float = Field(0.7, ge=0.0, le=1.0)
@@ -146,6 +165,8 @@ class WakewordConfig(BaseModel):
     verifier_threshold: float = Field(0.1, ge=0.0, le=1.0)
     # engine == "violawake" only; ignored otherwise
     viola: ViolaConfig = Field(default_factory=ViolaConfig)
+    # engine == "wakeforge" only; ignored otherwise
+    wakeforge: WakeforgeConfig = Field(default_factory=WakeforgeConfig)
 
     @property
     def effective_stop_threshold_speaking(self) -> float:
@@ -368,6 +389,35 @@ class Config(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _wakeforge_supported(self) -> Config:
+        """Reject the wakeforge settings that fail silently at runtime."""
+        if self.wakeword.engine != "wakeforge":
+            return self
+        if self.wakeword.verifier_model or self.wakeword.stop_verifier_model:
+            raise ValueError(
+                "wakeword.verifier_model is an openwakeword feature and has no "
+                "effect with engine 'wakeforge' — remove it or switch engines"
+            )
+        if self.wakeword.viola != ViolaConfig():
+            # --compare swaps engine and model but carries the rest of the
+            # config across, so a viola block outlives the engine that read it
+            raise ValueError(
+                "wakeword.viola settings have no effect with engine 'wakeforge' "
+                "— remove them or switch engines"
+            )
+        if self.wakeword.model == WakewordConfig.model_fields["model"].default:
+            raise ValueError(
+                f"engine 'wakeforge' needs wakeword.model set to a directory "
+                f"holding a featurizer and a head trained with ww_trainer; "
+                f"{self.wakeword.model!r} is an openwakeword phrase"
+            )
+        # no frame_ms rule here on purpose: violawake's 20 ms unit is a fixed
+        # SDK constant, but wakeforge's feature hop is a property of the model
+        # you trained. The equivalent check runs against the real .onnx at
+        # detector construction, which is what --check exercises.
+        return self
+
 
 def _resolve_config_paths(config: Config, base: Path) -> Config:
     """Rewrite config-relative paths to absolute ones, relative to `base`.
@@ -381,10 +431,12 @@ def _resolve_config_paths(config: Config, base: Path) -> Config:
     }
     wakeword = config.wakeword
     # only path-shaped values: pretrained openwakeword phrases ("hey_jarvis")
-    # and violawake registry names ("temporal_cnn") must pass through verbatim
+    # and violawake registry names ("temporal_cnn") must pass through verbatim.
+    # wakeforge's model is a directory, so suffix-matching cannot spot it.
     for field in ("model", "stop_model", "verifier_model", "stop_verifier_model"):
         value = getattr(wakeword, field)
-        if value and value.endswith((".onnx", ".tflite", ".pkl")):
+        directory = wakeword.engine == "wakeforge" and field in ("model", "stop_model")
+        if value and (directory or value.endswith((".onnx", ".tflite", ".pkl"))):
             setattr(wakeword, field, _resolve_path(value, base))
     verifier = wakeword.viola.verifier
     for field in ("model", "mel_basis"):

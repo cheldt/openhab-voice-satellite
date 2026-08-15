@@ -47,13 +47,14 @@ def main() -> None:
     )
     parser.add_argument("--model", help="override wakeword.model for --score-wav")
     parser.add_argument(
-        "--engine", choices=("openwakeword", "violawake"),
+        "--engine", choices=("openwakeword", "violawake", "wakeforge"),
         help="override wakeword.engine for --score-wav",
     )
     parser.add_argument(
         "--compare", metavar="ENGINE:MODEL",
         help="score a second model over the same frames, e.g. "
-             "openwakeword:models/wakeword/shodan_listen.onnx",
+             "openwakeword:models/wakeword/shodan_listen.onnx or "
+             "wakeforge:models/wakeword/wakeforge/my_wake (a directory)",
     )
     parser.add_argument(
         "--positives", type=Path, metavar="DIR",

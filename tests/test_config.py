@@ -178,6 +178,45 @@ def test_violawake_rejects_the_openwakeword_default_model():
         Config.model_validate({"wakeword": {"engine": "violawake"}})
 
 
+def test_wakeforge_rejects_the_openwakeword_default_model():
+    with pytest.raises(ValueError, match="openwakeword phrase"):
+        Config.model_validate({"wakeword": {"engine": "wakeforge"}})
+
+
+def test_wakeforge_rejects_settings_belonging_to_other_engines():
+    with pytest.raises(ValueError, match="verifier_model"):
+        Config.model_validate(
+            {"wakeword": {"engine": "wakeforge", "model": "d",
+                          "verifier_model": "v.pkl"}}
+        )
+    # --compare swaps engine and model but carries the rest across, so a
+    # viola block can outlive the engine that read it
+    with pytest.raises(ValueError, match="wakeword.viola"):
+        Config.model_validate(
+            {"wakeword": {"engine": "wakeforge", "model": "d",
+                          "viola": {"verifier": {"model": "v.onnx",
+                                                 "mel_basis": "m.npy"}}}}
+        )
+
+
+def test_wakeforge_takes_any_frame_size():
+    # unlike violawake's fixed 20 ms unit, the hop is a property of the model
+    # you trained, so the check belongs against the .onnx and not here
+    for frame_ms in (30, 80, 240):
+        Config.model_validate(
+            {"wakeword": {"engine": "wakeforge", "model": "d"},
+             "audio": {"frame_ms": frame_ms}}
+        )
+
+
+def test_wakeforge_model_directory_resolves_relative_to_the_config_file(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("wakeword:\n  engine: wakeforge\n  model: models/my_wake\n")
+    # a directory has no suffix to match on, so the resolver has to know the
+    # engine — otherwise it silently stays relative to the working directory
+    assert load_config(path).wakeword.model == str(tmp_path / "models/my_wake")
+
+
 def test_violawake_adaptive_band_must_be_ordered():
     with pytest.raises(ValueError, match="min_threshold"):
         Config.model_validate(

@@ -16,6 +16,8 @@ to the local engines automatically on any error.
 engine stays loaded and takes over per request when the cloud call fails.)
 
 - **Wakeword**: openWakeWord (`hey_jarvis` by default), always listening.
+  Two alternative engines behind the same decision logic: `violawake` and
+  `wakeforge` (see [deploy/install.md](deploy/install.md)).
 - **STT**: faster-whisper `small` int8, auto-detects German/English.
   Optional cloud STT via `stt.engine: "gemini"` or `"deepgram"` (Nova-3);
   whisper remains loaded and any cloud failure degrades to it for that
@@ -63,6 +65,8 @@ python3 -m venv .venv
 .venv/bin/pip install --no-deps 'openwakeword==0.6.0'   # see note in pyproject.toml
 # optional second wakeword engine (wakeword.engine: violawake), see deploy/install.md:
 # .venv/bin/pip install --no-deps 'violawake==0.2.10' && .venv/bin/pip install pysbd
+# the third engine (wakeword.engine: wakeforge) needs no install: onnxruntime
+# is already a dependency, and its models are trained on a workstation
 .venv/bin/python scripts/download_models.py
 cp config.example.yaml config.yaml             # edit devices + openHAB url/token
 .venv/bin/openhab-voice-satellite --list-devices
@@ -91,6 +95,10 @@ would have emitted:
 .venv/bin/openhab-voice-satellite --score-wav recordings/negatives/ \
     --compare openwakeword:models/wakeword/my_wake.onnx
 
+# a wakeforge model is a directory, so it goes in the same slot
+.venv/bin/openhab-voice-satellite --score-wav recordings/negatives/ \
+    --compare wakeforge:models/wakeword/wakeforge/my_wake
+
 # the promotion gate: recall against false accepts per hour
 .venv/bin/openhab-voice-satellite --positives recordings/wake/ \
     --negatives recordings/room/
@@ -104,9 +112,18 @@ positives in the voice and room that will actually use them: a model trained
 on your voice scores near zero on synthesized speech, so a TTS corpus is only
 valid as the negative half.
 
+Two things to read carefully. The sweep replays `EdgeTrigger` over stage-1
+scores, so on a config with `viola.verifier` set it counts stage-1 triggers,
+most of which the verifier then swallows — every report therefore also carries
+a `live` count, which is what the detector itself returned, and `--compare`
+across that asymmetry prints both tables and refuses to name a winner. And
+`--compare` paths resolve against the working directory, not against the
+config file.
+
 Tests: `.venv/bin/pytest` (fast; the GStreamer tests skip without PyGObject).
 `OVS_TEST_VIOLA_MODEL=path/to/wake.onnx` additionally runs the violawake
-integration test against a real model instead of the stub.
+integration test against a real model instead of the stub, and
+`OVS_TEST_WAKEFORGE_MODEL=path/to/model_dir` does the same for wakeforge.
 Three env vars dump audio for debugging, each taking a directory:
 `OVS_DUMP_UTTERANCES` (the recorded utterance, after the wakeword) and
 `OVS_DUMP_WAKE` (the audio *around* a detection, which is the only way to
@@ -153,8 +170,9 @@ Everything lives in one YAML file — see the extensively commented
 |---|---|
 | `audio.input_device` / `output_device` | substring of a PipeWire node name or description (`--list-devices`); `null` = default node |
 | `audio.wakeup_preamble_ms` / `wakeup_preamble_idle_s` | ramped-noise lead-in that wakes powered speakers whose signal-sensing mute swallows the first sound after an idle period (details in [deploy/install.md](deploy/install.md)) |
-| `wakeword.engine` | `openwakeword` (default) or `violawake` — see [deploy/install.md](deploy/install.md) before switching |
-| `wakeword.model` | pretrained openWakeWord name or path to custom `.onnx` (violawake: a model you trained, it ships no phrases) |
+| `wakeword.engine` | `openwakeword` (default), `violawake` or `wakeforge` — see [deploy/install.md](deploy/install.md) before switching |
+| `wakeword.model` | pretrained openWakeWord name, or a path to something you trained: a `.onnx` for violawake, a *directory* holding a featurizer + head pair for wakeforge. Neither of those two ships pretrained phrases |
+| `wakeword.wakeforge.featurizer` / `head` | filenames inside that directory; the defaults are what `ww_trainer-quickstart` writes |
 | `wakeword.threshold_speaking` | raised threshold while our own output is audible (echo mitigation) |
 | `wakeword.stop_threshold_speaking` | same for the stop model, which by definition runs during playback; `null` = reuse `stop_threshold` |
 | `wakeword.patience` / `stop_patience` | consecutive frames above threshold before firing; `2` rejects single-frame spikes for 80 ms of latency |

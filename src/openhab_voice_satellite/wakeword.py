@@ -206,6 +206,10 @@ def build_detector(config: Config) -> WakewordProtocol:
         from .wakeword_viola import ViolaWakeDetector
 
         return ViolaWakeDetector(config.wakeword, config.audio.frame_ms)
+    if config.wakeword.engine == "wakeforge":
+        from .wakeword_wakeforge import WakeforgeDetector
+
+        return WakeforgeDetector(config.wakeword)
     from .wakeword_oww import OpenWakewordDetector
 
     return OpenWakewordDetector(config.wakeword)

@@ -12,7 +12,7 @@ import types
 
 from openhab_voice_satellite.config import AudioConfig, WakewordConfig
 
-ENGINES = ("openwakeword", "violawake")
+ENGINES = ("openwakeword", "violawake", "wakeforge")
 
 
 # -- openwakeword ------------------------------------------------------
@@ -119,6 +119,47 @@ def install_violawake(monkeypatch) -> types.ModuleType:
     return package
 
 
+# -- wakeforge ---------------------------------------------------------
+
+
+class StubWakeforgeRunner:
+    """One instance per configured model directory, keyed by its basename.
+
+    Stubbed at the runner rather than at onnxruntime: ORT is a real dependency
+    other code in this process uses, so it must not be faked out of sys.modules.
+    The runner's own caching and scaling are covered against fake sessions in
+    tests/test_wakeword_wakeforge.py.
+    """
+
+    scripts: dict[str, list[float]] = {}
+    instances: list["StubWakeforgeRunner"] = []
+
+    def __init__(self, directory, featurizer, head):
+        self.directory = directory
+        self.featurizer = featurizer
+        self.head = head
+        self.resets = 0
+        self.frames: list[object] = []
+        StubWakeforgeRunner.instances.append(self)
+
+    def probe(self):
+        return 100.0, 0.0
+
+    def score(self, frame):
+        self.frames.append(frame)
+        script = StubWakeforgeRunner.scripts.get(self.directory, [])
+        return script.pop(0) if script else 0.0
+
+    def reset(self):
+        self.resets += 1
+
+
+def install_wakeforge(monkeypatch) -> None:
+    from openhab_voice_satellite import wakeword_wakeforge
+
+    monkeypatch.setattr(wakeword_wakeforge, "WakeforgeRunner", StubWakeforgeRunner)
+
+
 def reset_stub_state() -> None:
     StubModel.scripts = {}
     StubModel.outputs = {}
@@ -128,6 +169,8 @@ def reset_stub_state() -> None:
     StubNoiseProfiler.instances = []
     StubPowerManager.decisions = []
     StubPowerManager.instances = []
+    StubWakeforgeRunner.scripts = {}
+    StubWakeforgeRunner.instances = []
 
 
 # -- construction ------------------------------------------------------
@@ -144,6 +187,13 @@ def make_detector(engine: str, monkeypatch, scripts: dict[str, list[float]],
         from openhab_voice_satellite.wakeword_oww import OpenWakewordDetector
 
         return OpenWakewordDetector(config)
+
+    if engine == "wakeforge":
+        install_wakeforge(monkeypatch)
+        StubWakeforgeRunner.scripts = scripts
+        from openhab_voice_satellite.wakeword_wakeforge import WakeforgeDetector
+
+        return WakeforgeDetector(config)
 
     install_violawake(monkeypatch)
     StubWakeDetector.scripts = scripts

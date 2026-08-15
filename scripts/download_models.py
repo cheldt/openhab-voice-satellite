@@ -64,6 +64,19 @@ def download_violawake(model: str) -> None:
     print(f"  ready: {get_model_path(model)}")
 
 
+def check_wakeforge(directory: str, forge) -> None:
+    """Report on a wakeforge pair; there is no registry to fetch one from.
+
+    ww_trainer needs PyTorch and several gigabytes of corpora, so the pair is
+    trained on a workstation and copied here — see deploy/install.md.
+    """
+    print(f"wakeforge model ({directory}):")
+    for name in (forge.featurizer, forge.head):
+        path = Path(directory) / name
+        state = "ready" if path.exists() else "MISSING, train it first"
+        print(f"  {state}: {path}")
+
+
 def download_piper(models_dir: Path) -> None:
     print("Piper TTS models:")
     for name, url in PIPER_FILES.items():
@@ -92,12 +105,19 @@ def main() -> None:
         stt_model, compute_type = config.stt.model, config.stt.compute_type
         wakeword = config.wakeword
 
-    # violawake runs on openWakeWord's feature models either way
-    download_openwakeword()
-    if wakeword is not None and wakeword.engine == "violawake":
+    engine = wakeword.engine if wakeword is not None else "openwakeword"
+    # violawake runs on openWakeWord's feature models; wakeforge ships its own
+    # featurizer and needs nothing from that download
+    if engine != "wakeforge":
+        download_openwakeword()
+    if engine == "violawake":
         for model in (wakeword.model, wakeword.stop_model):
             if model:
                 download_violawake(model)
+    elif engine == "wakeforge":
+        for model in (wakeword.model, wakeword.stop_model):
+            if model:
+                check_wakeforge(model, wakeword.wakeforge)
     download_piper(REPO_ROOT / "models")
     warm_whisper(stt_model, compute_type)
     print("all models ready")

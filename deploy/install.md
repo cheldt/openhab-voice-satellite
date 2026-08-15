@@ -109,12 +109,51 @@ far above `ms/frame` is a spinning thread pool.
 
 Model provisioning: `scripts/download_models.py` reads `wakeword.engine` from
 your config and fetches registry models automatically; custom `.onnx` files it
-only checks for. The shared openWakeWord backbone is downloaded either way.
+only checks for. The shared openWakeWord backbone is downloaded for this engine
+and for openWakeWord itself, but not for wakeforge, which ships its own
+featurizer.
 Set the cache location for the service user, since the default is `~/.violawake`:
 
 ```bash
 export VIOLAWAKE_MODEL_DIR=/opt/openhab-voice-satellite/models/violawake
 ```
+
+### Optional: the wakeforge engine (`wakeword.engine: wakeforge`)
+
+[wakeforge](https://github.com/TigreGotico/wakeforge) (Apache-2.0) trains a
+featurizer and a classifier head and exports both as ONNX. At runtime that is
+all it is, so unlike the other two engines there is **nothing to install** —
+`onnxruntime` and `numpy` are already dependencies, and the inference lives in
+`wakeword_wakeforge.py`. Four things to know before switching:
+
+- **The trainer does not run on the device.** `ww_trainer` needs PyTorch,
+  torchaudio, librosa and several GB of corpora, and it is not published on
+  PyPI. Train on a workstation and copy the two `.onnx` files over:
+
+  ```bash
+  pip install "ww_trainer @ git+https://github.com/TigreGotico/wakeforge@dev"
+  python scripts/train_wakeforge.py "showdaan listen" showdaan_v1
+  ```
+
+  The wrapper writes to `models/wakeword/wakeforge/<name>/` and finishes by
+  printing the `--compare` line that judges the result.
+- **`wakeword.model` is a directory**, not a file. The featurizer and head only
+  work as the pair they were trained as, so they are addressed by the thing
+  that keeps them together. Override the filenames with
+  `wakeword.wakeforge.featurizer` / `.head` if you used `ww_trainer-train`
+  rather than the quickstart, which names them differently.
+- **The head scores a 500 ms window** — 50 feature frames at a 10 ms hop, which
+  is shorter than most wake phrases. That is upstream's trained window, not a
+  knob. The rate is verified against the real model at startup and logged:
+  `featurizer 100.0 fps, 50-frame window ≈ 500 ms`.
+- **`stop_model` costs roughly double**, as with violawake: the stop pair runs
+  its own featurizer, there is no shared backbone. Upstream suggests a live
+  threshold of 0.5–0.6 rather than whatever a per-clip sweep says is optimal.
+
+Startup rejects a pair that scores digital silence at or above your threshold.
+That is not a hypothetical: a head exported with its own sigmoid gets squashed
+into [0.5, 0.73] by the sigmoid applied here, which fires constantly rather
+than never — the failure that looks like working software.
 
 ### Optional: per-speaker verifier models
 
