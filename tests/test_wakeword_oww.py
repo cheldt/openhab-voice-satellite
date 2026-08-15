@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from openhab_voice_satellite.config import SAMPLE_RATE
+
 from .wakeword_stubs import StubModel, make_detector, reset_stub_state
 
 FRAME = np.zeros(1280, dtype=np.int16)
@@ -27,8 +29,11 @@ def test_detector_survives_unpatchable_model(detector_factory, caplog):
     with caplog.at_level("WARNING"):
         detector = detector_factory({"wake": [0.9]}, model="wake")
     assert "preprocessor patch skipped" in caplog.text
-    assert detector.process(FRAME) == "wake"
-    assert detector.tail(1.0) is None  # no ring to read a pre-roll from
+    frame = np.arange(1280, dtype=np.int16)
+    assert detector.process(frame) == "wake"
+    # the tail ring belongs to BaseWakewordDetector, not to the patch, so a
+    # wake-audio dump still has audio to write when the patch fails open
+    assert np.array_equal(detector.tail(1280 / SAMPLE_RATE), frame)
 
 
 def test_duplicate_model_basenames_fail_fast(detector_factory):

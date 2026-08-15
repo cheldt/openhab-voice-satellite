@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import SAMPLE_RATE, WakewordConfig
+from .config import WakewordConfig
 from .wakeword import STOP, WAKE, BaseWakewordDetector
 from .wakeword_buffer import patch_preprocessor
 
@@ -33,7 +33,10 @@ class OpenWakewordDetector(BaseWakewordDetector):
         except TypeError:
             log.warning("openwakeword lacks ncpu kwarg; upgrade to >=0.6.0 to bound CPU")
             self._model = Model(wakeword_models=models, inference_framework="onnx")
-        self._ring = patch_preprocessor(self._model)
+        # the patch's own ring serves openwakeword's melspectrogram; the ring
+        # behind tail() belongs to BaseWakewordDetector. Kept only so a skipped
+        # patch is visible at construction rather than as a mystery later.
+        self._patched = patch_preprocessor(self._model) is not None
         # openwakeword builds .models by zipping paths with derived names in
         # order (model.py:143), so position maps back to our list — but only
         # while the names stay distinct and single-output
@@ -94,8 +97,3 @@ class OpenWakewordDetector(BaseWakewordDetector):
 
     def _engine_reset(self) -> None:
         self._model.reset()
-
-    def tail(self, seconds: float) -> np.ndarray | None:
-        if self._ring is None:
-            return None
-        return self._ring.tail(int(seconds * SAMPLE_RATE)).copy()

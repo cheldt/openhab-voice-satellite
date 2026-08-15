@@ -26,13 +26,8 @@ from .violawake_ort import (
     single_threaded_sessions,
 )
 from .wakeword import STOP, WAKE, BaseWakewordDetector
-from .wakeword_buffer import Int16Ring
 
 log = logging.getLogger(__name__)
-
-# raw audio kept for tail(); matches openwakeword's own buffer so wake-audio
-# dumps look the same whichever engine produced the detection
-TAIL_SECONDS = 10
 
 # the stage-2 verifier scores exactly the 1.5 s window its training used
 VERIFIER_CLIP_SAMPLES = int(1.5 * SAMPLE_RATE)
@@ -76,7 +71,6 @@ class ViolaWakeDetector(BaseWakewordDetector):
         )
         self._verify_countdown: int | None = None
         self.last_verifier_score: float | None = None
-        self._ring = Int16Ring(SAMPLE_RATE * TAIL_SECONDS)
         self._profiler = self._build_profiler(config, frame_ms)
         self._power = self._build_power_manager(config)
         self._adapted: float | None = None
@@ -160,9 +154,8 @@ class ViolaWakeDetector(BaseWakewordDetector):
         )
 
     def _scores(self, frame: np.ndarray) -> dict[str, float] | None:
-        # the ring feeds tail(), so it records what the mic heard even on the
-        # frames the power manager declines to score
-        self._ring.extend(frame)
+        # the tail ring is filled by BaseWakewordDetector.process before this
+        # runs, so the frames the power manager declines to score still reach it
         if self._power is not None or self._profiler is not None:
             # both expect the int16-scale float array violawake builds internally
             pcm = frame.astype(np.float32)
@@ -228,9 +221,5 @@ class ViolaWakeDetector(BaseWakewordDetector):
     def _engine_reset(self) -> None:
         for engine in self._engines.values():
             engine.reset()
-        self._ring.clear()
         self._verify_countdown = None
         self.last_verifier_score = None
-
-    def tail(self, seconds: float) -> np.ndarray | None:
-        return self._ring.tail(int(seconds * SAMPLE_RATE)).copy()

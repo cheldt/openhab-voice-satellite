@@ -16,11 +16,16 @@ from typing import Protocol
 
 import numpy as np
 
-from .config import Config, WakewordConfig
+from .config import SAMPLE_RATE, Config, WakewordConfig
+from .wakeword_buffer import Int16Ring
 
 log = logging.getLogger(__name__)
 
 RECENT_SCORES = 16  # per-model score history; must exceed the patience cap
+
+# raw audio kept for tail(), matching openwakeword's own buffer length so
+# wake-audio dumps look the same whichever engine produced the detection
+TAIL_SECONDS = 10
 
 WAKE = "wake"
 STOP = "stop"
@@ -96,13 +101,20 @@ class BaseWakewordDetector:
 
     The decision itself lives in `EdgeTrigger`, one per configured model.
 
-    Subclasses implement `_scores` and `_engine_reset`; `tail` is optional.
+    Subclasses implement `_scores` and `_engine_reset`.
+
+    The raw-audio ring behind `tail()` lives here rather than in the engines,
+    and `process` fills it before anything else runs. Engine-owned rings could
+    not make that promise: openwakeword's is filled inside `predict()`, so any
+    frame an engine declines to score would leave a hole in the audio a
+    detection dump is supposed to show.
     """
 
     def __init__(self, config: WakewordConfig) -> None:
         self._config = config
         keys = [WAKE] + ([STOP] if config.stop_model else [])
         self._triggers: dict[str, EdgeTrigger] = {key: EdgeTrigger() for key in keys}
+        self._ring = Int16Ring(SAMPLE_RATE * TAIL_SECONDS)
 
     # -- engine hooks ---------------------------------------------------
 
@@ -119,12 +131,13 @@ class BaseWakewordDetector:
         raise NotImplementedError
 
     def tail(self, seconds: float) -> np.ndarray | None:
-        """Newest `seconds` of raw mic audio, or None if the engine has none.
+        """Newest `seconds` of raw mic audio.
 
         The window predates the detection that prompted the call, which is
         what makes it useful; reset() clears it, so read before resetting.
+        Copied because `Int16Ring.tail` can hand back a live view.
         """
-        return None
+        return self._ring.tail(int(seconds * SAMPLE_RATE)).copy()
 
     # -- decision -------------------------------------------------------
 
@@ -149,9 +162,16 @@ class BaseWakewordDetector:
 
     def process(self, frame: np.ndarray, speaking: bool = False) -> str | None:
         """Return 'wake' or 'stop' on detection, else None."""
+        # the ring first, unconditionally: tail() must show what the mic heard
+        # even on a frame the engine declines to score
+        self._ring.extend(frame)
         scores = self._scores(frame)
         if scores is None:
             return None
+        return self._decide(scores, speaking)
+
+    def _decide(self, scores: dict[str, float], speaking: bool) -> str | None:
+        """Advance every trigger with this frame's scores and read the verdict."""
         # every model's history advances on every frame, even when an earlier
         # model already fired — a gap would corrupt the patience window
         for key, trigger in self._triggers.items():
@@ -171,6 +191,7 @@ class BaseWakewordDetector:
 
     def reset(self) -> None:
         self._engine_reset()
+        self._ring.clear()
         for trigger in self._triggers.values():
             trigger.reset()
 
