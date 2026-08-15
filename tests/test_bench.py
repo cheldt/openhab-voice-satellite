@@ -7,6 +7,7 @@ import pytest
 
 from openhab_voice_satellite.audio.wav import write_wav
 from openhab_voice_satellite.bench import (
+    FLUSH_MS,
     _override,
     count_detections,
     score_file,
@@ -35,6 +36,24 @@ def _clean_stubs():
 def _wav(path, seconds=1.0):
     write_wav(path, np.zeros(int(SAMPLE_RATE * seconds), dtype=np.int16), SAMPLE_RATE)
     return path
+
+
+# score_file appends FLUSH_MS of silence after every file so a deferred verdict
+# can land; at 80 ms frames that is 12 more calls into the scripted engine
+FLUSH_FRAMES = FLUSH_MS // 80
+
+
+def _script(*per_file):
+    """One 1 s file's worth of scores per argument, each padded for the flush.
+
+    Files are scored in order, from one shared script, so a test that sizes its
+    script to the real frames alone has the next file reading the previous
+    file's flush.
+    """
+    out = []
+    for scores in per_file:
+        out += list(scores) + [0.0] * FLUSH_FRAMES
+    return out
 
 
 def _viola_config(monkeypatch, scripts, **kwargs):
@@ -208,7 +227,7 @@ def test_gate_names_a_clean_operating_point(tmp_path, monkeypatch, capsys):
     _wav(positives / "p.wav")
     _wav(negatives / "n.wav")
     # a separable model: the positive file scores 0.95, the negative 0.10
-    config = _viola_config(monkeypatch, {"wake": [0.95] * 12 + [0.10] * 12})
+    config = _viola_config(monkeypatch, {"wake": _script([0.95] * 12, [0.10] * 12)})
     assert score_wavs(config, [], positives=positives, negatives=negatives) == 0
     out = capsys.readouterr().out
     # every cell from 0.30 to 0.95 is clean at 100% recall; the pick has to be
@@ -225,7 +244,7 @@ def test_gate_says_so_when_nothing_separates(tmp_path, monkeypatch, capsys):
     _wav(negatives / "n.wav")
     # the shipped failure: the negative outscores the positive, as
     # shodan_listen_viola_wake.onnx does on real speech
-    config = _viola_config(monkeypatch, {"wake": [0.32] * 12 + [0.85] * 12})
+    config = _viola_config(monkeypatch, {"wake": _script([0.32] * 12, [0.85] * 12)})
     assert score_wavs(config, [], positives=positives, negatives=negatives) == 0
     assert "NO CLEAN OPERATING POINT" in capsys.readouterr().out
 
@@ -239,7 +258,7 @@ def test_gate_refuses_to_pass_a_model_that_never_fires(tmp_path, monkeypatch, ca
     _wav(negatives / "n.wav")
     # scores below every swept threshold: zero false accepts, but zero recall.
     # "no false accepts" must not read as a pass when nothing fires at all
-    config = _viola_config(monkeypatch, {"wake": [0.05] * 24})
+    config = _viola_config(monkeypatch, {"wake": _script([0.05] * 12, [0.05] * 12)})
     assert score_wavs(config, [], positives=positives, negatives=negatives) == 0
     out = capsys.readouterr().out
     assert "NO CLEAN OPERATING POINT" in out
@@ -267,7 +286,7 @@ def test_gate_finds_the_operating_point_of_a_saturated_model(
     # a sigmoid head that saturates: separable, but only above 0.99, where a
     # grid ending at 0.99 would report NO CLEAN OPERATING POINT for a model
     # that is in fact perfectly usable
-    config = _viola_config(monkeypatch, {"wake": [0.9999] * 12 + [0.999] * 12})
+    config = _viola_config(monkeypatch, {"wake": _script([0.9999] * 12, [0.999] * 12)})
     assert score_wavs(config, [], positives=positives, negatives=negatives) == 0
     out = capsys.readouterr().out
     assert "[clean]" in out
@@ -281,12 +300,29 @@ def test_separation_line_names_an_overlap(tmp_path, monkeypatch, capsys):
     negatives.mkdir()
     _wav(positives / "p.wav")
     _wav(negatives / "n.wav")
-    config = _viola_config(monkeypatch, {"wake": [0.32] * 12 + [0.85] * 12})
+    config = _viola_config(monkeypatch, {"wake": _script([0.32] * 12, [0.85] * 12)})
     score_wavs(config, [], positives=positives, negatives=negatives)
     assert "[OVERLAPPING]" in capsys.readouterr().out
 
 
 # -- the second stage the sweep cannot see ------------------------------
+
+
+def test_a_deferred_wake_is_flushed_out_before_the_file_is_scored(
+    tmp_path, monkeypatch
+):
+    # violawake holds each WAKE for viola.verifier.delay_ms so the verifier can
+    # score a finished phrase. A wakeword clip ends right after the phrase, so
+    # without a flush the verdict dies with the file: measured 42% recall on a
+    # detector whose real figure is 98%.
+    config = _two_stage_config(
+        monkeypatch, {"wake": [0.9] * 200}, verdict=1.0, threshold=0.4
+    )
+    # 1 s of audio: stage 1 fires inside it, the verifier resolves after it
+    result = score_file(config, _wav(tmp_path / "wake.wav", seconds=1.0))
+    assert result.live >= 1
+    # and the synthetic frames stay out of everything the corpus is measured by
+    assert len(result.scores) == 12
 
 
 def test_live_counts_what_process_returned_not_what_the_sweep_swept(

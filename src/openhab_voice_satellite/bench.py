@@ -49,6 +49,17 @@ SWEEP_PATIENCE = (1, 2, 3)
 
 WAV_SUFFIXES = (".wav",)
 
+# Silence appended after every file before the detector is read.
+#
+# A detector may defer a verdict past the frame that triggered it — violawake
+# holds each WAKE for `viola.verifier.delay_ms` so the verifier can score a
+# finished phrase. Live that costs nothing, because the mic keeps supplying
+# frames. A file just ends, and the pending verdict dies with it: on 1 s
+# wakeword clips that read as 42 % recall for a detector measured at 98 %.
+# A quiet room after the phrase is what the flush imitates. It is the longest
+# deferral the config permits (ViolaVerifierConfig.delay_ms caps at 1000).
+FLUSH_MS = 1000
+
 
 class FrameScores(NamedTuple):
     """One WAV's per-frame wake scores, plus what the app would have emitted.
@@ -123,6 +134,13 @@ def score_file(config: Config, path: Path) -> FrameScores:
         # the same run
         scored = getattr(detector, "scored_last_frame", True)
         scores.append(detector.score(WAKE) if scored else float("nan"))
+    # the flush feeds `live` only: these frames are not audio the corpus
+    # contained, so they must not reach the sweep, the percentiles, or the
+    # frame count the false-accepts-per-hour figure divides by
+    silence = np.zeros(n, dtype=pcm.dtype)
+    for _ in range(FLUSH_MS // config.audio.frame_ms):
+        if detector.process(silence) == WAKE:
+            live += 1
     return FrameScores(np.asarray(scores, dtype=np.float64), live)
 
 
