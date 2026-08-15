@@ -14,7 +14,9 @@ from openhab_voice_satellite.bench import (
 from openhab_voice_satellite.config import SAMPLE_RATE
 from openhab_voice_satellite.wakeword import EdgeTrigger
 from .wakeword_stubs import (
+    StubModel,
     StubWakeDetector,
+    install_openwakeword,
     install_violawake,
     make_config,
     make_detector,
@@ -42,6 +44,29 @@ def _viola_config(monkeypatch, scripts, **kwargs):
 
     monkeypatch.setattr(wakeword_viola, "patch_onnx_threads", lambda: True)
     return make_config("violawake", model="wake", **kwargs)
+
+
+VERIFIER = {"verifier": {"model": "v.onnx", "mel_basis": "m.npy",
+                         "threshold": 0.5, "delay_ms": 300}}
+
+
+def _two_stage_config(monkeypatch, scripts, verdict, **kwargs):
+    """`_viola_config` with the stage-2 verifier stubbed to a constant verdict.
+
+    Stubbed at the same seam `test_wakeword_verifier.py` uses: the verifier's
+    scoring quality belongs to the violawakeword repo, and what matters here is
+    only that a swallowed WAKE never reaches the `live` count.
+    """
+    from openhab_voice_satellite import wakeword_viola
+
+    monkeypatch.setattr(
+        wakeword_viola.ViolaWakeDetector, "_build_verifier",
+        staticmethod(lambda config: ("session", "frontend")),
+    )
+    monkeypatch.setattr(
+        wakeword_viola.ViolaWakeDetector, "_verify", lambda self: verdict
+    )
+    return _viola_config(monkeypatch, scripts, viola=VERIFIER, **kwargs)
 
 
 # -- the decision replay ------------------------------------------------
@@ -84,9 +109,9 @@ def test_edge_trigger_feed_is_observe_plus_fired():
 
 def test_score_file_chunks_at_the_configured_frame_size(tmp_path, monkeypatch):
     config = _viola_config(monkeypatch, {"wake": [0.4] * 20})
-    scores = score_file(config, _wav(tmp_path / "a.wav", seconds=1.0))
+    result = score_file(config, _wav(tmp_path / "a.wav", seconds=1.0))
     # 1 s at 80 ms frames, and the trailing partial frame is dropped
-    assert len(scores) == 12
+    assert len(result.scores) == 12
     assert StubWakeDetector.instances[-1].frames[0].shape == (1280,)
 
 
@@ -103,7 +128,7 @@ def test_score_file_returns_empty_for_audio_shorter_than_a_frame(tmp_path, monke
     config = _viola_config(monkeypatch, {"wake": []})
     path = tmp_path / "tiny.wav"
     write_wav(path, np.zeros(100, dtype=np.int16), SAMPLE_RATE)
-    assert len(score_file(config, path)) == 0
+    assert len(score_file(config, path).scores) == 0
 
 
 # -- the override -------------------------------------------------------
@@ -197,3 +222,75 @@ def test_gate_needs_both_sides(tmp_path, monkeypatch, capsys):
     config = _viola_config(monkeypatch, {"wake": [0.1] * 40})
     assert score_wavs(config, [], positives=positives) == 0
     assert "needs both --positives and --negatives" in capsys.readouterr().out
+
+
+def test_gate_finds_the_operating_point_of_a_saturated_model(
+    tmp_path, monkeypatch, capsys
+):
+    positives = tmp_path / "pos"
+    negatives = tmp_path / "neg"
+    positives.mkdir()
+    negatives.mkdir()
+    _wav(positives / "p.wav")
+    _wav(negatives / "n.wav")
+    # a sigmoid head that saturates: separable, but only above 0.99, where a
+    # grid ending at 0.99 would report NO CLEAN OPERATING POINT for a model
+    # that is in fact perfectly usable
+    config = _viola_config(monkeypatch, {"wake": [0.9999] * 12 + [0.999] * 12})
+    assert score_wavs(config, [], positives=positives, negatives=negatives) == 0
+    out = capsys.readouterr().out
+    assert "[clean]" in out
+    assert "weakest positive 0.9999, strongest negative 0.999  [separable]" in out
+
+
+def test_separation_line_names_an_overlap(tmp_path, monkeypatch, capsys):
+    positives = tmp_path / "pos"
+    negatives = tmp_path / "neg"
+    positives.mkdir()
+    negatives.mkdir()
+    _wav(positives / "p.wav")
+    _wav(negatives / "n.wav")
+    config = _viola_config(monkeypatch, {"wake": [0.32] * 12 + [0.85] * 12})
+    score_wavs(config, [], positives=positives, negatives=negatives)
+    assert "[OVERLAPPING]" in capsys.readouterr().out
+
+
+# -- the second stage the sweep cannot see ------------------------------
+
+
+def test_live_counts_what_process_returned_not_what_the_sweep_swept(
+    tmp_path, monkeypatch, capsys
+):
+    positives = tmp_path / "pos"
+    negatives = tmp_path / "neg"
+    positives.mkdir()
+    negatives.mkdir()
+    _wav(positives / "p.wav")
+    _wav(negatives / "n.wav")
+    # stage 1 fires on both files; the verifier rejects everything. The sweep
+    # sees only stage 1, so a config judged on it alone looks far worse than
+    # the detector the app actually runs.
+    config = _two_stage_config(
+        monkeypatch, {"wake": [0.95] * 24}, verdict=0.0, threshold=0.4
+    )
+    assert score_wavs(config, [], positives=positives, negatives=negatives) == 0
+    out = capsys.readouterr().out
+    assert "live (two-stage, at the configured threshold 0.4" in out
+    assert "recall 0%, 0.0 false/h" in out
+
+
+def test_compare_refuses_a_verdict_across_a_verifier_asymmetry(
+    tmp_path, monkeypatch, capsys
+):
+    # the whole point of --compare: a two-stage violawake config against a
+    # single-stage engine. Both columns are stage-1 sweeps, but only one of
+    # them is the whole detector.
+    config = _two_stage_config(monkeypatch, {"wake": [0.5] * 40}, verdict=1.0)
+    install_openwakeword(monkeypatch)
+    StubModel.scripts = {"other": [0.5] * 40}
+    assert score_wavs(
+        config, [_wav(tmp_path / "a.wav")], compare="openwakeword:other.onnx"
+    ) == 0
+    out = capsys.readouterr().out
+    assert "NOT COMPARABLE" in out
+    assert "stage-2 verifier the sweep cannot model" in out
