@@ -150,7 +150,32 @@ all it is, so unlike the other two engines there is **nothing to install** —
   its own featurizer, there is no shared backbone. Upstream suggests a live
   threshold of 0.5–0.6 rather than whatever a per-clip sweep says is optimal.
 
-Startup rejects a pair that scores digital silence at or above your threshold.
+**Measured against violawake, 2026-08-15.** A `tier small` model trained on the
+same corpus as `showdaan_listen_v3` (4144 positives, 38 786 negatives), judged
+on the same held-out set — 200 piper clips and 5.48 h of LibriSpeech
+test-clean:
+
+| | recall | false/h |
+|---|---|---|
+| violawake v3 + mel-PCEN verifier (shipped, two-stage) | 99 % | **0.7** |
+| wakeforge `small`, single-stage | 100 % | 128.6 |
+
+Single stage against single stage, from the sweep tables, wakeforge is behind
+violawake's stage 1 at every operating point: 67 % vs 86 % recall at ~13 FA/h,
+31 % vs 58 % at ~2.5 FA/h. Recall is not its problem — it holds 100 % down to
+0.5 — discrimination against continuous speech is, which is the same frontier
+`violawakeword/TRAINING.md` documents for single-stage v3 and the reason stage 2
+exists. So wakeforge is not a drop-in replacement for the two-stage system on
+this phrase; the promising direction is wakeforge as stage 1 behind the existing
+verifier, not wakeforge alone.
+
+Caveats worth keeping with those numbers: this is one architecture (mfcc+gru)
+at default hyperparameters after a single 16-epoch run, against a violawake
+model that took five documented training iterations; and the corpus was built
+for violawake's recipe, not through wakeforge's own datagen and hard-negative
+mining. Treat it as a first honest attempt, not wakeforge's ceiling.
+
+Startup rejects a pair whose head never scores below 0.5.
 That is not a hypothetical: a head exported with its own sigmoid gets squashed
 into [0.5, 0.73] by the sigmoid applied here, which fires constantly rather
 than never — the failure that looks like working software.
@@ -166,11 +191,13 @@ What it costs, measured on an x86 dev box with single-threaded ORT:
 | per 80 ms frame | |
 |---|---|
 | `pysilero-vad`, 2.5 × 512-sample chunks | 0.168 ms |
+| wakeforge `small` (mfcc + gru) | 0.565 ms |
 | violawake `process` | 0.887 ms |
 | openWakeWord `predict` | 1.192 ms |
 
 Silero runs on **every** frame, so the gate is only ahead above roughly a 19 %
-skip fraction against violawake (14 % against openWakeWord). A quiet room is
+skip fraction against violawake (14 % against openWakeWord, 30 % against
+wakeforge — the cheaper the model, the less there is to save). A quiet room is
 far past that — a 30 s recording of a low noise floor scores 12 of 375 frames,
 97 % suppressed — but a room with a television in it is not, because Silero
 calls that speech and the gate stays open. **Re-measure on your own hardware
