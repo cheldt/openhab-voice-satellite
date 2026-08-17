@@ -257,3 +257,35 @@ async def test_broken_pipeline_raises_on_play(make_sink, monkeypatch):
     finally:
         if sink is not None:
             sink.close()
+
+
+async def test_is_playing_false_before_any_sound(make_sink):
+    assert make_sink().is_playing is False
+
+
+async def test_is_playing_spans_the_sound_plus_residual(paced_sink):
+    sink, _ = paced_sink()
+    task = asyncio.create_task(sink.play(_pcm(5.0), 16000))
+    await asyncio.sleep(0.3)
+    assert sink.is_playing is True
+    sink.stop()
+    await asyncio.wait_for(task, timeout=2.0)
+
+
+async def test_is_playing_clears_on_stop_not_after_the_killed_sound(paced_sink):
+    """A barge-in makes the room quiet now; _sound_until keeps the old deadline."""
+    sink, _ = paced_sink()
+    task = asyncio.create_task(sink.play(_pcm(5.0), 16000))
+    await asyncio.sleep(0.3)
+    sink.stop()
+    await asyncio.wait_for(task, timeout=2.0)
+    assert sink.is_playing is False
+    # the preamble's idea of "recently played" deliberately outlives the flush
+    assert sink._sound_until > asyncio.get_running_loop().time()
+
+
+async def test_is_playing_expires_after_playout(make_sink):
+    sink = make_sink()
+    await asyncio.wait_for(sink.play(_pcm(0.2), 16000), timeout=5.0)
+    await asyncio.sleep(SINK_RESIDUAL_S + 0.05)
+    assert sink.is_playing is False

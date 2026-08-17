@@ -10,6 +10,7 @@ from typing import AsyncIterator
 import numpy as np
 from aiohttp import web
 
+from openhab_voice_satellite.audio.gst_source import CaptureStats
 from openhab_voice_satellite.stt import Transcript
 
 FRAME = 1280  # 80 ms at 16 kHz
@@ -111,11 +112,16 @@ class SilenceAudioSource:
     def __init__(self, frame_samples: int = 1280) -> None:
         self._frame_samples = frame_samples
         self.closed = False
+        self.capture = CaptureStats()
 
     async def frames(self) -> AsyncIterator[np.ndarray]:
         while not self.closed:
             await asyncio.sleep(0)
             yield np.zeros(self._frame_samples, dtype=np.int16)
+
+    def stats(self) -> CaptureStats:
+        """Whatever a test set on `capture`; the monitor only reports it."""
+        return self.capture
 
     def close(self) -> None:
         self.closed = True
@@ -129,12 +135,14 @@ class BufferAudioSink:
         self.stopped = False
         self.duck_calls: list[float] = []
         self.unduck_calls = 0
+        self.is_playing = False  # tests set this to drive echo mitigation
 
     async def play(self, pcm: np.ndarray, sample_rate: int) -> None:
         self.played.append((pcm, sample_rate))
 
     def stop(self) -> None:
         self.stopped = True
+        self.is_playing = False
 
     def duck(self, factor: float) -> None:
         self.duck_calls.append(factor)
@@ -167,6 +175,9 @@ class ScriptedDetector:
 
     def score(self, key: str = "wake") -> float:
         return self._last_score
+
+    def tail(self, seconds: float) -> np.ndarray | None:
+        return np.zeros(int(seconds * 16000), dtype=np.int16)
 
     def reset(self) -> None:
         self.resets += 1

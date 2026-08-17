@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Annotated, ClassVar, Literal
 
 import yaml
 from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
+
+log = logging.getLogger(__name__)
 
 # Capture rate is not configurable: Silero VAD, openWakeWord and whisper are
 # all hardwired to 16 kHz.
@@ -43,12 +46,104 @@ class AudioConfig(BaseModel):
         return self.sample_rate * self.frame_ms // 1000
 
 
+class Stage2Config(BaseModel):
+    """Stage-2 verifier: a mel-PCEN CNN re-scoring each wake trigger.
+
+    A single stage trades false accepts against recall on a hard frontier, and
+    that is a property of running one small model over a stream rather than of
+    any one architecture: the threshold that holds false accepts under one an
+    hour sits well above the one that keeps every positive, wherever the head
+    came from. Letting a larger CNN re-score the captured 1.5 s window breaks
+    the trade — measured on 5.48 h of LibriSpeech test-clean, it rejects 99 %
+    of stage-1 triggers.
+
+    `model` and `mel_basis` come as a pair — the .onnx scores (40, 151)
+    mel-PCEN features, and the .npy is the mel filterbank the librosa-free
+    frontend (verifier_mel.py) needs to produce them. The delay exists
+    because stage 1 crosses its threshold before the phrase is finished;
+    verifying immediately would score a truncated phrase.
+
+    Training and calibration: the ultiwake pipeline, which exports both files
+    and refuses to promote a pair that has not passed its false-accept gate.
+    """
+
+    model: str | None = None
+    mel_basis: str | None = None
+    threshold: float = Field(0.1, ge=0.0, le=1.0)
+    delay_ms: int = Field(300, ge=0, le=1000)
+
+    @model_validator(mode="after")
+    def _pair(self) -> Stage2Config:
+        if bool(self.model) != bool(self.mel_basis):
+            raise ValueError(
+                "wakeword.stage2 needs `model` and `mel_basis` as a pair — the "
+                ".onnx scores features only the .npy filterbank can produce; "
+                "set both or neither"
+            )
+        return self
+
+
 class WakewordConfig(BaseModel):
+    # kept as a Literal of one so a config naming a removed engine is rejected
+    # at load with the field named, rather than silently running openWakeWord
+    engine: Literal["openwakeword"] = "openwakeword"
     model: str = "hey_jarvis"
     threshold: float = Field(0.5, ge=0.0, le=1.0)
     threshold_speaking: float = Field(0.7, ge=0.0, le=1.0)
     stop_model: str | None = None
     stop_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    # None = reuse stop_threshold. The stop model runs during playback by
+    # definition and usually carries the lowest threshold in the system, so
+    # it is the first place echo false-accepts show up.
+    stop_threshold_speaking: float | None = Field(None, ge=0.0, le=1.0)
+    # consecutive frames above threshold before a detection fires. 1 keeps
+    # the historical single-frame trigger; 2 costs one frame of latency and
+    # rejects the transient spikes that make up most false accepts.
+    patience: int = Field(1, ge=1, le=10)
+    stop_patience: int = Field(1, ge=1, le=10)
+    # optional per-speaker verifier models (openwakeword custom verifiers).
+    # These are unpickled at startup: treat them like executable code.
+    verifier_model: str | None = None
+    stop_verifier_model: str | None = None
+    verifier_threshold: float = Field(0.1, ge=0.0, le=1.0)
+    # engine-neutral second stage; unset = single stage
+    stage2: Stage2Config = Field(default_factory=Stage2Config)
+
+    @property
+    def effective_stop_threshold_speaking(self) -> float:
+        if self.stop_threshold_speaking is None:
+            return self.stop_threshold
+        return self.stop_threshold_speaking
+
+    @model_validator(mode="after")
+    def _speaking_thresholds_are_raised(self) -> WakewordConfig:
+        """Warn when the speaking threshold sits below the idle one.
+
+        The speaking variants exist to raise the bar while our own output is
+        audible; setting one lower makes the detector easiest to trigger
+        exactly when the room contains our TTS. Legal — a lower bar is how you
+        would deliberately favour barge-in — so this warns rather than raises,
+        but it is almost always a leftover from tuning the idle threshold up.
+        """
+        for name, idle, speaking in (
+            ("threshold", self.threshold, self.threshold_speaking),
+            (
+                "stop_threshold",
+                self.stop_threshold,
+                self.effective_stop_threshold_speaking,
+            ),
+        ):
+            if speaking < idle:
+                log.warning(
+                    "wakeword.%s_speaking (%.2f) is below wakeword.%s (%.2f): "
+                    "the bar drops while our own output is audible, so echo is "
+                    "more likely to trigger a detection than room speech is",
+                    name,
+                    speaking,
+                    name,
+                    idle,
+                )
+        return self
 
 
 class VadConfig(BaseModel):
@@ -209,6 +304,17 @@ def _resolve_config_paths(config: Config, base: Path) -> Config:
     config.piper.voices = {
         lang: _resolve_path(p, base) for lang, p in config.piper.voices.items()
     }
+    wakeword = config.wakeword
+    # only path-shaped values: pretrained openwakeword phrases ("hey_jarvis")
+    # must pass through verbatim.
+    for field in ("model", "stop_model", "verifier_model", "stop_verifier_model"):
+        value = getattr(wakeword, field)
+        if value and value.endswith((".onnx", ".tflite", ".pkl")):
+            setattr(wakeword, field, _resolve_path(value, base))
+    for field in ("model", "mel_basis"):
+        value = getattr(wakeword.stage2, field)
+        if value:
+            setattr(wakeword.stage2, field, _resolve_path(value, base))
     earcons = config.earcons
     earcons.wake, earcons.ack, earcons.error, earcons.idle = (
         _resolve_path(p, base)

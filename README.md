@@ -15,7 +15,9 @@ to the local engines automatically on any error.
 (The STT and TTS boxes can each be swapped for a cloud engine; the local
 engine stays loaded and takes over per request when the cloud call fails.)
 
-- **Wakeword**: openWakeWord (`hey_jarvis` by default), always listening.
+- **Wakeword**: openWakeWord (`hey_jarvis` by default), always listening,
+  with an optional stage-2 verifier re-scoring every trigger
+  (see [deploy/install.md](deploy/install.md)).
 - **STT**: faster-whisper `small` int8, auto-detects German/English.
   Optional cloud STT via `stt.engine: "gemini"` or `"deepgram"` (Nova-3);
   whisper remains loaded and any cloud failure degrades to it for that
@@ -70,13 +72,58 @@ cp config.example.yaml config.yaml             # edit devices + openHAB url/toke
 
 If the wakeword or audio path misbehaves in the field,
 `openhab-voice-satellite --probe-mic` runs a 30 s diagnostic: per-second mic
-RMS/peak and wakeword score, earcon playback through the configured output,
-stream-link verification, and a `diagnose_capture.wav` dump of exactly what
-the app heard.
+RMS/peak plus wake and stop scores, earcon playback through the configured
+output, stream-link verification, and a `diagnose_capture.wav` dump of exactly
+what the app heard. Speech at the intended distance should read roughly
+1000–5000 RMS — openWakeWord does no input normalization, so a quiet mic
+degrades recall in a way no threshold can compensate for.
+
+To judge a wakeword *model* rather than the audio path, `--score-wav` replays
+recorded 16 kHz mono WAVs through the configured engine and prints, per file,
+the score distribution and how many detections the app's own decision rule
+would have emitted:
+
+```bash
+# what does this model do on audio that must never fire?
+.venv/bin/openhab-voice-satellite --score-wav recordings/negatives/
+
+# same frames through a second model, so two candidates are compared fairly
+.venv/bin/openhab-voice-satellite --score-wav recordings/negatives/ \
+    --compare models/wakeword/my_wake.onnx
+
+# the promotion gate: recall against false accepts per hour
+.venv/bin/openhab-voice-satellite --positives recordings/wake/ \
+    --negatives recordings/room/
+```
+
+The gate reports the best threshold/patience pair, or says
+`NO CLEAN OPERATING POINT` when no setting reaches recall without false
+accepts — which is what a model needs retraining, not retuning, looks like. A
+threshold high enough to reject everything is never counted as clean. Record
+positives in the voice and room that will actually use them: a model trained
+on your voice scores near zero on synthesized speech, so a TTS corpus is only
+valid as the negative half.
+
+Two things to read carefully. The sweep replays `EdgeTrigger` over stage-1
+scores, so on a config with `wakeword.stage2` set it counts stage-1 triggers,
+most of which the verifier then swallows — every report therefore also carries
+a `live` count, which is what the detector itself returned, and `--compare`
+refuses to name a winner from the sweep, pointing at the live lines instead.
+And `--compare` paths resolve against the working directory, not against the
+config file.
+
+`--compare` carries `wakeword.stage2` onto both columns: two models are
+compared as the two-stage systems they would actually be deployed as. Measured
+on 5.48 h of continuous speech, the same verifier rejects 99 % of stage-1
+triggers whichever head produced them.
 
 Tests: `.venv/bin/pytest` (fast; the GStreamer tests skip without PyGObject).
-Recorded utterances can be dumped for debugging by setting the
-`OVS_DUMP_UTTERANCES` env var to a directory.
+Three env vars dump audio for debugging, each taking a directory:
+`OVS_DUMP_UTTERANCES` (the recorded utterance, after the wakeword) and
+`OVS_DUMP_WAKE` (the audio *around* a detection, which is the only way to
+collect real false accepts). Add `OVS_DUMP_WAKE_SCORE=0.3` to also capture
+near misses — frames that almost fired. Those dumps are the hard negatives a
+retrain needs.
 
 Pi installation + systemd service: see [deploy/install.md](deploy/install.md).
 
@@ -117,8 +164,13 @@ Everything lives in one YAML file — see the extensively commented
 |---|---|
 | `audio.input_device` / `output_device` | substring of a PipeWire node name or description (`--list-devices`); `null` = default node |
 | `audio.wakeup_preamble_ms` / `wakeup_preamble_idle_s` | ramped-noise lead-in that wakes powered speakers whose signal-sensing mute swallows the first sound after an idle period (details in [deploy/install.md](deploy/install.md)) |
-| `wakeword.model` | pretrained openWakeWord name or path to custom `.onnx` |
-| `wakeword.threshold_speaking` | raised threshold while TTS is audible (echo mitigation) |
+| `wakeword.engine` | `openwakeword`, the only engine; kept so a config naming a removed one is rejected rather than silently reinterpreted |
+| `wakeword.model` | pretrained openWakeWord name, or a path to a `.onnx` you trained |
+| `wakeword.threshold_speaking` | raised threshold while our own output is audible (echo mitigation) |
+| `wakeword.stop_threshold_speaking` | same for the stop model, which by definition runs during playback; `null` = reuse `stop_threshold` |
+| `wakeword.patience` / `stop_patience` | consecutive frames above threshold before firing; `2` rejects single-frame spikes for 80 ms of latency |
+| `wakeword.verifier_model` / `stop_verifier_model` | optional per-speaker openWakeWord custom verifier; **unpickled at startup**, see [deploy/install.md](deploy/install.md) |
+| `wakeword.stage2.*` | engine-neutral second stage: a mel-PCEN CNN re-scoring the 1.5 s behind each trigger, so stage 1 can run low for recall. Unset = single stage |
 | `stt.engine` | `local` (faster-whisper), `gemini` or `deepgram` (cloud STT, falls back to local on failure) |
 | `stt.model` | `small` (default) or `base` for lower latency |
 | `stt.languages` | language candidates for detection (default `[de, en]`); a single entry skips whisper's per-utterance language-detection pass — recommended on constrained boxes |
@@ -137,8 +189,11 @@ Everything lives in one YAML file — see the extensively commented
 ## Barge-in and echo
 
 During playback the mic hears the speaker. Mitigations built in: raised
-wakeword threshold in SPEAKING, automatic volume ducking when the detector
-starts to trigger. For robust hands-free interruption, run PipeWire's WebRTC
+wakeword threshold for as long as the sink reports audio is audible (which
+covers earcons in any state, and stops the moment a barge-in flushes
+playback), automatic volume ducking when the detector starts to trigger, and
+abandoning the mic backlog that piled up during a cancel so our own tail is
+never re-scored. For robust hands-free interruption, run PipeWire's WebRTC
 echo canceller and point `audio.input_device` / `audio.output_device` at its
 echo-cancel nodes (they appear in `--list-devices` like any other PipeWire
 node) — setup in [deploy/install.md](deploy/install.md).

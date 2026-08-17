@@ -26,11 +26,28 @@ def check_audio(config: Config) -> None:
     probe_capture(input_node, config.audio.sample_rate)
 
 
-def check_wakeword(config: Config) -> None:
-    from .wakeword import WakewordDetector
+# enough frames for the engine's context to fill: openwakeword needs 16
+# embeddings behind 760 ms of mel
+WAKEWORD_CHECK_SECONDS = 2.5
 
-    detector = WakewordDetector(config.wakeword)
-    detector.process(np.zeros(config.audio.frame_samples, dtype=np.int16))
+
+def check_wakeword(config: Config) -> None:
+    from .wakeword import WAKE, build_detector
+
+    detector = build_detector(config)
+    frame = np.zeros(config.audio.frame_samples, dtype=np.int16)
+    # one frame proves nothing: the engine is muted until its context window
+    # fills, so a model whose scores are not probabilities at all would pass
+    # while still reporting its startup zero
+    frames = int(WAKEWORD_CHECK_SECONDS * 1000 / config.audio.frame_ms)
+    for _ in range(frames):
+        detector.process(frame)
+        score = detector.score(WAKE)
+        if not np.isfinite(score) or not 0.0 <= score <= 1.0:
+            raise ValueError(
+                f"wakeword model scored {score}, which is not a probability — "
+                f"thresholds cannot be read against it"
+            )
 
 
 def check_vad(config: Config) -> None:

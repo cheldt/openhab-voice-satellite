@@ -40,6 +40,31 @@ def main() -> None:
         help="30s field diagnostic: per-second mic RMS + wakeword score, "
              "with earcon playback and stream-link verification",
     )
+    parser.add_argument(
+        "--score-wav", nargs="*", type=Path, metavar="FILE_OR_DIR",
+        help="score recorded WAVs (16 kHz mono) through the configured "
+             "wakeword engine and print a threshold x patience sweep",
+    )
+    parser.add_argument("--model", help="override wakeword.model for --score-wav")
+    parser.add_argument(
+        # one choice, but kept as a flag: ultiwake's gate.sh and smoke.sh
+        # drive this CLI with an explicit --engine openwakeword
+        "--engine", choices=("openwakeword",),
+        help="override wakeword.engine for --score-wav",
+    )
+    parser.add_argument(
+        "--compare", metavar="MODEL",
+        help="score a second model over the same frames, e.g. "
+             "models/wakeword/shodan_listen.onnx",
+    )
+    parser.add_argument(
+        "--positives", type=Path, metavar="DIR",
+        help="WAVs that must fire (with --negatives, reports recall vs false accepts)",
+    )
+    parser.add_argument(
+        "--negatives", type=Path, metavar="DIR",
+        help="WAVs that must not fire",
+    )
     args = parser.parse_args()
 
     if args.list_devices:
@@ -51,6 +76,19 @@ def main() -> None:
 
         config = load_config(args.config)
         sys.exit(asyncio.run(run_checks(config)))
+
+    if args.score_wav is not None or args.positives or args.negatives:
+        # a detector is built per file, so INFO would bury the report under one
+        # model-loaded banner per engine per file; warnings still get through
+        logging.basicConfig(format="%(levelname)-7s %(name)s: %(message)s", level=logging.WARNING)
+        config = load_config(args.config)
+
+        from .bench import score_wavs
+
+        sys.exit(score_wavs(
+            config, args.score_wav or [], model=args.model, engine=args.engine,
+            compare=args.compare, positives=args.positives, negatives=args.negatives,
+        ))
 
     if args.probe_mic:
         logging.basicConfig(format="%(levelname)-7s %(name)s: %(message)s", level=logging.INFO)

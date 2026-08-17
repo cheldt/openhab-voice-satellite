@@ -87,6 +87,8 @@ class PipewireSink:
         self._rate = 16000  # caps rate currently set on appsrc
         # event-loop time when the last queued sound ends; None = never played
         self._sound_until: float | None = None
+        # same deadline, but cleared on flush — see is_playing
+        self._playing_until: float | None = None
         # cumulative bytes ever pushed into appsrc (utterances, preamble,
         # keepalive dither); only mutated on the event-loop thread
         self._pushed_bytes = 0
@@ -140,7 +142,21 @@ class PipewireSink:
     def unduck(self) -> None:
         self.duck(1.0)
 
+    @property
+    def is_playing(self) -> bool:
+        """True while audio we queued is still audible.
+
+        Deliberately not _sound_until: that one stays scheduled through a
+        flush so an interrupted sound still counts as recent for the wake-up
+        preamble. Callers here want the opposite — a barge-in must make the
+        room quiet immediately, not for the length of the sound it killed.
+        """
+        if self._playing_until is None:
+            return False
+        return asyncio.get_running_loop().time() < self._playing_until
+
     def _flush(self) -> None:
+        self._playing_until = None  # flushed audio never reaches the speaker
         self._src.send_event(self._Gst.Event.new_flush_start())
         self._src.send_event(self._Gst.Event.new_flush_stop(False))
 
@@ -245,6 +261,9 @@ class PipewireSink:
                 + PLAYOUT_FAILSAFE_EXTRA_S
             )
             self._sound_until = loop.time() + backlog_s + len(pcm) / sample_rate
+            # + the pulse ring residual: audio is still audible after the last
+            # byte is consumed, and that tail is exactly when echo self-triggers
+            self._playing_until = self._sound_until + SINK_RESIDUAL_S
 
         try:
             await self._await_playout(done, target, deadline)

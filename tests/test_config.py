@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from openhab_voice_satellite.config import Config, load_config
@@ -135,6 +137,68 @@ def test_piper_default_language_must_have_voice():
         )
     # default language covered -> valid
     Config.model_validate({"tts": {"default_language": "en"}, "piper": en_only})
+
+
+def test_wakeword_engine_defaults_to_openwakeword():
+    assert Config().wakeword.engine == "openwakeword"
+
+
+def test_a_removed_engine_is_rejected_rather_than_ignored():
+    # a config carrying `engine: violawake` must not quietly run openWakeWord
+    # against a model trained for something else
+    with pytest.raises(ValueError, match="engine"):
+        Config.model_validate({"wakeword": {"engine": "violawake"}})
+
+
+def test_speaking_threshold_below_the_idle_one_warns(caplog):
+    # raising `threshold` and leaving `threshold_speaking` at its default
+    # inverts the echo margin: the bar drops while our own output is audible
+    with caplog.at_level(logging.WARNING):
+        config = Config.model_validate(
+            {"wakeword": {"threshold": 0.9, "threshold_speaking": 0.7}}
+        )
+    assert "threshold_speaking (0.70) is below wakeword.threshold (0.90)" in caplog.text
+    # a warning, not a rejection — a lower bar is a legitimate barge-in choice
+    assert config.wakeword.threshold_speaking == 0.7
+
+
+def test_stop_threshold_speaking_below_the_idle_one_warns(caplog):
+    with caplog.at_level(logging.WARNING):
+        Config.model_validate(
+            {"wakeword": {"stop_threshold": 0.6, "stop_threshold_speaking": 0.3}}
+        )
+    assert "stop_threshold_speaking (0.30)" in caplog.text
+
+
+def test_raised_speaking_thresholds_are_silent(caplog):
+    # the shipped defaults (0.5 / 0.7) and the stop_threshold_speaking=None
+    # fallback both keep the speaking bar at or above the idle one
+    with caplog.at_level(logging.WARNING):
+        Config.model_validate({"wakeword": {"stop_threshold": 0.5}})
+    assert "is below wakeword." not in caplog.text
+
+
+def test_wakeword_model_paths_resolve_relative_to_the_config_file(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+wakeword:
+  model: models/wake.onnx
+  stop_model: /abs/stop.onnx
+  verifier_model: models/verifier.pkl
+"""
+    )
+    config = load_config(path)
+    assert config.wakeword.model == str(tmp_path / "models/wake.onnx")
+    assert config.wakeword.stop_model == "/abs/stop.onnx"
+    assert config.wakeword.verifier_model == str(tmp_path / "models/verifier.pkl")
+
+
+def test_pretrained_wakeword_names_are_not_treated_as_paths(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text("wakeword:\n  model: hey_jarvis\n")
+    # pretrained openwakeword phrase names must stay verbatim
+    assert load_config(path).wakeword.model == "hey_jarvis"
 
 
 def test_empty_languages_rejected():

@@ -6,7 +6,11 @@ import asyncio
 
 import numpy as np
 
-from openhab_voice_satellite.audio.broadcast import AudioBroadcaster, SubscriberQueue
+from openhab_voice_satellite.audio.broadcast import (
+    AudioBroadcaster,
+    SubscriberQueue,
+    drain_stale,
+)
 
 
 class ScriptedSource:
@@ -96,3 +100,38 @@ async def test_late_subscriber_misses_earlier_frames():
     assert late.empty()  # no replay of old frames
     await broadcaster.stop()
     assert late.get_nowait() is None
+
+
+def test_drain_stale_keeps_the_newest():
+    queue = SubscriberQueue(maxsize=10)
+    for i in range(8):
+        queue.put_nowait(np.full(4, i, dtype=np.int16))
+    assert drain_stale(queue, keep=3) == 5
+    assert queue.qsize() == 3
+    assert np.array_equal(queue.get_nowait(), np.full(4, 5, dtype=np.int16))
+
+
+def test_drain_stale_default_empties_the_queue():
+    queue = SubscriberQueue(maxsize=10)
+    for i in range(6):
+        queue.put_nowait(np.zeros(4, dtype=np.int16))
+    assert drain_stale(queue) == 6
+    assert queue.empty()
+
+
+def test_drain_stale_preserves_the_sentinel():
+    queue = SubscriberQueue(maxsize=10)
+    for _ in range(3):
+        queue.put_nowait(np.zeros(4, dtype=np.int16))
+    queue.put_nowait(None)  # the broadcaster never sends frames past this
+    assert drain_stale(queue) == 3  # stops at the sentinel, puts it back
+    assert queue.qsize() == 1
+    assert queue.get_nowait() is None
+
+
+def test_drain_stale_is_not_a_backpressure_loss():
+    queue = SubscriberQueue(maxsize=10)
+    for _ in range(4):
+        queue.put_nowait(np.zeros(4, dtype=np.int16))
+    drain_stale(queue)
+    assert queue.dropped == 0

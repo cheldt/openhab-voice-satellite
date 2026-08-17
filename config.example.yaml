@@ -9,11 +9,28 @@ audio:
   wakeup_preamble_idle_s: 60  # gap that counts as idle; match the speaker's mute delay (0 = preamble before every sound)
 
 wakeword:
-  model: "hey_jarvis"       # openWakeWord pretrained name or path to a custom .onnx
+  engine: "openwakeword"    # the only engine; a config naming another is rejected at load
+  model: "hey_jarvis"       # openWakeWord pretrained name, or a path to a custom .onnx
   threshold: 0.5
   threshold_speaking: 0.7   # raised while TTS is audible (echo mitigation)
   stop_model: null          # optional: path to a custom-trained "stop" model (.onnx)
   stop_threshold: 0.5
+  stop_threshold_speaking: null  # null = same as stop_threshold; the stop model is the one that must run during playback
+  patience: 1               # consecutive frames above threshold before firing; 2 rejects single-frame spikes for 80 ms of latency
+  stop_patience: 1
+  verifier_model: null      # optional per-speaker openWakeWord custom verifier; UNPICKLED AT STARTUP, treat as executable code
+  stop_verifier_model: null
+  verifier_threshold: 0.1   # base score above which the verifier is consulted; it then REPLACES the score, so re-check thresholds
+  # Stage 2: a mel-PCEN CNN re-scoring the 1.5 s window behind each trigger.
+  # It is what lets wakeword.threshold sit low for recall while false accepts
+  # stay out. Measured on 5.5 h of continuous speech it rejects ~99 % of
+  # stage-1 triggers. Needs the model AND its mel filterbank as a pair; the
+  # ultiwake pipeline trains and exports both.
+  # stage2:
+  #   model: null             # path to a verifier .onnx (input: 40x151 mel-PCEN)
+  #   mel_basis: null         # path to the matching verifier_melfb_40.npy
+  #   threshold: 0.1          # verifier score needed to release a wake
+  #   delay_ms: 300           # audio gathered past the trigger before scoring
 
 vad:
   threshold: 0.5

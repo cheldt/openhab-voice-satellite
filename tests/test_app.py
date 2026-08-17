@@ -15,6 +15,8 @@ import pytest
 
 import openhab_voice_satellite.app as app_module
 from openhab_voice_satellite.app import App, _build_engines, _build_speaker
+from openhab_voice_satellite.audio.broadcast import SubscriberQueue
+from openhab_voice_satellite.audio.gst_source import CaptureStats
 from openhab_voice_satellite.config import Config
 from openhab_voice_satellite.fallback import (
     FallbackSpeaker,
@@ -30,6 +32,7 @@ from .fakes import (
     LocalTranscriberStub,
     RecordingEarcons,
     ScriptedDetector,
+    SilenceAudioSource,
 )
 
 FRAME = np.zeros(1280, dtype=np.int16)
@@ -40,17 +43,19 @@ class Monitor:
 
     def __init__(self, config: Config | None = None, detector=None, pipeline_kwargs=None):
         self.app = App(config or Config())
-        self.queue: asyncio.Queue = asyncio.Queue()
+        self.queue = SubscriberQueue(maxsize=50)
         self.detector = detector or ScriptedDetector()
         self.sink = BufferAudioSink()
         self.earcons = RecordingEarcons()
         self.pipeline = FakePipeline(set_state=self.app._set_state, **(pipeline_kwargs or {}))
+        self.source = SilenceAudioSource()  # only its stats() is used here
         self.task: asyncio.Task | None = None
 
     async def __aenter__(self):
         self.task = asyncio.create_task(
             self.app._interrupt_monitor(
-                self.queue, self.detector, self.pipeline, self.sink, self.earcons
+                self.queue, self.detector, self.pipeline, self.sink, self.earcons,
+                self.source,
             )
         )
         return self
@@ -65,6 +70,11 @@ class Monitor:
             self.queue.put_nowait(FRAME)
         await asyncio.sleep(0.05)  # let the monitor drain and dispatch
 
+    def stuff(self, n: int) -> None:
+        """Queue frames without yielding, so the monitor cannot consume them."""
+        for _ in range(n):
+            self.queue.put_nowait(FRAME)
+
 
 async def test_wake_starts_pipeline():
     detector = ScriptedDetector(detections={0: "wake"})
@@ -76,6 +86,53 @@ async def test_wake_starts_pipeline():
         assert detector.resets == 1
         assert m.earcons.played == ["idle"]  # after a clean interaction
         assert m.app.state is State.IDLE
+
+
+async def test_wake_drops_the_stale_backlog():
+    detector = ScriptedDetector(detections={0: "wake"})
+    async with Monitor(
+        detector=detector, pipeline_kwargs={"event": Event.PLAYBACK_DONE}
+    ) as m:
+        m.stuff(20)  # queued behind the triggering frame, never yielded to
+        await m.feed()
+        assert m.queue.qsize() == 0
+        assert detector.frames_seen == 1  # the 20 stale frames were abandoned
+
+
+async def test_barge_in_drops_the_stale_backlog():
+    """The backlog during a cancel is our own TTS; replaying it re-triggers."""
+    detector = ScriptedDetector(detections={0: "wake", 1: "wake"})
+    async with Monitor(
+        detector=detector,
+        pipeline_kwargs={"state_on_run": State.SPEAKING, "hold_s": 10.0},
+    ) as m:
+        await m.feed()
+        m.stuff(30)  # what the mic captured while the cancel was in flight
+        await m.feed()
+        assert m.queue.qsize() == 0
+        assert detector.frames_seen == 2
+        assert detector.resets == 2
+
+
+async def test_drain_keeps_the_sentinel_so_the_monitor_still_exits():
+    detector = ScriptedDetector(detections={0: "wake"})
+    async with Monitor(
+        detector=detector, pipeline_kwargs={"event": Event.PLAYBACK_DONE}
+    ) as m:
+        m.stuff(5)
+        m.queue.put_nowait(None)  # source closed while the backlog sat there
+        await m.feed()
+        await asyncio.wait_for(m.task, timeout=2.0)  # sentinel survived the drain
+
+
+async def test_drain_does_not_count_as_backpressure_loss():
+    detector = ScriptedDetector(detections={0: "wake"})
+    async with Monitor(
+        detector=detector, pipeline_kwargs={"event": Event.PLAYBACK_DONE}
+    ) as m:
+        m.stuff(10)
+        await m.feed()
+        assert m.queue.dropped == 0  # deliberate drops are not lost frames
 
 
 async def test_error_event_suppresses_idle_earcon():
@@ -172,17 +229,25 @@ async def test_duck_released_on_leaving_speaking():
         assert m.sink.unduck_calls == 1
 
 
-async def test_speaking_flag_tracks_state():
+async def test_speaking_flag_tracks_sink_playout_not_state():
+    """The raised threshold follows audible audio, not the interaction state.
+
+    THINKING is silent for the whole whisper roundtrip, so raising the bar
+    there is pure recall loss; conversely the wake earcon is audible during
+    LISTENING, where the state-based flag used to leave the bar low.
+    """
     detector = ScriptedDetector()
     async with Monitor(detector=detector) as m:
-        await m.feed()  # IDLE
-        m.app.state = State.THINKING
+        await m.feed()  # idle and quiet
+        m.app.state = State.THINKING  # thinking, but nothing is playing
+        await m.feed()
+        m.sink.is_playing = True  # an earcon, in any state
         await m.feed()
         m.app.state = State.SPEAKING
         await m.feed()
-        m.app.state = State.IDLE
+        m.sink.is_playing = False
         await m.feed()
-        assert detector.speaking_flags == [False, True, True, False]
+        assert detector.speaking_flags == [False, False, True, True, False]
 
 
 async def test_none_frame_exits_monitor():
@@ -242,6 +307,48 @@ async def test_degraded_capture_warning(monkeypatch, caplog):
         assert "degraded capture" in caplog.text
 
 
+async def test_degraded_capture_names_the_losing_stage(monkeypatch, caplog):
+    """The warning has to say whether the graph or we lost the frames."""
+    monkeypatch.setattr(app_module, "HEARTBEAT_S", 0.05)
+    async with Monitor() as m:
+        await m.feed()  # the monitor takes its baseline on the first pass
+        m.source.capture = CaptureStats(
+            buffers=400, samples=512000, pts_gaps=3, pts_gap_s=9.5, dropped=7
+        )
+        with caplog.at_level(logging.WARNING):
+            await asyncio.sleep(0.3)
+            await m.feed()
+        assert "400 buffers / 512000 samples" in caplog.text
+        assert "3 PTS gaps totalling 9.5s" in caplog.text
+        assert "source queue drops 7" in caplog.text
+
+
+def _closed_window(health, capture: CaptureStats) -> None:
+    """Push one frame with the window already expired, so it reports."""
+    health._start -= app_module.HEARTBEAT_S
+    health.observe(FRAME, 0.0, 0, capture)
+
+
+def test_capture_accounting_is_per_window(caplog):
+    """A window reports its own buffers, not everything since startup."""
+    health = app_module._CaptureHealth(12.5, CaptureStats())
+    with caplog.at_level(logging.WARNING):
+        _closed_window(health, CaptureStats(buffers=100, samples=128000))
+        _closed_window(health, CaptureStats(buffers=130, samples=166400))
+    assert "100 buffers / 128000 samples" in caplog.messages[0]
+    assert "30 buffers / 38400 samples" in caplog.messages[1]
+
+
+def test_a_stall_does_not_lend_its_buffers_to_the_next_window(caplog):
+    health = app_module._CaptureHealth(12.5, CaptureStats())
+    # frames that arrived during the stall belong to the window that was
+    # thrown away, not to the one starting now
+    health.restart(CaptureStats(buffers=500, samples=640000))
+    with caplog.at_level(logging.WARNING):
+        _closed_window(health, CaptureStats(buffers=500, samples=640000))
+    assert "0 buffers / 0 samples" in caplog.messages[0]
+
+
 # --- engine wiring ---------------------------------------------------------
 
 
@@ -296,3 +403,46 @@ async def test_build_engines_local_passthrough():
         )
         assert transcriber is local_t
         assert speaker is local_s
+
+
+async def test_stop_word_while_idle_is_ignored_and_logged(caplog):
+    detector = ScriptedDetector(detections={0: "stop"})
+    async with Monitor(detector=detector) as m:
+        with caplog.at_level(logging.DEBUG):
+            await m.feed()
+        assert m.pipeline.calls == []  # nothing to stop
+        assert m.app.state is State.IDLE
+        assert detector.resets == 0  # a no-op must not wipe the wake context
+        assert "stop word ignored while idle" in caplog.text
+
+
+async def test_wake_audio_dump_writes_detections(tmp_path, monkeypatch):
+    monkeypatch.setenv("OVS_DUMP_WAKE", str(tmp_path))
+    detector = ScriptedDetector(detections={0: "wake"}, scores={0: 0.83})
+    async with Monitor(
+        detector=detector, pipeline_kwargs={"event": Event.PLAYBACK_DONE}
+    ) as m:
+        await m.feed()
+    dumped = list(tmp_path.glob("*.wav"))
+    assert len(dumped) == 1
+    assert dumped[0].name.startswith("wake-0.83-IDLE-")
+
+
+async def test_wake_audio_dump_catches_near_misses(tmp_path, monkeypatch):
+    monkeypatch.setenv("OVS_DUMP_WAKE", str(tmp_path))
+    monkeypatch.setenv("OVS_DUMP_WAKE_SCORE", "0.3")
+    detector = ScriptedDetector(scores={0: 0.44, 1: 0.10})
+    async with Monitor(detector=detector) as m:
+        await m.feed(2)
+    dumped = [p.name for p in tmp_path.glob("*.wav")]
+    assert len(dumped) == 1  # only the frame over the floor
+    assert dumped[0].startswith("near-0.44-")
+
+
+async def test_wake_audio_dump_is_off_without_the_env_var(tmp_path):
+    detector = ScriptedDetector(detections={0: "wake"})
+    async with Monitor(
+        detector=detector, pipeline_kwargs={"event": Event.PLAYBACK_DONE}
+    ) as m:
+        await m.feed()
+    assert list(tmp_path.glob("*.wav")) == []
