@@ -44,6 +44,17 @@ HEARTBEAT_S = 10.0  # capture-health DEBUG line interval
 WAKE_DUMP_PREROLL_S = 2.5  # audio kept before a detection, incl. the wakeword
 
 
+class CaptureClosedError(RuntimeError):
+    """The capture stream ended mid-run (bus ERROR/EOS, e.g. PipeWire node loss).
+
+    Deliberately fatal: in-process recovery would need set_state() from the
+    sync bus handler (which deadlocks, see gst_common.install_sync_handler),
+    and a wedged PipeWire stream rarely recovers its scheduling anyway. The
+    process exits non-zero so the systemd unit (Restart=on-failure) restarts
+    it with a fresh graph connection.
+    """
+
+
 def _log_wake_detection(detector: WakewordProtocol, score: float) -> None:
     """Log the candidate's stage-1 peak, not this frame's decayed score.
 
@@ -388,8 +399,10 @@ class App:
                     health.restart(source.stats())
                     continue
                 if frame is None:
-                    log.info("audio source closed, monitor exiting")
-                    return
+                    raise CaptureClosedError(
+                        "audio capture stream closed mid-run "
+                        f"({source.stats().describe()})"
+                    )
 
                 # the sink, not the state, knows whether the room is loud:
                 # THINKING is silent for its whole whisper roundtrip, while

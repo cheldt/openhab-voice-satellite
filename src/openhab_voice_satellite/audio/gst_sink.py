@@ -197,6 +197,10 @@ class PipewireSink:
             async with self._play_lock:
                 with self._lock:
                     if self._errors:
+                        log.warning(
+                            "sink keepalive exiting after pipeline error — "
+                            "dither stops and every play() will fail from here"
+                        )
                         return
                 low_water = int(KEEPALIVE_LOW_WATER_S * self._rate) * 2
                 queued = self._queued_bytes()

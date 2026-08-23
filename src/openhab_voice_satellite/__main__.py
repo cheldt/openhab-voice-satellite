@@ -104,13 +104,18 @@ def main() -> None:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
 
-    from .app import App
+    from .app import App, CaptureClosedError
 
     app = App(config)
     try:
         asyncio.run(app.run())
     except KeyboardInterrupt:
         pass
+    except CaptureClosedError as exc:
+        # exit non-zero: the unit is Restart=on-failure, and a clean exit
+        # here would leave the satellite silently gone until someone notices
+        logging.getLogger(__name__).critical("%s — exiting for restart", exc)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
