@@ -196,8 +196,25 @@ ctranslate2 or aiohttp would otherwise run with full access to the user's
 session. Which directives a *user* unit actually honors depends on the systemd
 version in the session, which is what `systemd-analyze --user security` reports
 — run it after installing and loosen only what it shows to be breaking audio.
-`MemoryDenyWriteExecute` is deliberately left off: onnxruntime and ctranslate2
-map executable pages of their own.
+On Debian 12 / systemd 252 the reference install scores **5.4 MEDIUM**.
+
+Three directives are commented out in the unit rather than set, all for the
+same reason: a user manager has no `CAP_SETPCAP`, so anything shrinking the
+capability bounding set fails the whole unit with `status=218`
+(`EXIT_CAPABILITIES`) — `CapabilityBoundingSet=` itself and, less obviously,
+`ProtectKernelModules=` and `ProtectClock=`, which imply a bounding-set drop.
+They cost nothing here: the process is unprivileged and `NoNewPrivileges=yes`
+keeps it that way. `MemoryDenyWriteExecute` is left off for a different reason
+— onnxruntime and ctranslate2 map executable pages of their own.
+
+If the install does not live in `/opt`, two lines need adapting:
+`ReadWritePaths=` must name the install tree **and** the Hugging Face cache
+(`huggingface_hub` writes lock files there even on a cache hit, so a cache
+outside `ReadWritePaths=` under `ProtectHome=read-only` breaks startup), and
+`WorkingDirectory=`/`ExecStart=` follow the tree. Verify before restarting by
+copying the unit to a `Type=oneshot` probe whose `ExecStart` ends in `--check`:
+that opens the real capture pipeline, loads piper and reaches the network from
+inside the sandbox.
 
 Two things the sandbox needs from the layout: `/opt/openhab-voice-satellite` is
 the only writable path (`ReadWritePaths=`), so `HF_HOME` must stay inside it,

@@ -38,20 +38,32 @@ RestartSec=3
 # the whole user session: ~/.ssh, browser profiles, every user file. None of
 # these restrictions costs anything here.
 #
-# It is a *user* unit, so the effective set depends on the systemd version in
-# the session; validate with `systemd-analyze --user security
-# openhab-voice-satellite.service` after installing, and loosen only what that
-# run shows to be breaking audio.
+# It is a *user* unit, which rules out one whole family of directives: a user
+# manager has no CAP_SETPCAP, so anything that shrinks the capability bounding
+# set fails the unit outright with status=218 (EXIT_CAPABILITIES) — verified on
+# Debian 12 / systemd 252. That is CapabilityBoundingSet= itself and, less
+# obviously, ProtectKernelModules= and ProtectClock=, which imply a bounding-set
+# drop; all three are left commented below. They cost nothing to lose here: the
+# process is unprivileged and NoNewPrivileges=yes keeps it that way, so it could
+# not load a module or set the clock regardless.
+#
+# The rest is version-dependent too. Validate with `systemd-analyze --user
+# security openhab-voice-satellite.service` after installing, and loosen only
+# what that run shows to be breaking audio.
 NoNewPrivileges=yes
+# dumps and any other file the service creates stay owner-only
+UMask=0077
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
 # the install tree (config, models) and the HF cache under it must stay writable
 ReadWritePaths=/opt/openhab-voice-satellite
 ProtectKernelTunables=yes
-ProtectKernelModules=yes
+# implies a bounding-set drop: status=218 in a user unit:
+# ProtectKernelModules=yes
 ProtectControlGroups=yes
-ProtectClock=yes
+# implies a bounding-set drop: status=218 in a user unit:
+# ProtectClock=yes
 ProtectProc=invisible
 RestrictNamespaces=yes
 RestrictRealtime=yes
@@ -61,7 +73,8 @@ LockPersonality=yes
 # executable pages of their own, and denying it breaks model loading outright
 # AF_UNIX is the PipeWire/pulse socket; the rest is openHAB + the cloud APIs
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-CapabilityBoundingSet=
+# unsettable without CAP_SETPCAP: status=218 in a user unit:
+# CapabilityBoundingSet=
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 SystemCallArchitectures=native
