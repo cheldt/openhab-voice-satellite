@@ -158,25 +158,35 @@ class ScriptedDetector:
         self,
         detections: dict[int, str] | None = None,
         scores: dict[int, float] | None = None,
+        rejections: dict[int, float] | None = None,
     ) -> None:
         self.detections = detections or {}
         self.scores = scores or {}
+        # frame index -> the rejected candidate's stage-1 peak
+        self.rejections = rejections or {}
         self.frames_seen = 0
         self.speaking_flags: list[bool] = []
         self.resets = 0
         self._last_score = 0.0
+        self.last_trigger_score: float | None = None
+        self.last_verifier_score: float | None = None
+        self.last_rejection: float | None = None
 
     def process(self, frame: np.ndarray, speaking: bool = False) -> str | None:
         i = self.frames_seen
         self.frames_seen += 1
         self.speaking_flags.append(speaking)
         self._last_score = self.scores.get(i, 0.0)
-        return self.detections.get(i)
+        self.last_rejection = self.rejections.get(i)
+        detection = self.detections.get(i)
+        if detection == "wake":
+            self.last_trigger_score = self._last_score
+        return detection
 
     def score(self, key: str = "wake") -> float:
         return self._last_score
 
-    def tail(self, seconds: float) -> np.ndarray | None:
+    def tail(self, seconds: float) -> np.ndarray:
         return np.zeros(int(seconds * 16000), dtype=np.int16)
 
     def reset(self) -> None:

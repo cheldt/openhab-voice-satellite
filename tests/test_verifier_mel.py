@@ -14,11 +14,26 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 
-MODELS = Path(__file__).parent.parent / "models" / "wakeword"
+ROOT = Path(__file__).parent.parent
+MODELS = ROOT / "models" / "wakeword"
 MELFB = MODELS / "verifier_melfb_40.npy"
 GOLDEN = MODELS / "verifier_frontend_golden.npz"
-VERIFIER = MODELS / "showdaan_listen_v6_verifier_20260817.onnx"
+
+
+def _deployed_verifier() -> Path | None:
+    """The stage-2 model config.yaml runs, so this covers the deployed pair
+    instead of a pinned snapshot that goes stale with every promotion."""
+    config = ROOT / "config.yaml"
+    if not config.exists():
+        return None
+    wakeword = yaml.safe_load(config.read_text()).get("wakeword") or {}
+    model = (wakeword.get("stage2") or {}).get("model")
+    return (ROOT / model) if model else None
+
+
+VERIFIER = _deployed_verifier()
 
 pytestmark = pytest.mark.skipif(
     not (MELFB.exists() and GOLDEN.exists()),
@@ -46,9 +61,12 @@ def test_wrong_length_is_rejected(frontend):
         frontend(np.zeros(16000, dtype=np.float32))
 
 
-@pytest.mark.skipif(not VERIFIER.exists(), reason="verifier model not present")
+@pytest.mark.skipif(
+    VERIFIER is None or not VERIFIER.exists(),
+    reason="configured stage-2 verifier not present",
+)
 def test_verifier_model_scores_golden_features(frontend):
-    """The shipped ONNX accepts the frontend's output and emits a probability."""
+    """The deployed ONNX accepts the frontend's output and emits a probability."""
     ort = pytest.importorskip("onnxruntime")
 
     session = ort.InferenceSession(str(VERIFIER), providers=["CPUExecutionProvider"])
@@ -59,3 +77,22 @@ def test_verifier_model_scores_golden_features(frontend):
     assert np.all((scores >= 0.0) & (scores <= 1.0))
     # golden clips are noise/tones, not the phrase — none should pass
     assert np.all(scores < 0.5)
+
+
+@pytest.mark.skipif(
+    VERIFIER is None or not VERIFIER.exists(),
+    reason="configured stage-2 verifier not present",
+)
+def test_build_verifier_accepts_the_deployed_model():
+    """The load-time input-contract check passes on the deployed pair."""
+    pytest.importorskip("onnxruntime")
+    from openhab_voice_satellite.config import WakewordConfig
+    from openhab_voice_satellite.wakeword import BaseWakewordDetector
+
+    session, frontend = BaseWakewordDetector._build_verifier(
+        WakewordConfig(
+            model="wake",
+            stage2={"model": str(VERIFIER), "mel_basis": str(MELFB)},
+        )
+    )
+    assert session is not None and frontend is not None

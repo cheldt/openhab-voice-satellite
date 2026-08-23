@@ -43,7 +43,9 @@ from .wakeword import WAKE, EdgeTrigger, build_detector
 # The tail past 0.99 is not padding: a sigmoid head saturates, and a model
 # whose separation lives between 0.99 and 0.9999 would otherwise be reported
 # as having no clean operating point — a grid artifact wearing a verdict.
-SWEEP_THRESHOLDS = (0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99,
+# The low end matters with a second stage: a verifier lets stage 1 run far
+# below any single-stage operating point (v6 two-stage sat at 0.10).
+SWEEP_THRESHOLDS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99,
                     0.995, 0.999, 0.9995, 0.9999)
 SWEEP_PATIENCE = (1, 2, 3)
 

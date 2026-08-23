@@ -44,6 +44,24 @@ HEARTBEAT_S = 10.0  # capture-health DEBUG line interval
 WAKE_DUMP_PREROLL_S = 2.5  # audio kept before a detection, incl. the wakeword
 
 
+def _log_wake_detection(detector: WakewordProtocol, score: float) -> None:
+    """Log the candidate's stage-1 peak, not this frame's decayed score.
+
+    With a verifier the detection lands `delay_ms` past the peak that fired
+    it; the verifier's own score goes into the same line, since accepts are
+    otherwise invisible.
+    """
+    trigger_score = detector.last_trigger_score
+    trigger_score = score if trigger_score is None else trigger_score
+    if detector.last_verifier_score is not None:
+        log.info(
+            "wakeword detected (score %.2f, verifier %.3f)",
+            trigger_score, detector.last_verifier_score,
+        )
+    else:
+        log.info("wakeword detected (score %.2f)", trigger_score)
+
+
 def _dump_wake_audio(
     detector: WakewordProtocol, detection: str | None, score: float, state: State
 ) -> None:
@@ -51,19 +69,32 @@ def _dump_wake_audio(
 
     Unlike the utterance dump this captures what actually fired the detector,
     which is the only way to collect real false accepts. $OVS_DUMP_WAKE_SCORE
-    additionally catches near misses — the frames that almost triggered.
+    additionally catches near misses — the frames that almost triggered — and
+    verifier rejections, gated on the candidate's stage-1 peak because the
+    current frame's score has decayed by the time the verdict lands. Those
+    rejections are the hard negatives the retraining loop feeds on.
     """
     dump_dir = os.environ.get("OVS_DUMP_WAKE")
     if not dump_dir:
         return
     if detection is None:
         floor = os.environ.get("OVS_DUMP_WAKE_SCORE")
-        if not floor or score < float(floor):
+        if not floor:
             return
-    label = detection or "near"
+        rejected = detector.last_rejection
+        if rejected is not None and rejected >= float(floor):
+            label, score = "rejected", rejected
+        elif score >= float(floor):
+            label = "near"
+        else:
+            return
+    else:
+        label = detection
+        if detection == "wake" and detector.last_trigger_score is not None:
+            score = detector.last_trigger_score
     path = Path(dump_dir) / f"{label}-{score:.2f}-{state.name}-{time.strftime('%H%M%S')}.wav"
     pcm = detector.tail(WAKE_DUMP_PREROLL_S)
-    if pcm is None or not len(pcm):
+    if not len(pcm):
         return
     try:
         write_wav(path, pcm, SAMPLE_RATE)
@@ -375,7 +406,7 @@ class App:
                     continue
 
                 if self.state is State.IDLE and detection == "wake":
-                    log.info("wakeword detected (score %.2f)", score)
+                    _log_wake_detection(detector, score)
                     self._resync_detector(detector, wake_queue)
                     self._start_pipeline(pipeline, earcons)
                 elif self.state in (State.LISTENING, State.THINKING, State.SPEAKING):

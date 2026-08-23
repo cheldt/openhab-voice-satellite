@@ -439,6 +439,19 @@ async def test_wake_audio_dump_catches_near_misses(tmp_path, monkeypatch):
     assert dumped[0].startswith("near-0.44-")
 
 
+async def test_wake_audio_dump_catches_verifier_rejections(tmp_path, monkeypatch):
+    # the verdict lands delay_ms after the peak, so the live score has decayed
+    # below the floor — the gate must read the rejected candidate's peak
+    monkeypatch.setenv("OVS_DUMP_WAKE", str(tmp_path))
+    monkeypatch.setenv("OVS_DUMP_WAKE_SCORE", "0.3")
+    detector = ScriptedDetector(scores={0: 0.05}, rejections={0: 0.62})
+    async with Monitor(detector=detector) as m:
+        await m.feed()
+    dumped = [p.name for p in tmp_path.glob("*.wav")]
+    assert len(dumped) == 1
+    assert dumped[0].startswith("rejected-0.62-")
+
+
 async def test_wake_audio_dump_is_off_without_the_env_var(tmp_path):
     detector = ScriptedDetector(detections={0: "wake"})
     async with Monitor(

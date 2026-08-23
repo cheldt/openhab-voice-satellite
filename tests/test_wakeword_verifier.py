@@ -113,3 +113,90 @@ def test_reset_clears_a_pending_verification(verified_factory):
 def test_no_verifier_means_no_deferral(verified_factory):
     detector = verified_factory({"wake": [0.9]}, [], model="wake")
     assert detector.process(FRAME) == "wake"
+
+
+def test_stop_wins_when_the_verdict_lands_on_the_same_frame(verified_factory):
+    # a verifier accept must not displace a STOP decided on the verdict frame:
+    # the app would treat it as a wake barge-in and restart LISTENING
+    detector = verified_factory(
+        {"wake": [0.9, 0.0, 0.0, 0.0], "stop": [0.0, 0.0, 0.0, 0.9]}, [0.9],
+        model="wake", stop_model="stop", stage2=STAGE2,
+    )
+    assert detector.process(FRAME) is None  # wake deferred, countdown 4
+    assert detector.process(FRAME) is None
+    assert detector.process(FRAME) is None
+    assert detector.process(FRAME) == "stop"  # collision: stop, not wake
+
+
+def test_the_trigger_score_is_the_candidates_peak(verified_factory):
+    # stage 1 keeps climbing past the trigger frame and has decayed again by
+    # the verdict frame; the reported score must be the peak, not either end
+    detector = verified_factory(
+        {"wake": [0.9, 0.97, 0.4, 0.1]}, [0.8],
+        model="wake", stage2=STAGE2,
+    )
+    for _ in range(3):
+        assert detector.process(FRAME) is None
+    assert detector.process(FRAME) == "wake"
+    assert detector.last_trigger_score == pytest.approx(0.97)
+    assert detector.last_verifier_score == pytest.approx(0.8)
+    assert detector.last_rejection is None
+
+
+def test_a_rejection_reports_the_peak_for_one_frame(verified_factory):
+    # the near-miss dump gate reads last_rejection on the verdict frame; by
+    # then the live stage-1 score has decayed below any useful floor
+    detector = verified_factory(
+        {"wake": [0.9, 0.97, 0.4, 0.1, 0.0]}, [0.2],
+        model="wake", stage2=STAGE2,
+    )
+    for _ in range(4):
+        assert detector.process(FRAME) is None
+    assert detector.last_rejection == pytest.approx(0.97)
+    assert detector.last_trigger_score == pytest.approx(0.97)
+    detector.process(FRAME)  # any later frame clears the one-frame flag
+    assert detector.last_rejection is None
+
+
+def test_no_verifier_still_reports_the_trigger_score(verified_factory):
+    detector = verified_factory({"wake": [0.9]}, [], model="wake")
+    assert detector.process(FRAME) == "wake"
+    assert detector.last_trigger_score == pytest.approx(0.9)
+    assert detector.last_verifier_score is None
+
+
+def test_build_verifier_rejects_a_wrong_input_contract(monkeypatch):
+    # --check feeds silence and never reaches _verify(); the input contract
+    # must therefore fail at load, not at the first live wake
+    import sys
+    import types
+
+    class FakeOptions:
+        def __init__(self):
+            self.intra_op_num_threads = 0
+            self.inter_op_num_threads = 0
+            self.execution_mode = None
+
+        def add_session_config_entry(self, key, value):
+            pass
+
+    class FakeSession:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_inputs(self):
+            return [types.SimpleNamespace(name="input", shape=["batch", 40, 151])]
+
+    fake_ort = types.SimpleNamespace(
+        SessionOptions=FakeOptions,
+        ExecutionMode=types.SimpleNamespace(ORT_SEQUENTIAL=0),
+        InferenceSession=FakeSession,
+    )
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
+
+    from openhab_voice_satellite.config import WakewordConfig
+    from openhab_voice_satellite.wakeword import BaseWakewordDetector
+
+    config = WakewordConfig(model="wake", stage2=STAGE2)
+    with pytest.raises(ValueError, match="features"):
+        BaseWakewordDetector._build_verifier(config)

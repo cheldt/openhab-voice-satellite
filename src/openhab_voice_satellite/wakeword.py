@@ -53,11 +53,20 @@ def _session_options(ort):
 class WakewordProtocol(Protocol):
     """What the app needs from a detector, whichever engine backs it."""
 
+    # peak stage-1 score of the candidate behind the last WAKE the detector
+    # returned — the score() at the verdict frame is `delay_ms` past the peak
+    last_trigger_score: float | None
+    # the verifier's score for that candidate (None without a second stage)
+    last_verifier_score: float | None
+    # set only on the frame a verifier rejection lands: the rejected
+    # candidate's peak stage-1 score, for the near-miss dump gate
+    last_rejection: float | None
+
     def process(self, frame: np.ndarray, speaking: bool = False) -> str | None: ...
 
     def score(self, key: str = WAKE) -> float: ...
 
-    def tail(self, seconds: float) -> np.ndarray | None: ...
+    def tail(self, seconds: float) -> np.ndarray: ...
 
     def reset(self) -> None: ...
 
@@ -137,7 +146,12 @@ class BaseWakewordDetector:
         self._verifier = self._build_verifier(config)
         self._verify_delay_frames = max(1, -(-config.stage2.delay_ms // frame_ms))
         self._verify_countdown: int | None = None
+        # peak stage-1 score while a verification is pending; frozen into
+        # last_trigger_score when the verdict lands
+        self._pending_peak: float | None = None
+        self.last_trigger_score: float | None = None
         self.last_verifier_score: float | None = None
+        self.last_rejection: float | None = None
 
     @staticmethod
     def _build_verifier(config: WakewordConfig):
@@ -161,6 +175,17 @@ class BaseWakewordDetector:
             sess_options=_session_options(ort),
             providers=["CPUExecutionProvider"],
         )
+        # --check feeds silence, which never reaches _verify(); without this a
+        # model with the wrong input contract passes the self-test and then
+        # kills the monitor loop at the first wake, hours later
+        inputs = session.get_inputs()
+        if (len(inputs) != 1 or inputs[0].name != "features"
+                or list(inputs[0].shape[1:]) != [40, 151]):
+            raise ValueError(
+                f"stage-2 verifier {stage2.model} must take a single 'features' "
+                f"input of shape (batch, 40, 151) — the frontend contract — got "
+                f"{[(i.name, i.shape) for i in inputs]}"
+            )
         log.info(
             "wakeword stage-2 verifier loaded: %s (threshold %.2f, delay %d ms)",
             stage2.model, stage2.threshold, stage2.delay_ms,
@@ -176,7 +201,7 @@ class BaseWakewordDetector:
     def _engine_reset(self) -> None:
         raise NotImplementedError
 
-    def tail(self, seconds: float) -> np.ndarray | None:
+    def tail(self, seconds: float) -> np.ndarray:
         """Newest `seconds` of raw mic audio.
 
         The window predates the detection that prompted the call, which is
@@ -213,6 +238,8 @@ class BaseWakewordDetector:
         self._ring.extend(frame)
         result = self._decide(self._scores(frame), speaking)
         if self._verifier is None:
+            if result == WAKE:
+                self.last_trigger_score = self.score(WAKE)
             return result
         return self._stage2(result)
 
@@ -221,25 +248,40 @@ class BaseWakewordDetector:
 
         Stage 1 crosses its threshold before the phrase ends, so the verifier
         waits `delay_ms` of further audio and then scores the last 1.5 s from
-        the ring. STOP is never deferred — stopping playback late defeats the
-        purpose, and the stop model has no verifier anyway.
+        the ring. STOP is never deferred, and it also beats a verifier accept
+        landing on the same frame — reporting WAKE there would turn a stop
+        into a barge-in.
         """
+        self.last_rejection = None
         if result == WAKE:
             # a second stage-1 trigger while one is pending keeps the first
             # countdown — restarting it would push the window past the phrase
             if self._verify_countdown is None:
                 self._verify_countdown = self._verify_delay_frames
+                self._pending_peak = self.score(WAKE)
             result = None
+        verdict = None
         if self._verify_countdown is not None:
+            # stage 1 usually keeps climbing past the trigger frame; the peak
+            # is the score that belongs to this candidate
+            self._pending_peak = max(self._pending_peak, self.score(WAKE))
             self._verify_countdown -= 1
             if self._verify_countdown <= 0:
                 self._verify_countdown = None
+                peak, self._pending_peak = self._pending_peak, None
                 score = self._verify()
                 self.last_verifier_score = score
+                self.last_trigger_score = peak
                 if score >= self._config.stage2.threshold:
-                    return WAKE
-                log.info("wake candidate rejected by verifier (score %.3f)", score)
-        return result
+                    verdict = WAKE
+                else:
+                    self.last_rejection = peak
+                    log.info(
+                        "wake candidate rejected by verifier "
+                        "(score %.3f, stage-1 peak %.2f)", score, peak,
+                    )
+        # STOP wins the collision; the WAKE branch above already blanked result
+        return result or verdict
 
     def _verify(self) -> float:
         session, frontend = self._verifier
@@ -272,7 +314,10 @@ class BaseWakewordDetector:
         self._engine_reset()
         self._ring.clear()
         self._verify_countdown = None
+        self._pending_peak = None
+        self.last_trigger_score = None
         self.last_verifier_score = None
+        self.last_rejection = None
         for trigger in self._triggers.values():
             trigger.reset()
 
