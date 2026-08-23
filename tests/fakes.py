@@ -353,7 +353,7 @@ class FakeDeepgram:
 class FakeOpenHAB:
     """aiohttp app implementing the endpoints the client uses.
 
-    - GET /rest/: health ping
+    - GET /rest/voice/interpreters: the ping probe (auth + voice subsystem)
     - POST /rest/voice/interpreters: records the text and answers with the
       scripted plain-text response after `response_delay_s`
     - DELETE /rest/voice/conversations/{cid}: records the deleted id
@@ -370,17 +370,22 @@ class FakeOpenHAB:
         self.response_delay_s = response_delay_s
         self.status = 200  # set e.g. 500 to test error handling
         self.delete_status = 200
+        self.ping_status = 200  # e.g. 401 to test a rejected token
+        self.ping_headers: list[dict[str, str]] = []
         self.error_body = ""  # body sent along with a non-200 status
 
     def build_app(self) -> web.Application:
         app = web.Application()
-        app.router.add_get("/rest/", self._root)
+        app.router.add_get("/rest/voice/interpreters", self._list_interpreters)
         app.router.add_post("/rest/voice/interpreters", self._interpret)
         app.router.add_delete("/rest/voice/conversations/{cid}", self._delete_conversation)
         return app
 
-    async def _root(self, request: web.Request) -> web.Response:
-        return web.json_response({"version": "8"})
+    async def _list_interpreters(self, request: web.Request) -> web.Response:
+        self.ping_headers.append(dict(request.headers))
+        if self.ping_status != 200:
+            return web.Response(status=self.ping_status)
+        return web.json_response([{"id": "system", "label": "Rule-based"}])
 
     async def _interpret(self, request: web.Request) -> web.Response:
         self.commands.append(await request.text())

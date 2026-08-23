@@ -16,7 +16,7 @@ from .audio.broadcast import AudioBroadcaster, drain_stale
 from .audio.earcons import Earcons
 from .audio.wav import rms, write_wav
 from .config import Config
-from .openhab import OpenHABClient, OpenHABTimeoutError
+from .openhab import CONVERSATION_END_TIMEOUT_S, OpenHABClient, OpenHABTimeoutError
 from .recorder import NoSpeechError, record_utterance
 from .state import Event, State
 from .stt import Transcript
@@ -150,9 +150,12 @@ class Pipeline:
         if not self._cleanup_tasks:
             return
         try:
+            # one DELETE budget plus a margin: a single slow DELETE times
+            # itself out (and is logged) instead of tripping this warning;
+            # only *stacked* DELETEs against a dead host still can
             await asyncio.wait_for(
                 asyncio.gather(*self._cleanup_tasks, return_exceptions=True),
-                timeout=5.0,
+                timeout=CONVERSATION_END_TIMEOUT_S + 1.0,
             )
         except asyncio.TimeoutError:
             log.warning("conversation cleanup timed out")

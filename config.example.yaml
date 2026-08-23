@@ -52,7 +52,7 @@ openhab:
   # ?llmTools= param for /rest/voice/interpreters; null = omit.
   # "web-search" needs the org.openhab.voice.websearch add-on + a SearxNG instance.
   llm_tools: "item-send-command,item-get-state,get-date-time,web-search"
-  response_timeout_s: 30
+  response_timeout_s: 30    # raise for an LLM interpreter: several tool calls (or web-search) can exceed 30 s
   verify_ssl: true          # false accepts self-signed certificates
 
 tts:
