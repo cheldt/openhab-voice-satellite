@@ -73,8 +73,31 @@ def _log_wake_detection(detector: WakewordProtocol, score: float) -> None:
         log.info("wakeword detected (score %.2f)", trigger_score)
 
 
+def _wake_score_floor() -> float | None:
+    """Parse $OVS_DUMP_WAKE_SCORE once, at monitor start.
+
+    Parsing it per frame would let a typoed value raise ValueError inside
+    the monitor loop and kill the process outside the CaptureClosedError
+    exit path; a bad value here costs a warning, not the satellite.
+    """
+    raw = os.environ.get("OVS_DUMP_WAKE_SCORE")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning(
+            "$OVS_DUMP_WAKE_SCORE=%r is not a number — near-miss dumps disabled", raw
+        )
+        return None
+
+
 def _dump_wake_audio(
-    detector: WakewordProtocol, detection: str | None, score: float, state: State
+    detector: WakewordProtocol,
+    detection: str | None,
+    score: float,
+    state: State,
+    score_floor: float | None,
 ) -> None:
     """Write the audio around a detection to $OVS_DUMP_WAKE for field debugging.
 
@@ -89,13 +112,12 @@ def _dump_wake_audio(
     if not dump_dir:
         return
     if detection is None:
-        floor = os.environ.get("OVS_DUMP_WAKE_SCORE")
-        if not floor:
+        if score_floor is None:
             return
         rejected = detector.last_rejection
-        if rejected is not None and rejected >= float(floor):
+        if rejected is not None and rejected >= score_floor:
             label, score = "rejected", rejected
-        elif score >= float(floor):
+        elif score >= score_floor:
             label = "near"
         else:
             return
@@ -387,6 +409,7 @@ class App:
         audio = self._config.audio
         health = _CaptureHealth(audio.sample_rate / audio.frame_samples, source.stats())
         duck = _DuckController()
+        score_floor = _wake_score_floor()
         try:
             while True:
                 try:
@@ -412,8 +435,12 @@ class App:
                 health.observe(
                     frame, score, getattr(wake_queue, "dropped", 0), source.stats()
                 )
+                # two gates on purpose: the threshold raise above covers
+                # everything audible (earcons included), ducking covers TTS
+                # only — earcons are too short to duck, and one started
+                # between frames may begin ducked until the next update
                 duck.update(self.state is State.SPEAKING, score, sink)
-                _dump_wake_audio(detector, detection, score, self.state)
+                _dump_wake_audio(detector, detection, score, self.state, score_floor)
 
                 if detection is None:
                     continue

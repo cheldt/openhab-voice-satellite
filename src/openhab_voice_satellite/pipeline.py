@@ -207,7 +207,14 @@ class Pipeline:
     def _drain_earcon_echo(self, frames: asyncio.Queue) -> None:
         """Drop queued mic frames older than the echo guard window."""
         keep = -(-EARCON_ECHO_GUARD_MS // self._config.audio.frame_ms)  # ceil
-        drain_stale(frames, keep)
+        stale = drain_stale(frames, keep)
+        if stale:
+            lost_s = stale * self._config.audio.frame_ms / 1000
+            # a backlog much longer than any earcon means a stalled consumer,
+            # and the drop may include the user's speech onset
+            (log.warning if lost_s >= 1.0 else log.debug)(
+                "earcon echo guard dropped %d mic frames (%.1fs)", stale, lost_s
+            )
 
     async def _capture_utterance(
         self,

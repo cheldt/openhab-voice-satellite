@@ -461,6 +461,18 @@ async def test_wake_audio_dump_catches_verifier_rejections(tmp_path, monkeypatch
     assert dumped[0].startswith("rejected-0.62-")
 
 
+async def test_wake_audio_dump_survives_a_typoed_score_floor(tmp_path, monkeypatch, caplog):
+    # a non-numeric floor used to raise ValueError inside the monitor loop
+    monkeypatch.setenv("OVS_DUMP_WAKE", str(tmp_path))
+    monkeypatch.setenv("OVS_DUMP_WAKE_SCORE", "banana")
+    detector = ScriptedDetector(scores={0: 0.44})
+    with caplog.at_level(logging.WARNING):
+        async with Monitor(detector=detector) as m:
+            await m.feed()
+    assert list(tmp_path.glob("*.wav")) == []  # near-miss dumps off, monitor alive
+    assert "OVS_DUMP_WAKE_SCORE" in caplog.text
+
+
 async def test_wake_audio_dump_is_off_without_the_env_var(tmp_path):
     detector = ScriptedDetector(detections={0: "wake"})
     async with Monitor(
