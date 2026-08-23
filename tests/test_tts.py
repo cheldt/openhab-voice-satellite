@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import numpy as np
 import pytest
 
@@ -91,3 +93,42 @@ async def test_stream_synthesis_skips_empty_pcm():
 
     await stream_synthesis(["ok", "skip", "ok"], synth, sink)
     assert len(sink.played) == 2
+
+
+async def test_play_pipelined_cancels_the_prefetch_on_barge_in():
+    """A barge-in during playback must not leave chunk N+1 in flight.
+
+    The prefetch is a task, so an abandoned one keeps a cloud request open (or
+    an executor thread synthesizing) past the interaction that wanted it, and
+    asyncio logs "Task exception was never retrieved" when it is collected.
+    """
+    started: list[str] = []
+    cancelled: list[str] = []
+    playing = asyncio.Event()
+
+    async def fetch(chunk: str):
+        started.append(chunk)
+        try:
+            if chunk != "one":
+                await asyncio.sleep(10)  # the prefetch, still in flight
+            return np.zeros(4, dtype=np.int16), 16000
+        except asyncio.CancelledError:
+            cancelled.append(chunk)
+            raise
+
+    class BlockingSink:
+        async def play(self, pcm, rate):
+            playing.set()
+            await asyncio.sleep(10)  # cancelled mid-playback
+
+    task = asyncio.create_task(
+        play_pipelined(["one", "two"], fetch, BlockingSink())
+    )
+    await playing.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+
+    assert started == ["one", "two"]  # the prefetch did start
+    assert cancelled == ["two"]       # and did not outlive the interaction

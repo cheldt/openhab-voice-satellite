@@ -50,6 +50,16 @@ openhab-voice-satellite = "openhab_voice_satellite.__main__:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.mypy]
+# The central engine contract is a typing Protocol and the codebase is fully
+# annotated, so a type gate is cheap here. The pydantic plugin is not optional:
+# without it every `default_factory=SomeModel` reads as an error.
+plugins = ["pydantic.mypy"]
+files = ["src/openhab_voice_satellite"]
+# GStreamer (gi), piper, faster_whisper, openwakeword and pysilero ship no
+# stubs; the imports are all lazy and guarded at their call sites.
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

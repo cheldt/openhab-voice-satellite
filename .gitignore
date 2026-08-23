@@ -5,3 +5,6 @@ models/
 config.yaml
 .pytest_cache/
 .claude/
+
+# the review report is a working document, not a repo artifact
+review.md

@@ -22,11 +22,49 @@ Environment=HF_HOME=/opt/openhab-voice-satellite/models/hf
 Environment=OMP_WAIT_POLICY=PASSIVE
 # numpy/OpenBLAS handles tiny arrays only; one thread, never spins
 Environment=OPENBLAS_NUM_THREADS=1
-# Environment=OPENHAB_TOKEN=oh.stt.XXXX   # or keep the token in config.yaml
+# Environment=OPENHAB_TOKEN=oh.stt.XXXX   # or keep the token in config.yaml,
+#   which must then be chmod 600 (see deploy/install.md §4). For a token that
+#   never appears in a unit file or a process environment listing either, use
+#   EnvironmentFile=%h/.config/openhab-voice-satellite.env (chmod 600).
 # Environment=GEMINI_API_KEY=AIzaXXXX     # only when stt/tts engine is "gemini"
 # Environment=DEEPGRAM_API_KEY=XXXX       # only when stt/tts engine is "deepgram"
 Restart=on-failure
 RestartSec=3
+
+# Sandboxing. This process parses network responses (aiohttp), runs large
+# native parsers on untrusted audio (onnxruntime, ctranslate2) and optionally
+# unpickles verifier files — which config.py itself says to treat as
+# executable code. Unconfined, a memory-corruption bug in any of those yields
+# the whole user session: ~/.ssh, browser profiles, every user file. None of
+# these restrictions costs anything here.
+#
+# It is a *user* unit, so the effective set depends on the systemd version in
+# the session; validate with `systemd-analyze --user security
+# openhab-voice-satellite.service` after installing, and loosen only what that
+# run shows to be breaking audio.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+# the install tree (config, models) and the HF cache under it must stay writable
+ReadWritePaths=/opt/openhab-voice-satellite
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# deliberately NOT MemoryDenyWriteExecute=yes: onnxruntime and ctranslate2 map
+# executable pages of their own, and denying it breaks model loading outright
+# AF_UNIX is the PipeWire/pulse socket; the rest is openHAB + the cloud APIs
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=default.target

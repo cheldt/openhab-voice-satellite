@@ -22,7 +22,11 @@ jobs:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
-    - uses: actions/checkout@v4
+    # Actions are pinned to full commit SHAs: a tag is mutable, so a
+    # compromised maintainer account can repoint it at code that runs with
+    # write access to this workspace and the job's GITHUB_TOKEN (see the
+    # tj-actions/changed-files tag repoint, March 2025). Bump deliberately.
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
     - name: Install GStreamer and GObject introspection
       # runner has no PipeWire daemon: gst tests only construct pipelines
       # from fake elements; anything needing live audio is marked/skipped
@@ -32,7 +36,7 @@ jobs:
           gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
           gstreamer1.0-plugins-base gstreamer1.0-pipewire
     - name: Install uv
-      uses: astral-sh/setup-uv@v5
+      uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
       with:
         python-version: ${{ matrix.python-version }}
         enable-cache: true
@@ -41,5 +45,11 @@ jobs:
     - name: Lint with flake8
       # gating: line length + complexity come from .flake8
       run: uv run flake8 . --count --statistics
+    - name: Type-check with mypy
+      # --with, not a dev-extra pin: keeps mypy out of uv.lock (same pattern as
+      # pip-audit in security-scan.yml). Config lives in pyproject.toml.
+      run: uv run --with mypy mypy
     - name: Test with pytest
-      run: uv run pytest
+      # -rs: artifact-gated skips are invisible without it, and an invisible
+      # skip reads exactly like a pass
+      run: uv run pytest -rs

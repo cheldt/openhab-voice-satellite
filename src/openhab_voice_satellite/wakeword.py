@@ -166,9 +166,10 @@ class BaseWakewordDetector:
         # verifier scores; the trigger frame itself is not one of them
         self._verify_delay_frames = max(1, -(-config.stage2.delay_ms // frame_ms))
         self._verify_countdown: int | None = None
-        # peak stage-1 score while a verification is pending; frozen into
-        # last_trigger_score when the verdict lands
-        self._pending_peak: float | None = None
+        # peak stage-1 score while a verification is pending, frozen into
+        # last_trigger_score when the verdict lands. 0.0 when nothing is
+        # pending; `_verify_countdown` is what says whether one is.
+        self._pending_peak = 0.0
         self.last_trigger_score: float | None = None
         self.last_verifier_score: float | None = None
         self.last_rejection: float | None = None
@@ -184,7 +185,9 @@ class BaseWakewordDetector:
         every other session here gets.
         """
         stage2 = config.stage2
-        if not stage2.model:
+        if not stage2.model or not stage2.mel_basis:
+            # the pair is enforced at load (Stage2Config._pair); spelled out
+            # here so the frontend's path argument is unconditionally a path
             return None
         import onnxruntime as ort
 
@@ -305,7 +308,7 @@ class BaseWakewordDetector:
             self._verify_countdown -= 1
             if self._verify_countdown <= 0:
                 self._verify_countdown = None
-                peak, self._pending_peak = self._pending_peak, None
+                peak, self._pending_peak = self._pending_peak, 0.0
                 score = self._verify()
                 self.last_verifier_score = score
                 self.last_trigger_score = peak
@@ -360,7 +363,7 @@ class BaseWakewordDetector:
         self._engine_reset()
         self._ring.clear()
         self._verify_countdown = None
-        self._pending_peak = None
+        self._pending_peak = 0.0
         self.last_trigger_score = None
         self.last_verifier_score = None
         self.last_rejection = None

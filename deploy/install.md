@@ -25,17 +25,34 @@ non-Debian systems: install the girepository + cairo dev headers and use
 
 ```bash
 sudo mkdir -p /opt/openhab-voice-satellite && sudo chown $USER /opt/openhab-voice-satellite
+sudo chmod 750 /opt/openhab-voice-satellite   # config.yaml will hold live credentials
 git clone https://github.com/cheldt/openhab-voice-satellite.git /opt/openhab-voice-satellite   # or rsync the project over
 cd /opt/openhab-voice-satellite
 python3 -m venv --system-site-packages .venv
-.venv/bin/pip install -e .
+
+# Install the *locked* dependency set, with hashes. `pip install -e .` alone
+# resolves the range specifiers in pyproject.toml fresh at install time, so
+# what runs on the Pi is neither the version set the nightly pip-audit scans
+# (it audits uv.lock) nor integrity-verified against a PyPI substitution — on
+# a device holding the openHAB token and an always-on microphone.
+pipx run uv export --frozen --format requirements-txt --no-emit-project \
+  > /tmp/requirements-deploy.txt          # or: uv export ... on a dev box, then copy
+.venv/bin/pip install --require-hashes -r /tmp/requirements-deploy.txt
+.venv/bin/pip install -e . --no-deps      # the project itself, deps already in
+
 # openwakeword is installed without dependencies on purpose — its metadata
 # demands tflite-runtime, which has no wheels for current Pythons; the ONNX
 # backend used here does not need it. Version pinned: >=0.6.0 is required for
 # the ncpu kwarg that keeps its ONNX sessions single-threaded (unbounded
-# sessions spin-wait and burn ~1 core per worker thread at idle):
-.venv/bin/pip install --no-deps 'openwakeword==0.6.0'
+# sessions spin-wait and burn ~1 core per worker thread at idle). Hash-pinned
+# too, since this one is outside the lock the line above verifies:
+.venv/bin/pip install --no-deps 'openwakeword==0.6.0' \
+  --hash=sha256:6f423a4e3ae9dd0e3cd12b50ff8abf69679f687b4ab349d7c82c021c0e2abc9d
 ```
+
+The exact pinned set the nightly `pip-audit` scans is `uv.lock`, and that
+workflow appends the same `openwakeword==0.6.0` pin, so the audited set and the
+installed set are the same one.
 
 ## 3. Download models (~400 MB total)
 
@@ -110,9 +127,25 @@ Point `wakeword.verifier_model` at the result. Two warnings:
 
 ```bash
 cp config.example.yaml config.yaml
+chmod 600 config.yaml                  # it is about to hold live credentials
 .venv/bin/openhab-voice-satellite --list-devices     # lists PipeWire sources/sinks
 $EDITOR config.yaml                    # devices, openHAB url + token
 ```
+
+`chmod 600` is not optional. Under the default umask the copy is world-readable
+inside a world-readable directory, and it holds the openHAB API token (full
+smart-home control, including physical actuation) plus any Gemini/Deepgram keys
+(billable). On a Pi that also runs another service, compromising that service is
+then enough to read all three. If you would rather the credentials never sit in
+a file the service reads, put them in an `EnvironmentFile=` (also `chmod 600`)
+or systemd credentials, and leave `api_token: null` — the env vars win over the
+config file either way.
+
+For TLS, prefer `openhab.ca_cert` over `verify_ssl: false`: a self-signed
+openHAB reached with verification off accepts *any* certificate, so anyone who
+can intercept the connection harvests the bearer token from the first request.
+Point `ca_cert` at the server's certificate (or its CA) and the token stays
+protected.
 
 `--list-devices` shows every PipeWire node with its name and description;
 `audio.input_device` / `audio.output_device` match a case-insensitive
@@ -150,8 +183,26 @@ cp deploy/openhab-voice-satellite.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now openhab-voice-satellite
 sudo loginctl enable-linger $USER
+systemd-analyze --user security openhab-voice-satellite   # check the sandbox
 journalctl --user -u openhab-voice-satellite -f
 ```
+
+The unit carries a sandboxing block (`ProtectSystem=strict`, `ProtectHome`,
+`RestrictAddressFamilies`, an empty `CapabilityBoundingSet`,
+`SystemCallFilter=@system-service`, …). It matters because the process parses
+network responses, runs large native parsers on untrusted audio, and optionally
+unpickles verifier files, so a memory-corruption bug in onnxruntime,
+ctranslate2 or aiohttp would otherwise run with full access to the user's
+session. Which directives a *user* unit actually honors depends on the systemd
+version in the session, which is what `systemd-analyze --user security` reports
+— run it after installing and loosen only what it shows to be breaking audio.
+`MemoryDenyWriteExecute` is deliberately left off: onnxruntime and ctranslate2
+map executable pages of their own.
+
+Two things the sandbox needs from the layout: `/opt/openhab-voice-satellite` is
+the only writable path (`ReadWritePaths=`), so `HF_HOME` must stay inside it,
+and PipeWire is reached over `AF_UNIX` in `$XDG_RUNTIME_DIR`, not through the
+home directory `ProtectHome=read-only` covers.
 
 ## Optional: robust barge-in with echo cancellation
 

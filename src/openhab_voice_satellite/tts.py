@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Awaitable, Callable
+from typing import Any, Callable, Coroutine
 
 import numpy as np
 
@@ -41,9 +41,14 @@ def tts_chunks(text: str) -> list[str]:
     return chunks
 
 
+# a coroutine function, not merely awaitable: the results are handed to
+# asyncio.create_task so chunk N+1 is fetched while N plays
+Fetch = Callable[[str], Coroutine[Any, Any, tuple[np.ndarray, int]]]
+
+
 async def play_pipelined(
     chunks: list[str],
-    fetch: Callable[[str], Awaitable[tuple[np.ndarray, int]]],
+    fetch: Fetch,
     sink: AudioSink,
 ) -> None:
     """Play chunk N while fetching/synthesizing chunk N+1.
@@ -52,11 +57,11 @@ async def play_pipelined(
     PartialSpeechError carrying the unspoken remainder, so the fallback engine
     picks up where playback stopped instead of repeating the whole utterance.
     """
-    pending: asyncio.Task | None = asyncio.create_task(fetch(chunks[0]))
+    current: asyncio.Task = asyncio.create_task(fetch(chunks[0]))
+    pending: asyncio.Task | None = None
     played = False
     try:
         for i in range(len(chunks)):
-            current, pending = pending, None
             try:
                 pcm, rate = await current
             except FALLBACK_ERRORS as exc:
@@ -67,24 +72,25 @@ async def play_pipelined(
                     ) from exc
                 raise
             if i + 1 < len(chunks):
-                pending = asyncio.create_task(fetch(chunks[i + 1]))
+                current = pending = asyncio.create_task(fetch(chunks[i + 1]))
             if len(pcm):
                 await sink.play(pcm, rate)
                 played = True
+            pending = None  # now awaited by the next iteration, not orphaned
     finally:
         if pending is not None:
             pending.cancel()
 
 
 async def stream_synthesis(
-    sentences: list[str],
+    chunks: list[str],
     synth: Callable[[str], tuple[np.ndarray, int]],
     sink: AudioSink,
 ) -> None:
-    """Play sentence N while synthesizing N+1 in the executor."""
+    """Play chunk N while synthesizing N+1 in the executor."""
     loop = asyncio.get_running_loop()
 
-    async def fetch(sentence: str) -> tuple[np.ndarray, int]:
-        return await loop.run_in_executor(None, synth, sentence)
+    async def fetch(chunk: str) -> tuple[np.ndarray, int]:
+        return await loop.run_in_executor(None, synth, chunk)
 
-    await play_pipelined(sentences, fetch, sink)
+    await play_pipelined(chunks, fetch, sink)

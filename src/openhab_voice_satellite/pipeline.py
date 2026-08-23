@@ -83,7 +83,10 @@ class Pipeline:
         """Returns the terminal event (PLAYBACK_DONE / NO_SPEECH / ERROR)."""
         dialog = self._config.dialog
         conversation_id = str(uuid.uuid4()) if dialog.enabled else None
-        conversation_started = False
+        # the id whose server-side conversation may exist and must be deleted;
+        # holding the id rather than a bool keeps the cleanup call's argument
+        # unconditionally a string
+        started_id: str | None = None
         language: str | None = None
         round_no = 0
         try:
@@ -105,7 +108,7 @@ class Pipeline:
 
                 # Set before the await: a cancel mid-POST must still delete
                 # the conversation the server may have created.
-                conversation_started = conversation_id is not None
+                started_id = conversation_id
                 response = await self._openhab.send_command(transcript.text, conversation_id)
                 log.info("openHAB answered: %s", _truncate_for_log(response))
 
@@ -125,8 +128,8 @@ class Pipeline:
             await self._earcons.play("error")
             return Event.ERROR
         finally:
-            if conversation_started:
-                self._schedule_conversation_end(conversation_id)
+            if started_id is not None:
+                self._schedule_conversation_end(started_id)
 
     def _dump_utterance(self, pcm: np.ndarray) -> None:
         """Write the recorded utterance to $OVS_DUMP_UTTERANCES for field debugging."""

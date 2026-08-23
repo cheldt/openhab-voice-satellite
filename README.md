@@ -65,6 +65,7 @@ python3 -m venv .venv
 .venv/bin/pip install --no-deps 'openwakeword==0.6.0'   # see note in pyproject.toml
 .venv/bin/python scripts/download_models.py
 cp config.example.yaml config.yaml             # edit devices + openHAB url/token
+chmod 600 config.yaml                          # it will hold live credentials
 .venv/bin/openhab-voice-satellite --list-devices
 .venv/bin/openhab-voice-satellite --check
 .venv/bin/openhab-voice-satellite

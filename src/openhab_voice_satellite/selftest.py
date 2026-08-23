@@ -68,7 +68,14 @@ def check_wakeword(config: Config) -> None:
     # ring already holds WAKEWORD_CHECK_SECONDS of audio, so this scores the
     # same window a live verdict would.
     if config.wakeword.stage2.model:
-        _require_probability(detector._verify(), "stage-2 verifier")
+        # _verify lives on the decision layer (BaseWakewordDetector, which
+        # every engine subclasses), not on the engine-neutral protocol
+        # build_detector is typed as — the check stays unconditional, which is
+        # the whole point of it
+        _require_probability(
+            detector._verify(),  # type: ignore[attr-defined]
+            "stage-2 verifier",
+        )
 
 
 def check_vad(config: Config) -> None:

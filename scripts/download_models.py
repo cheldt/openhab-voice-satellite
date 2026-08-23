@@ -8,6 +8,7 @@ Run from the repo root inside the venv:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 import urllib.request
 from pathlib import Path
@@ -15,7 +16,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-_PIPER_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
+# Pinned to a revision, not to `main`. These .onnx files are parsed by
+# onnxruntime — native code — inside a long-running always-listening service,
+# so "whatever that branch points at today" is the wrong contract: a force-push
+# or a compromised repo would be fetched and loaded with nothing noticing. The
+# hashes below were verified against this revision (the .onnx against its LFS
+# sha256, the sidecars against their git blob oids).
+_PIPER_REVISION = "f5a6e9094787fd865d65cb024472f977f9c542b5"
+_PIPER_BASE = f"https://huggingface.co/rhasspy/piper-voices/resolve/{_PIPER_REVISION}"
 # voice file -> HF subpath; each .onnx needs its sidecar .onnx.json
 _PIPER_VOICES = {
     "en_GB-alba-medium": "en/en_GB/alba/medium",
@@ -26,9 +34,32 @@ PIPER_FILES = {
     for name, subpath in _PIPER_VOICES.items()
     for ext in (".onnx", ".onnx.json")
 }
+PIPER_SHA256 = {
+    "en_GB-alba-medium.onnx":
+        "401369c4a81d09fdd86c32c5c864440811dbdcc66466cde2d64f7133a66ad03b",
+    "en_GB-alba-medium.onnx.json":
+        "aa965a2f02ecced632c2694e1fc72bbff6d65f265fab567ca945918c73dd89f4",
+    "de_DE-thorsten-medium.onnx":
+        "7e64762d8e5118bb578f2eea6207e1a35a8e0c30595010b666f983fc87bb7819",
+    "de_DE-thorsten-medium.onnx.json":
+        "974adee790533adb273a1ac88f49027d2a1b8f0f2cf4905954a4791e79264e85",
+}
 
 
-def download(url: str, dest: Path) -> None:
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def download(url: str, dest: Path, sha256: str | None = None) -> None:
+    """Fetch `url` to `dest`, verifying `sha256` before it lands.
+
+    Verified in the .part file and only then renamed, so a mismatch leaves
+    nothing in place for the service to load on the next start.
+    """
     if dest.exists():
         print(f"  exists: {dest}")
         return
@@ -36,16 +67,36 @@ def download(url: str, dest: Path) -> None:
     print(f"  fetching {url}")
     tmp = dest.with_suffix(dest.suffix + ".part")
     urllib.request.urlretrieve(url, tmp)
+    if sha256 is not None:
+        got = _sha256(tmp)
+        if got != sha256:
+            tmp.unlink()
+            raise SystemExit(
+                f"  CHECKSUM MISMATCH for {dest.name}\n"
+                f"    expected sha256 {sha256}\n"
+                f"    got      sha256 {got}\n"
+                f"  Refusing to install it. This file is parsed by onnxruntime "
+                f"inside the service, so a substituted model is native code "
+                f"execution — do not retry until you know why it changed."
+            )
     tmp.rename(dest)
     print(f"  saved:  {dest}")
 
 
 def download_openwakeword() -> None:
+    """Fetch openWakeWord's shared feature models via its own downloader.
+
+    Unverified, and not fixable from here: the URLs and the fetching both live
+    inside openwakeword.utils. Noted rather than hidden — these .onnx files are
+    parsed by onnxruntime in the service too, so a compromised upstream release
+    asset reaches native code. Provisioning them from a pinned, hashed mirror
+    is the fix if that ever matters more than the convenience.
+    """
     print("openWakeWord models:")
     import openwakeword.utils
 
     openwakeword.utils.download_models()
-    print("  done (shared feature models + pretrained wakewords)")
+    print("  done (shared feature models + pretrained wakewords, unverified)")
 
 
 def check_custom_wakeword(model: str) -> None:
@@ -62,7 +113,7 @@ def check_custom_wakeword(model: str) -> None:
 def download_piper(models_dir: Path) -> None:
     print("Piper TTS models:")
     for name, url in PIPER_FILES.items():
-        download(url, models_dir / "piper" / name)
+        download(url, models_dir / "piper" / name, PIPER_SHA256[name])
 
 
 def warm_whisper(model: str, compute_type: str) -> None:

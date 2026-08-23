@@ -391,11 +391,12 @@ class App:
         # first Ctrl-C did nothing. The cancelling() count is what tells them
         # apart; the shutdown `finally` path enters with it already raised, so
         # it stays unaffected.
-        cancels = asyncio.current_task().cancelling()
+        monitor = asyncio.current_task()
+        cancels = monitor.cancelling() if monitor is not None else 0
         try:
             await task
         except asyncio.CancelledError:
-            if asyncio.current_task().cancelling() > cancels:
+            if monitor is not None and monitor.cancelling() > cancels:
                 raise
         self._set_state(State.IDLE)
         self._pipeline_task = None
