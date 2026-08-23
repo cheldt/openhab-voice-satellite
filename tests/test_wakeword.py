@@ -43,6 +43,37 @@ def test_speaking_raises_threshold(detector_factory):
     assert detector.process(FRAME, speaking=False) == "wake"  # 0.6 >= 0.5
 
 
+def test_patience_does_not_re_judge_playback_frames_at_the_idle_bar(detector_factory):
+    """Each frame is judged against the bar that applied when it arrived.
+
+    The patience window is a window of verdicts, not of scores. Judging the
+    stored scores against the current frame's bar meant that on the first
+    frame after playback ended, scores that had only cleared the raised
+    speaking bar were re-read at the lower idle one — so a detection could be
+    built half out of a frame the speaking threshold existed to reject, which
+    is echo pressure at every playback boundary.
+    """
+    detector = detector_factory(
+        {"wake": [0.45, 0.45]},
+        model="wake", threshold=0.35, threshold_speaking=0.55, patience=2,
+    )
+    assert detector.process(FRAME, speaking=True) is None  # 0.45 < 0.55
+    # the sink drained; this frame clears the idle bar but the previous one
+    # never cleared the bar that applied to it, so patience is not satisfied
+    assert detector.process(FRAME, speaking=False) is None
+
+
+def test_patience_counts_frames_that_cleared_their_own_bar(detector_factory):
+    # the same shape with both frames idle does fire — the guard above is
+    # about the moving bar, not about patience itself
+    detector = detector_factory(
+        {"wake": [0.45, 0.45]},
+        model="wake", threshold=0.35, threshold_speaking=0.55, patience=2,
+    )
+    assert detector.process(FRAME, speaking=False) is None
+    assert detector.process(FRAME, speaking=False) == "wake"
+
+
 def test_stop_model_wins_over_wake(detector_factory):
     detector = detector_factory(
         {"wake": [0.9], "stop": [0.9]}, model="wake", stop_model="stop"

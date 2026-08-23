@@ -54,7 +54,8 @@ class WakewordProtocol(Protocol):
     """What the app needs from a detector, whichever engine backs it."""
 
     # peak stage-1 score of the candidate behind the last WAKE the detector
-    # returned — the score() at the verdict frame is `delay_ms` past the peak
+    # returned — the verdict frame sits ceil(delay_ms/frame_ms) frames past
+    # the trigger, so score() there has usually decayed off the peak
     last_trigger_score: float | None
     # the verifier's score for that candidate (None without a second stage)
     last_verifier_score: float | None
@@ -85,6 +86,14 @@ class EdgeTrigger:
     checking once one of them fires — a gap in the history would corrupt the
     patience window. `feed` is the shorthand for the single-model case.
 
+    The patience window is a window of *verdicts*, not of scores: `observe`
+    takes the bar that applied on that frame and records whether the score met
+    it. The bar moves per frame — `threshold_speaking` while our own output is
+    audible — so re-testing the stored scores against the current frame's bar
+    would let scores that only cleared the raised bar be re-judged at the idle
+    one on the first frame after playback, which is exactly the echo the raise
+    exists to reject.
+
     This lives apart from the detectors so the offline evaluator can replay
     recorded scores through the rule the app actually runs, rather than a copy
     of it that drifts.
@@ -92,17 +101,25 @@ class EdgeTrigger:
 
     def __init__(self) -> None:
         self.scores: deque[float] = deque(maxlen=RECENT_SCORES)
+        # whether each score met the threshold of its own frame
+        self.passes: deque[bool] = deque(maxlen=RECENT_SCORES)
         self.armed = True
 
-    def observe(self, score: float) -> None:
+    def observe(self, score: float, threshold: float) -> None:
         """Advance the history by one frame without deciding anything."""
-        self.scores.append(float(score))
+        score = float(score)
+        self.scores.append(score)
+        self.passes.append(score >= threshold)
 
     def fired(self, threshold: float, patience: int) -> bool:
-        """Whether the newest observed score completes a detection."""
+        """Whether the newest observed score completes a detection.
+
+        `threshold` is read for the re-arm hysteresis only; whether each frame
+        cleared its own bar was already decided in `observe`.
+        """
         if self.armed:
-            window = list(self.scores)[-patience:]
-            if len(window) == patience and all(s >= threshold for s in window):
+            window = list(self.passes)[-patience:]
+            if len(window) == patience and all(window):
                 self.armed = False
                 return True
             return False
@@ -112,7 +129,7 @@ class EdgeTrigger:
 
     def feed(self, score: float, threshold: float, patience: int) -> bool:
         """observe + fired, for callers tracking a single model."""
-        self.observe(score)
+        self.observe(score, threshold)
         return self.fired(threshold, patience)
 
     @property
@@ -121,6 +138,7 @@ class EdgeTrigger:
 
     def reset(self) -> None:
         self.scores.clear()
+        self.passes.clear()
         self.armed = True
 
 
@@ -144,6 +162,8 @@ class BaseWakewordDetector:
         self._triggers: dict[str, EdgeTrigger] = {key: EdgeTrigger() for key in keys}
         self._ring = Int16Ring(SAMPLE_RATE * TAIL_SECONDS)
         self._verifier = self._build_verifier(config)
+        # frames of audio gathered *past* the trigger frame before the
+        # verifier scores; the trigger frame itself is not one of them
         self._verify_delay_frames = max(1, -(-config.stage2.delay_ms // frame_ms))
         self._verify_countdown: int | None = None
         # peak stage-1 score while a verification is pending; frozen into
@@ -185,6 +205,20 @@ class BaseWakewordDetector:
                 f"stage-2 verifier {stage2.model} must take a single 'features' "
                 f"input of shape (batch, 40, 151) — the frontend contract — got "
                 f"{[(i.name, i.shape) for i in inputs]}"
+            )
+        # and the output side, because _verify reads flatten()[0]: a two-logit
+        # or softmax head loads fine and then scores every wake with the wrong
+        # tensor element — no crash, just permanently wrong verdicts. The
+        # ultiwake exporter emits a single (batch, 1) sigmoid; a trailing
+        # dimension of 1 or none at all are the two shapes that mean that.
+        # Only the batch dimension may be symbolic (a string).
+        outputs = session.get_outputs()
+        if len(outputs) != 1 or list(outputs[0].shape[1:]) not in ([], [1]):
+            raise ValueError(
+                f"stage-2 verifier {stage2.model} must emit a single score per "
+                f"batch element (shape (batch, 1) or (batch,)) — `_verify` reads "
+                f"the first element — got "
+                f"{[(o.name, o.shape) for o in outputs]}"
             )
         log.info(
             "wakeword stage-2 verifier loaded: %s (threshold %.2f, delay %d ms)",
@@ -251,15 +285,18 @@ class BaseWakewordDetector:
         the ring. STOP is never deferred, and it also beats a verifier accept
         landing on the same frame — reporting WAKE there would turn a stop
         into a barge-in.
+
+        A pending countdown is resolved *before* this frame's trigger is
+        folded into it, for two reasons. The trigger frame is not settling
+        audio, so it must not consume one of the `delay_frames` — the verdict
+        has to land after that many frames of *further* audio, which is the
+        window the offline calibration measured its threshold on. And a
+        trigger landing on the frame a *rejection* expires would otherwise be
+        absorbed into the finished countdown and thrown away with it, with its
+        edge trigger already disarmed so the rest of the phrase cannot re-fire
+        either: the wakeword would simply be dropped.
         """
         self.last_rejection = None
-        if result == WAKE:
-            # a second stage-1 trigger while one is pending keeps the first
-            # countdown — restarting it would push the window past the phrase
-            if self._verify_countdown is None:
-                self._verify_countdown = self._verify_delay_frames
-                self._pending_peak = self.score(WAKE)
-            result = None
         verdict = None
         if self._verify_countdown is not None:
             # stage 1 usually keeps climbing past the trigger frame; the peak
@@ -280,6 +317,15 @@ class BaseWakewordDetector:
                         "wake candidate rejected by verifier "
                         "(score %.3f, stage-1 peak %.2f)", score, peak,
                     )
+        if result == WAKE:
+            # a second stage-1 trigger while one is pending keeps the first
+            # countdown — restarting it would push the window past the phrase
+            # — and one landing on an *accepted* verdict belongs to the phrase
+            # just reported, so it is dropped rather than verified twice
+            if self._verify_countdown is None and verdict is None:
+                self._verify_countdown = self._verify_delay_frames
+                self._pending_peak = self.score(WAKE)
+            result = None
         # STOP wins the collision; the WAKE branch above already blanked result
         return result or verdict
 
@@ -296,7 +342,7 @@ class BaseWakewordDetector:
         # every model's history advances on every frame, even when an earlier
         # model already fired — a gap would corrupt the patience window
         for key, trigger in self._triggers.items():
-            trigger.observe(scores[key])
+            trigger.observe(scores[key], self._threshold(key, speaking))
 
         config = self._config
         if STOP in self._triggers:

@@ -115,7 +115,7 @@ def test_count_detections_leaves_no_state_between_calls():
 def test_edge_trigger_feed_is_observe_plus_fired():
     a, b = EdgeTrigger(), EdgeTrigger()
     for score in (0.9, 0.1, 0.9):
-        a.observe(score)
+        a.observe(score, 0.8)
         assert a.fired(0.8, 1) == b.feed(score, 0.8, 1)
 
 
