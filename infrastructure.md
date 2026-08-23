@@ -7,8 +7,9 @@ to the PipeWire daemon in the same user session.
 - **Package:** `openhab_voice_satellite` (`src/` layout, `pyproject.toml`, Python ≥ 3.11)
 - **Entry point:** console script `openhab-voice-satellite` → `__main__:main`
 - **Config:** one YAML file validated by pydantic; secrets overridable by env
-- **Audio:** 16 kHz mono int16 end-to-end, 80 ms frames (1280 samples), non-negotiable
-  (Silero VAD, openWakeWord and whisper are all hardwired to 16 kHz)
+- **Audio:** capture is 16 kHz mono int16 in 80 ms frames (1280 samples), non-negotiable
+  (Silero VAD, openWakeWord and whisper are all hardwired to 16 kHz); playback is
+  rate-agnostic by design — earcon WAVs keep their file rate, cloud TTS arrives at 24 kHz
 - **Concurrency:** one asyncio event loop, one GStreamer callback thread, a default
   executor for blocking model calls (whisper, piper)
 
@@ -78,7 +79,7 @@ Helpers inside `app.py` worth naming, because they carry behavior rather than pl
 
 - `_CaptureHealth` — 10 s heartbeat: frame count vs expected fps, peak RMS, peak wake
   score, queue evictions, and `CaptureStats` deltas. Distinguishes "the graph under-fed
-  us" from "we lost frames ourselves". A separate 10 s timeout (`MIC_STALL_WARN_S`) on
+  us" from "we lost frames ourselves" (three distinct loss channels — see §3.2). A separate 10 s timeout (`MIC_STALL_WARN_S`) on
   the wake queue logs a loud stall warning and restarts the health window so the dead
   gap is not charged to the next one — two different timers that happen to share a value.
 - `_DuckController` — duck-and-confirm: a pre-threshold score (0.35) during playback
@@ -102,16 +103,34 @@ Helpers inside `app.py` worth naming, because they carry behavior rather than pl
 
 | Component | Responsibility | Notable contract |
 |---|---|---|
-| `io.py` | `audio_io()` async context manager owning the source/sink pair; `verify_links()` | Sink construction failure closes an already-PLAYING source; link check waits 3 s for WirePlumber to settle |
-| `gst_source.py` | `PipewireSource`: `pipewiresrc → appsink`, chunked to fixed frames, `CaptureStats` (buffers, samples, PTS gaps, drops) | 5 s first-frame timeout; PTS gaps under 1 ms are jitter, not lost audio; deferred `start()` |
-| `gst_sink.py` | `PipewireSink`: persistent clock-free byte FIFO into `pulsesink`, byte-accounted `play()` completion, keepalive dither, wake-up preamble, `duck`/`unduck`/`stop` | `sync=false`, no PTS — clock-based scheduling was abandoned after repeated stack failures; `pipewiresink` is avoided because on PipeWire 1.2.x it wedges persistent streams and takes the capture stream down with it |
-| `gst_common.py` | `gst_init()`, `CLIENT_NAME`, s16 mono caps, sync bus handler | `gi` imported only where genuinely needed |
-| `gst_devices.py` | `AudioNode`, `match_node` (pure, importable without PyGObject), `list_audio_nodes`, `resolve_node`, `verify_stream_links` (pw-dump peers), `probe_capture` | Device config is a case-insensitive substring of node name or description; `null` = default node |
-| `broadcast.py` | `AudioBroadcaster` fan-out to bounded `SubscriberQueue`s; `drain_stale()` | Drop-oldest under backpressure with a `dropped` counter — gaps are never zero-filled, since fabricated silence would feed the endpointer's silence window |
+| `io.py` | `audio_io()` async context manager owning the source/sink pair; `verify_links()` | Sink construction failure closes the source even when it is already PLAYING (the probe path — the app opens with `start_capture=False`, so its source is not live yet); link check waits 3 s for WirePlumber to settle |
+| `gst_source.py` | `PipewireSource`: `pipewiresrc → appsink`, chunked to fixed frames, `CaptureStats` (buffers, samples, PTS gaps, drops) | 5 s first-frame **warning** — capture itself never fails; `--check`'s `probe_capture` is the path that raises. PTS gaps under 1 ms are jitter, not lost audio; deferred, idempotent `start()`. Has its own 50-frame drop-oldest queue and counter (`CaptureStats.dropped`), independent of the broadcaster's — see the loss-accounting note below. Bus ERROR/EOS ends the frame stream with the `None` sentinel — see the capture-death note below |
+| `gst_sink.py` | `PipewireSink`: persistent clock-free byte FIFO into `pulsesink`, byte-accounted `play()` completion, keepalive dither, wake-up preamble, `duck`/`unduck`/`stop` | `sync=false` with unstamped buffers (the appsrc's `format=time` is inert under `sync=false`) — clock-based scheduling was abandoned after repeated stack failures; `pipewiresink` is avoided because on PipeWire 1.2.x it wedges persistent streams and takes the capture stream down with it. `is_playing` is a deadline estimate, not a sink query: sound end + 0.3 s residual for the *requested* (not guaranteed) 200 ms pulse ring, cleared by flush so a barge-in reads quiet immediately — every echo-mitigation decision rides on it. A second `play()` flushes the first, whose `await` then returns normally having played an arbitrary prefix — this is what makes barge-in cheap, and what makes accidental overlap a silent truncation rather than a crash. A bus error is sticky: every later `play()` raises and the keepalive exits (logged), but the process keeps listening — see the capture-death note below. The keepalive task runs from construction, before `source.start()` |
+| `gst_common.py` | `gst_init()`, `CLIENT_NAME`, s16 mono caps, `capture_description`, sync bus handler | `gi` imported only where genuinely needed. The sync bus handler must never call `set_state()` (GStreamer deadlocks); the only way off the posting thread is `call_soon_threadsafe`. `capture_description` is shared byte-for-byte by the app, `--check` and `--probe-mic` — which is what makes `--check` diagnostic of the real path — and pins the appsink to `max-buffers=0 drop=false` with no `queue` element: a queue in front of the appsink could only lose buffers where nothing counts them |
+| `gst_devices.py` | `AudioNode`, `match_node` (pure, importable without PyGObject), `list_audio_nodes`, `resolve_node`, `verify_stream_links` (pw-dump peers; `parse_stream_peers` is its pure, unit-testable half), `probe_capture` | Device config is a case-insensitive substring of node name or description; `null` = default node; an unmatched name raises `ValueError` at startup — a typo aborts instead of silently falling back to the default node (that silent fallback is PipeWire's own behavior, which is why `verify_stream_links` exists). `_monitor_refs` keeps every DeviceMonitor alive for the process lifetime on purpose: premature finalization triggers GStreamer teardown criticals on PipeWire 1.2.x |
+| `broadcast.py` | `AudioBroadcaster` fan-out to bounded `SubscriberQueue`s; `drain_stale()` | Drop-oldest under backpressure with a `dropped` counter — gaps are never zero-filled, since fabricated silence would feed the endpointer's silence window. A `None` sentinel ends every subscriber stream: pushed when the source ends and again by `stop()`, never consumed by `drain_stale`, so a consumer blocked in `get()` (the recorder) cannot hang past shutdown. `drain_stale` deliberately leaves `dropped` alone: lost-to-backpressure and abandoned-on-purpose are separate accounting |
 | `chunker.py` | `FrameChunker`: arbitrary buffers → exact `frame_samples` frames | Copies, because gst buffers are unmapped after the callback returns |
 | `wav.py` | `rms`, `read_wav_mono`, `write_wav`, `pcm_to_wav_bytes` | `rms` casts to float64: squaring int16 overflows |
-| `earcons.py` | `Earcons`: wake/ack/error/idle, pre-decoded to PCM at startup | Missing file = warning + silent skip; playback failure never propagates |
-| `source.py`, `sink.py` | `AudioSource` / `AudioSink` Protocols | The seam that keeps the app testable without a live graph |
+| `earcons.py` | `Earcons`: wake/ack/error/idle, pre-decoded to PCM at startup | Missing file = warning + silent skip, but a file that is present yet corrupt (not 16-bit PCM, not a WAV) raises in `__init__` — a hard startup crash. `play()` catches `Exception` only, so `CancelledError` propagates: that is what makes an earcon barge-in-able |
+| `source.py`, `sink.py` | `AudioSource` / `AudioSink` Protocols | The seam that keeps the app testable without a live graph. `frames()` is a plain `def` on purpose: an `async def` in the Protocol would demand a coroutine returning the iterator, not an async generator |
+
+**Frame loss has three independent channels**, and the split is what makes
+`_CaptureHealth`'s "the graph under-fed us" vs "we lost frames ourselves"
+decidable: PTS gaps counted at the appsink (the graph skipped audio), the
+source's own queue drops (`CaptureStats.dropped` — the event loop stalled),
+and per-subscriber evictions (`SubscriberQueue.dropped` — one consumer fell
+behind). Both queues default to 50 frames = 4 s at 80 ms. `drain_stale`
+losses appear in none of these counters, by design.
+
+**Capture death is fatal on purpose.** A capture bus ERROR or EOS pushes the
+`None` sentinel through the broadcaster; the monitor raises
+`CaptureClosedError`, `main()` exits non-zero, and the systemd unit
+(`Restart=on-failure`) restarts the process with a fresh graph connection.
+In-process recovery was rejected: the sync bus handler cannot call
+`set_state()` (deadlock), and a PipeWire stream that has lost its scheduling
+rarely comes back. Playback is deliberately asymmetric — a sink bus error is
+sticky and fails every subsequent response, but the satellite keeps
+listening.
 
 ### 3.3 Wakeword
 
@@ -185,7 +204,7 @@ first fallback.
 | `sounds/` | `wake.wav`, `ack.wav`, `error.wav`, `idle.wav` |
 | `models/piper/` | Piper voices (de_DE thorsten, en_GB alba, en_US lessac) |
 | `models/wakeword/` | openWakeWord wake/stop models, custom `shodan`/`showdaan`/`shohdaan` candidates, stage-2 verifiers with their `.config.json`, `verifier_melfb_40.npy`, `verifier_frontend_golden.npz`, plus the `wakeforge/` training artifacts |
-| `deploy/openhab-voice-satellite.service` | systemd **user** unit (PipeWire lives in the user session; needs `loginctl enable-linger`). Sets `HF_HOME`, `OMP_WAIT_POLICY=PASSIVE`, `OPENBLAS_NUM_THREADS=1` |
+| `deploy/openhab-voice-satellite.service` | systemd **user** unit (PipeWire lives in the user session; needs `loginctl enable-linger`). Sets `HF_HOME`, `OMP_WAIT_POLICY=PASSIVE`, `OPENBLAS_NUM_THREADS=1`. `Restart=on-failure` pairs with the non-zero capture-death exit (§3.2) |
 | `deploy/install.md` | apt packages, openwakeword `--no-deps` pin, AEC config, 16 kHz graph clock pinning, powered-speaker preamble notes |
 | `tests/` | 28 `test_*.py` modules (~one per source module) plus `conftest.py`, `fakes.py`, `wakeword_stubs.py`; GStreamer tests skip without PyGObject; `test_verifier_mel.py` checks librosa parity against golden fixtures |
 | `.github/workflows/python-app.yml` | uv, Python 3.11–3.14 matrix, flake8 + pytest (runner has no PipeWire; live-audio tests skip) |
@@ -224,8 +243,10 @@ DELETE, the lazy TTS load) run as their own shielded/tracked tasks.
 remainder re-spoken. Frame loss is counted and reported, never hidden behind fabricated
 silence. Perf patches on third-party internals are version-gated and fail open. Config
 mistakes that would be silent at runtime (removed engine name, missing cloud key, voice
-without a language, a stage-2 model without its filterbank) are load-time errors, and a
-speaking threshold below the idle one is a warning.
+without a language, a stage-2 model without its filterbank, an audio device name matching
+no PipeWire node) are load-time errors, and a speaking threshold below the idle one is a
+warning. Capture death exits non-zero for systemd to restart (§3.2); playback death fails
+responses but keeps listening.
 
 **Security notes.** openWakeWord custom verifier `.pkl` files are unpickled at startup —
 treat them as executable code. Cloud keys go in headers, never query strings.
