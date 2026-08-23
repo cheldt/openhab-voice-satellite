@@ -176,14 +176,24 @@ task it can cancel" is true of the event-loop task only.
 
 | Component | Responsibility | Notable contract |
 |---|---|---|
-| `gemini.py` | `GeminiClient` + `GeminiTranscriber` / `GeminiSpeaker`: plain REST `generateContent` — STT via JSON mode with inline base64 WAV, TTS via the AUDIO modality; `check_model()` for `--check` | API key travels in the `x-goog-api-key` header, never in a URL |
-| `deepgram.py` | `DeepgramClient` + transcriber/speaker: Nova-3 `/v1/listen` (language-restricted), Aura-2 `/v1/speak` raw linear16 | Key in the `Authorization` header; voice per language via the model suffix |
-| `cloud.py` | `raise_for_status`, `pick_voice` | Deliberately free functions: providers differ in auth, endpoints and error types, and keeping that visible beats a base class |
-| `fallback.py` | `CloudEngineError`, `PartialSpeechError`, `FALLBACK_ERRORS`, `FallbackTranscriber`, `FallbackSpeaker`, `LazySpeaker` | `CancelledError` (barge-in) is not an `Exception` and passes through both wrappers untouched; `LazySpeaker` defers the multi-second local model load to the executor, memoized and shielded so a barge-in mid-load does not start a second one |
+| `gemini.py` | `GeminiClient` + `GeminiTranscriber` / `GeminiSpeaker`: plain REST `generateContent` — STT via JSON mode with inline base64 WAV, TTS via the AUDIO modality; `check_model()` validates each configured model per direction for `--check` | API key travels in the `x-goog-api-key` header, never in a URL. The TTS rate is *parsed* from the response `mimeType` (`rate=`, default 24000) — deepgram's, by contrast, is *requested* via `tts_sample_rate`; the intro's "cloud TTS arrives at 24 kHz" is true of both only by default |
+| `deepgram.py` | `DeepgramClient` + transcriber/speaker: Nova-3 `/v1/listen` (one configured language → `language=`, several → repeated `detect_language=`), Aura-2 `/v1/speak` raw linear16 | Key in the `Authorization` header; the per-language voice *is* the whole Aura-2 model name (`aura-2-viktoria-de`), sent as the `model` param. `check_auth()` validates the key only, so `--check` adds per-direction probes: 0.1 s of silence through `/v1/listen` for `stt_model`, one word through `/v1/speak` per configured voice |
+| `cloud.py` | `raise_for_status`, `pick_voice` | Deliberately free functions: providers differ in auth, endpoints and error types, and keeping that visible beats a base class. `pick_voice` returning `None` (no voice for the language *or* the default) is a config error the speakers turn into a `CloudEngineError` — a silent, permanent local fallback — so, like `piper.voices`, the selected engine's `tts_voices` must contain `tts.default_language` at load time |
+| `fallback.py` | `CloudEngineError`, `PartialSpeechError`, `FALLBACK_ERRORS`, `FallbackTranscriber`, `FallbackSpeaker`, `LazySpeaker` | `CancelledError` (barge-in) is not an `Exception` and passes through both wrappers untouched; `LazySpeaker` defers the multi-second local model load to the executor, memoized and shielded so a barge-in mid-load does not start a second one. `FALLBACK_ERRORS` is a closed set (HTTP, timeout, JSON decode); payload-decode failures inside the providers are wrapped in their own error types so they stay inside it |
 
 Cloud is per direction: `stt.engine` and `tts.engine` are chosen independently. Local
 STT stays loaded as the fallback; local TTS becomes a `LazySpeaker` and loads on the
 first fallback.
+
+**Cloud language contract.** Both transcribers clamp a detected label outside
+`stt.languages` to `tts.default_language`, but they differ when detection is missing
+entirely: gemini (non-JSON response) falls back to `default_language`, deepgram
+(missing or non-string `detected_language`) to `languages[0]`. Both are coarser than
+whisper's remap, which picks the best *allowed* entry of `all_language_probs` (§3.4),
+and the resulting label locks the TTS voice for the whole dialog (§3.1). A gemini STT
+response that fails JSON parsing is used verbatim as the transcript under one warning —
+an apology or a markdown fence then reaches the openHAB interpreter as a command; that
+beats losing the utterance, but it is a deliberate trade.
 
 ### 3.6 openHAB integration
 
@@ -195,7 +205,7 @@ first fallback.
 
 | Component | Responsibility |
 |---|---|
-| `selftest.py` | `--check`: audio devices + real capture probe, wakeword (2.5 s of frames so the engine's context window fills), VAD, whisper, piper, Gemini/Deepgram auth, openHAB ping. Each check imports lazily and reports independently |
+| `selftest.py` | `--check`: audio devices + real capture probe, wakeword (2.5 s of frames so the engine's context window fills), VAD, whisper, piper, cloud probes (gemini: model metadata per configured direction; deepgram: key check plus a silence `/v1/listen` and a one-word `/v1/speak` per voice), openHAB ping. Each check imports lazily and reports independently |
 | `probe.py` | `--probe-mic`: 30 s field diagnostic on the same source/sink the app uses — per-second RMS/peak/wake score plus wall and process CPU ms per frame against the `frame_ms` budget, earcons at t=8 s and t=18 s, capture written to `diagnose_capture.wav`. The module docstring is the interpretation guide (silent node, wrong node, clock mismatch, playback poisoning capture, sleeping speaker) |
 | `bench.py` | Offline wakeword evaluation through `build_detector` and the real `EdgeTrigger`: `--score-wav` (per-file distribution + threshold × patience sweep over 15 thresholds × patience 1–3), `--compare MODEL` (two candidates on identical frames), `--positives/--negatives` (recall vs false accepts per hour — the promotion gate). Appends silence after each file so a deferred stage-2 verdict still flushes |
 
