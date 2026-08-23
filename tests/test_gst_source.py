@@ -6,6 +6,33 @@ import pytest
 # the accounting is pure python; only the pipeline tests below need gi
 from openhab_voice_satellite.audio.gst_source import NS, CaptureStats, _Counters
 
+
+def test_the_end_of_stream_sentinel_survives_a_full_queue():
+    """The sentinel is the one put that must never be lost.
+
+    Every frame path drops the oldest entry under backpressure, so a bare
+    put_nowait(None) behind a queue those paths just filled raised QueueFull
+    into the loop's callback handler, where it was swallowed with nothing to
+    retry it. The broadcaster then blocks in get() forever, no subscriber sees
+    None, and app.py's CaptureClosedError exit never fires: the process lives
+    on, permanently deaf. Needs no GStreamer graph — only the queue.
+    """
+    from openhab_voice_satellite.audio.gst_source import PipewireSource
+
+    source = object.__new__(PipewireSource)
+    source._queue = asyncio.Queue(maxsize=2)
+    source._counters = _Counters(RATE)
+    for _ in range(2):
+        source._queue.put_nowait(np.zeros(1280, dtype=np.int16))
+    assert source._queue.full()
+
+    source._put_end()
+
+    drained = [source._queue.get_nowait() for _ in range(source._queue.qsize())]
+    assert drained[-1] is None  # delivered, at the cost of the oldest frame
+    assert source._counters.dropped == 1
+
+
 gi = pytest.importorskip("gi")
 
 from openhab_voice_satellite.audio.gst_common import s16_mono_caps  # noqa: E402

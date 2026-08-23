@@ -297,6 +297,51 @@ async def test_monitor_cancellation_cancels_running_interaction():
         assert m.pipeline.closed
 
 
+async def test_a_shutdown_cancel_during_a_barge_in_unwind_is_not_swallowed():
+    """Ctrl-C while _cancel_pipeline is parked on the cancelled child.
+
+    `await task` raises CancelledError for the child finishing *and* for our
+    own cancel being forwarded to that same await, and the blanket except
+    suppressed both — so the shutdown cancel vanished, the monitor resumed its
+    loop, and the first Ctrl-C appeared to do nothing.
+    """
+    started = asyncio.Event()
+
+    async def slow_to_unwind():
+        started.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)  # unwinding takes a beat
+            raise
+
+    app = App(Config())
+    app.state = State.SPEAKING
+    app._pipeline_task = asyncio.create_task(slow_to_unwind())
+    await started.wait()
+
+    monitor = asyncio.create_task(app._cancel_pipeline(BufferAudioSink()))
+    await asyncio.sleep(0.01)  # parked in `await task`
+    monitor.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await monitor
+
+
+async def test_a_child_cancel_alone_is_still_swallowed():
+    # the counterpart: a plain barge-in unwind must not propagate, or every
+    # barge-in would kill the monitor
+    app = App(Config())
+    app.state = State.SPEAKING
+
+    async def holder():
+        await asyncio.sleep(10)
+
+    app._pipeline_task = asyncio.create_task(holder())
+    await asyncio.sleep(0)
+    assert await app._cancel_pipeline(BufferAudioSink()) is True
+    assert app._pipeline_task is None
+
+
 async def test_mic_stall_warns_and_continues(monkeypatch, caplog):
     monkeypatch.setattr(app_module, "MIC_STALL_WARN_S", 0.05)
     async with Monitor() as m:
@@ -356,6 +401,29 @@ def test_a_stall_does_not_lend_its_buffers_to_the_next_window(caplog):
     with caplog.at_level(logging.WARNING):
         _closed_window(health, CaptureStats(buffers=500, samples=640000))
     assert "0 buffers / 0 samples" in caplog.messages[0]
+
+
+def test_a_stall_does_not_lend_its_frame_count_either(caplog, monkeypatch):
+    """The monitor-side counters must be zeroed by restart(), not only the
+    capture baseline.
+
+    A leaked frame count is charged against a shortened window, so the
+    degraded-capture check reads a delivery rate the mic never achieved and
+    stays silent for exactly the window after a stall.
+    """
+    monkeypatch.setattr(app_module, "HEARTBEAT_S", 10.0)
+    health = app_module._CaptureHealth(12.5, CaptureStats())
+    for _ in range(100):  # 8 s of normal capture, no heartbeat yet
+        health.observe(FRAME, 0.9, 0, CaptureStats())
+    health.restart(CaptureStats(), 0)  # the stall
+    with caplog.at_level(logging.DEBUG):
+        # 62 frames where a full window expects 125: must warn
+        for _ in range(61):
+            health.observe(FRAME, 0.0, 0, CaptureStats())
+        _closed_window(health, CaptureStats())
+    assert "degraded capture" in caplog.text
+    assert "62 of 125 expected" in caplog.text
+    assert "peak wake score=0.000" in caplog.text  # pre-stall peak gone too
 
 
 # --- engine wiring ---------------------------------------------------------

@@ -148,14 +148,21 @@ class _CaptureHealth:
         self._capture = capture or CaptureStats()
         self._start = time.monotonic()
 
-    def restart(self, capture: CaptureStats | None = None) -> None:
+    def restart(self, capture: CaptureStats | None = None, dropped: int = 0) -> None:
         """Reset the window clock (after a stall, so the gap isn't counted).
 
-        The capture baseline moves with it: a window that is not counted must
-        not lend its buffers to the next one.
+        Every counter moves with it, not just the capture baseline: a window
+        that is not counted must not lend anything to the next one. Leaving
+        `_frames` behind inflated the frame count against a shortened window,
+        which muted the degraded-capture warning for exactly the window after
+        a stall — the one where it matters.
         """
         if capture is not None:
             self._capture = capture
+        self._frames = 0
+        self._rms = 0
+        self._score = 0.0
+        self._dropped = dropped
         self._start = time.monotonic()
 
     def observe(
@@ -354,12 +361,18 @@ class App:
     ) -> None:
         async def _run() -> None:
             try:
-                event = await pipeline.run_interaction(play_wake_earcon)
+                try:
+                    event = await pipeline.run_interaction(play_wake_earcon)
+                finally:
+                    # IDLE before the earcon, so the monitor treats a wakeword
+                    # during the tail as a fresh interaction, not a barge-in
+                    self._set_state(State.IDLE)
+                if event is not Event.ERROR:
+                    # still the tracked task: the tail has to die with it at
+                    # shutdown, before App.run's exit stack closes the sink
+                    await earcons.play("idle")
             finally:
-                self._set_state(State.IDLE)
                 self._pipeline_task = None
-            if event is not Event.ERROR:
-                await earcons.play("idle")
 
         self._pipeline_task = asyncio.create_task(_run(), name="interaction")
 
@@ -370,10 +383,20 @@ class App:
         was_speaking = self.state is State.SPEAKING
         sink.stop()
         task.cancel()
+        # `await task` raises CancelledError for two indistinguishable reasons:
+        # the child finished unwinding, or *we* were cancelled while parked on
+        # it (Ctrl-C during a barge-in unwind), in which case Task.cancel
+        # forwarded the cancel to this very await. Swallowing both meant the
+        # shutdown cancel vanished and the monitor resumed its loop, so the
+        # first Ctrl-C did nothing. The cancelling() count is what tells them
+        # apart; the shutdown `finally` path enters with it already raised, so
+        # it stays unaffected.
+        cancels = asyncio.current_task().cancelling()
         try:
             await task
         except asyncio.CancelledError:
-            pass
+            if asyncio.current_task().cancelling() > cancels:
+                raise
         self._set_state(State.IDLE)
         self._pipeline_task = None
         log.info("interaction cancelled")
@@ -413,13 +436,22 @@ class App:
         try:
             while True:
                 try:
-                    frame = await asyncio.wait_for(wake_queue.get(), timeout=MIC_STALL_WARN_S)
+                    # asyncio.timeout, not wait_for: on 3.11 (the deployment
+                    # target) wait_for swallows an external cancel that races
+                    # a completed inner await (gh-86296), and this loop gets a
+                    # completed get() every ~80 ms while being the coroutine
+                    # shutdown's cancel has to reach. Same reason as
+                    # recorder._next_frame and gst_sink._await_playout.
+                    async with asyncio.timeout(MIC_STALL_WARN_S):
+                        frame = await wake_queue.get()
                 except asyncio.TimeoutError:
                     log.warning(
                         "no mic frames for %.0fs — capture stream stalled? (%s)",
                         MIC_STALL_WARN_S, source.stats().describe(),
                     )
-                    health.restart(source.stats())
+                    health.restart(
+                        source.stats(), getattr(wake_queue, "dropped", 0)
+                    )
                     continue
                 if frame is None:
                     raise CaptureClosedError(

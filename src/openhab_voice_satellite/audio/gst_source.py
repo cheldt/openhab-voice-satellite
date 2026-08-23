@@ -215,9 +215,33 @@ class PipewireSource:
 
     def _end_stream(self) -> None:
         try:
-            self._loop.call_soon_threadsafe(self._queue.put_nowait, None)
+            self._loop.call_soon_threadsafe(self._put_end)
         except RuntimeError:
-            pass
+            pass  # loop already closed during shutdown
+
+    def _put_end(self) -> None:
+        """Deliver the end-of-stream sentinel; the one put that must not fail.
+
+        Every frame path already drops the oldest entry under backpressure,
+        but a bare put_nowait(None) behind a queue those paths just filled
+        raises QueueFull, the loop's callback handler swallows it, and nothing
+        retries. That single lost item is the whole capture-death signal:
+        `AudioBroadcaster._run` then blocks in get() forever, no subscriber
+        ever sees None, and app.py's CaptureClosedError exit — the "exit
+        non-zero so systemd restarts us" contract — never fires. The process
+        stays alive and permanently deaf, logging only mic-stall warnings.
+
+        Evicting a frame to make room does count as a drop; the frame really
+        is lost, and the stream is ending anyway.
+        """
+        if self._queue.full():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            else:
+                self._counters.dropped += 1
+        self._queue.put_nowait(None)
 
     def stats(self) -> CaptureStats:
         """Cumulative capture accounting; difference two for a window."""
