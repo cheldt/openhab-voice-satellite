@@ -136,7 +136,7 @@ listening.
 
 | Component | Responsibility | Notable contract |
 |---|---|---|
-| `wakeword.py` | The engine-neutral contract: `WakewordProtocol`, `EdgeTrigger`, `BaseWakewordDetector`, `build_detector`, shared ORT `_session_options` | Engines supply **raw scores only**; thresholds, edge/patience and the speaking-threshold raise live here, because barge-in is tuned against all three. ORT sessions are single-threaded with spinning disabled |
+| `wakeword.py` | The engine-neutral contract: `WakewordProtocol`, `EdgeTrigger`, `BaseWakewordDetector`, `build_detector`, `_session_options` (the stage-2 verifier's ORT options) | Engines supply **raw scores only**; thresholds, edge/patience and the speaking-threshold raise live here, because barge-in is tuned against all three. Every ORT session in the stack is single-threaded — openWakeWord and pysilero hardcode 1/1 themselves; only the verifier's options also disable spinning |
 | `wakeword_oww.py` | `OpenWakewordDetector`: openWakeWord ONNX backend, wake + optional stop model, `ncpu=1`, per-speaker verifier pickles | Startup fails loudly on the two ways openwakeword's positional key mapping breaks (shared basenames, multi-output models); a custom verifier **replaces** the base score, so thresholds change meaning |
 | `wakeword_buffer.py` | `Int16Ring` plus `patch_preprocessor()`: two perf patches on openwakeword 0.6.0 internals — numpy ring instead of a deque of Python ints, and a snapshot restore instead of re-embedding 4 s of noise on every `reset()` | Version-gated and **fails open**: a mismatch logs a warning and keeps stock behavior |
 | `verifier_mel.py` | `MelPcenFrontend`: librosa's STFT → mel → PCEN pipeline reimplemented byte-for-byte in numpy + scipy, output `(40, 151)` | The mel filterbank ships as data (`.npy`), not code; parity is asserted against golden fixtures exported where librosa exists |
@@ -250,37 +250,53 @@ choice.
 ## 5. Cross-cutting concerns
 
 **CPU budget.** Four cores on a Pi 5, and the 80 ms wakeword cadence must never miss —
-missing it means going deaf to barge-in. Hence: `ncpu=1` for openWakeWord, explicit
-single-thread ORT sessions with spinning disabled, `stt.cpu_threads: 3` (ctranslate2 runs
-with the GIL released and saturates its threads), `OMP_WAIT_POLICY=PASSIVE` and
+missing it means going deaf to barge-in. Hence: `ncpu=1` for openWakeWord, single-thread
+ORT sessions throughout (openWakeWord and pysilero hardcode 1/1 themselves; only the
+stage-2 verifier's `_session_options` also disables spinning — belt and braces, since a
+one-thread pool runs inline and has nothing to spin), `stt.cpu_threads: 3` (ctranslate2
+runs with the GIL released and saturates its threads), `OMP_WAIT_POLICY=PASSIVE` and
 `OPENBLAS_NUM_THREADS=1` in the unit file, and blocking model calls pushed to the
-executor.
+executor — all but the stage-2 verifier, which runs synchronously on the loop at ~1 ms
+per stage-1 candidate (measured on x86, frontend + session), noise against the 80 ms
+cadence.
 
 **Echo mitigation, in layers.** `threshold_speaking` raised (raised, not disabled — the
-stop word and barge-in must survive playback); duck-and-confirm on a pre-threshold score;
+stop word and barge-in must survive playback); duck-and-confirm on a pre-threshold score
+(deliberately narrower than the raise: the raise gates on `sink.is_playing`, so earcons
+raise the bar too, while ducking gates on SPEAKING — earcons never duck, and one started
+between monitor frames can begin ducked until the next update);
 the post-earcon echo guard that drops the backlog captured while an earcon was audible
 (keeping the last 300 ms, which may hold the user's speech onset); stale-backlog
 abandonment after every detector reset; keepalive dither so the amp never auto-standbys
 and clips the first sound. Hardware AEC (PipeWire `libpipewire-module-echo-cancel`) is
 documented in `deploy/install.md` as the optional real fix.
 
-**Cancellation model.** The wakeword monitor is the only long-lived loop; every
-interaction is one task it can cancel. The cancel reaches the await, not executor
+**Cancellation model.** The wakeword monitor is the only long-lived loop that owns state
+and cancels things — `sink-keepalive` and `audio-broadcast` also run for the process
+lifetime, but they are plumbing; every interaction is one task the monitor can cancel. The cancel reaches the await, not executor
 threads already decoding or synthesizing (§3.4). Cleanups that must outlive a cancel
 (conversation DELETE, the lazy TTS load) run as their own shielded/tracked tasks.
 
-**Failure posture.** Cloud errors fall back to local, per request, with only the unspoken
-remainder re-spoken. Frame loss is counted and reported, never hidden behind fabricated
-silence. Perf patches on third-party internals are version-gated and fail open. Config
-mistakes that would be silent at runtime (removed engine name, missing cloud key, voice
-without a language, a stage-2 model without its filterbank, an audio device name matching
-no PipeWire node) are load-time errors, and a speaking threshold below the idle one is a
-warning. Capture death exits non-zero for systemd to restart (§3.2); playback death fails
-responses but keeps listening.
+**Failure posture.** Cloud errors fall back to local, per request; a mid-utterance
+failure re-speaks only the unspoken remainder (`PartialSpeechError`), one before any
+audio played re-speaks the whole text. Frame loss is never hidden behind fabricated
+silence: the three backpressure/gap channels are counted and reported (§3.2), while
+deliberate `drain_stale` abandonment stays out of those counters by design and is logged
+at its two call sites instead. Perf patches on third-party internals are version-gated
+and fail open. Config mistakes that would be silent at runtime (removed engine name,
+missing cloud key, a `tts.default_language` without a voice, a stage-2 model without its
+filterbank) are load-time errors; an audio device name matching no PipeWire node aborts
+at startup, when the graph is first queried; a speaking threshold below the idle one is
+a warning. The guarantee stops at known keys: a misspelled key is silently ignored and
+its default applies (§3.1). Capture death exits non-zero for systemd to restart (§3.2);
+playback death fails responses but keeps listening.
 
 **Security notes.** openWakeWord custom verifier `.pkl` files are unpickled at startup —
-treat them as executable code. Cloud keys go in headers, never query strings.
-`openhab.verify_ssl: false` logs a warning. Debug dumps (`$OVS_DUMP_UTTERANCES`,
+treat them as executable code. The stage-2 verifier loads data, not code: `np.load`
+without `allow_pickle` for the filterbank, and a plain ORT session behind a hard
+input-shape check. Cloud keys go in headers, never query strings — but they and
+`openhab.api_token` may sit in plaintext in `config.yaml` (env vars win and the file is
+gitignored; its mode is on the operator). `openhab.verify_ssl: false` logs a warning. Debug dumps (`$OVS_DUMP_UTTERANCES`,
 `$OVS_DUMP_WAKE`, `$OVS_DUMP_WAKE_SCORE`) write raw room audio to disk.
 
 ## 6. Config surface
