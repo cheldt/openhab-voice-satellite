@@ -72,9 +72,12 @@ cp config.example.yaml config.yaml             # edit devices + openHAB url/toke
 
 If the wakeword or audio path misbehaves in the field,
 `openhab-voice-satellite --probe-mic` runs a 30 s diagnostic: per-second mic
-RMS/peak plus wake and stop scores, earcon playback through the configured
-output, stream-link verification, and a `diagnose_capture.wav` dump of exactly
-what the app heard. Speech at the intended distance should read roughly
+RMS/peak plus the wakeword scores (stop and stage-2 verifier columns appear
+when configured), WAKE/STOP marks taken from the detector's actual verdicts —
+verifier included, so a mark is what the app would have acted on — earcon
+playback through the configured output, stream-link verification, and a
+`diagnose_capture.wav` dump of exactly what the app heard. It exits non-zero
+when the capture stream stalls, so it can gate scripts like `--check` does. Speech at the intended distance should read roughly
 1000–5000 RMS — openWakeWord does no input normalization, so a quiet mic
 degrades recall in a way no threshold can compensate for.
 
