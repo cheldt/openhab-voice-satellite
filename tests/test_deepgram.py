@@ -13,10 +13,15 @@ from openhab_voice_satellite.deepgram import (
     DeepgramSpeaker,
     DeepgramTranscriber,
 )
-from openhab_voice_satellite.fallback import FallbackSpeaker
+from openhab_voice_satellite.fallback import FallbackSpeaker, FallbackTranscriber
 from openhab_voice_satellite.tts import TTS_CHUNK_CHARS
 
-from .fakes import BufferAudioSink, FakeDeepgram, LocalSpeakerStub
+from .fakes import (
+    BufferAudioSink,
+    FakeDeepgram,
+    LocalSpeakerStub,
+    LocalTranscriberStub,
+)
 from openhab_voice_satellite.stt import Transcript
 
 STT_MODEL = "nova-test"
@@ -198,3 +203,27 @@ async def test_speak_no_voice_for_language_raises_provider_error(
     )
     with pytest.raises(DeepgramError, match="no voice"):
         await speaker.speak("hi", "en")
+
+
+async def test_an_undecodable_response_body_falls_back_to_local(
+    fake_deepgram, session
+):
+    """A body that is not UTF-8 must stay inside the fallback machinery.
+
+    aiohttp decodes strictly, so a TLS-terminating middlebox or a provider
+    edge answering in ISO-8859-1 raises UnicodeDecodeError — a ValueError, and
+    therefore the one malformed-payload shape that used to bypass
+    FallbackTranscriber entirely and surface as "pipeline failed" with the
+    utterance lost, which is exactly the case local whisper exists for.
+    """
+    fake, _ = fake_deepgram
+    fake.listen_raw_body = b'{"text": "caf\xe9 f\xfcr alle"}'  # latin-1 in JSON
+    local = LocalTranscriberStub()
+    transcriber = FallbackTranscriber(
+        _transcriber(fake_deepgram, session), local, label="deepgram"
+    )
+
+    result = await transcriber.transcribe(np.zeros(1600, dtype=np.int16))
+
+    assert result == Transcript(text="local fallback", language="de")
+    assert len(local.calls) == 1
