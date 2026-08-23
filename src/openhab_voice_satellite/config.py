@@ -293,6 +293,20 @@ class Config(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _cloud_tts_default_voice(self) -> Config:
+        # mirror of _tts_default_voice for the selected cloud TTS engine:
+        # pick_voice falls back to the default language's voice, so a map
+        # missing it makes every utterance a silent local fallback
+        voices = {"gemini": self.gemini.tts_voices, "deepgram": self.deepgram.tts_voices}
+        engine = self.tts.engine
+        if engine in voices and self.tts.default_language not in voices[engine]:
+            raise ValueError(
+                f"tts.default_language {self.tts.default_language!r} has no "
+                f"{engine}.tts_voices voice configured"
+            )
+        return self
+
 
 def _resolve_config_paths(config: Config, base: Path) -> Config:
     """Rewrite config-relative paths to absolute ones, relative to `base`.

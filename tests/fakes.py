@@ -241,6 +241,8 @@ class FakeGemini:
         self.stt_text = stt_text
         self.stt_language = stt_language
         self.tts_pcm = np.arange(0, 2400, dtype=np.int16)  # short ramp
+        self.tts_raw: bytes | None = None  # raw audio bytes; overrides tts_pcm
+        self.tts_data_b64: str | None = None  # verbatim inlineData value; overrides both
         self.tts_mime = "audio/L16;codec=pcm;rate=24000"
         self.status = 200
         self.generate_statuses: list[int] = []  # FIFO per generateContent; falls back to `status`
@@ -274,7 +276,10 @@ class FakeGemini:
 
         modalities = payload.get("generationConfig", {}).get("responseModalities")
         if modalities == ["AUDIO"]:
-            data = base64.b64encode(self.tts_pcm.tobytes()).decode()
+            data = self.tts_data_b64
+            if data is None:
+                raw = self.tts_raw if self.tts_raw is not None else self.tts_pcm.tobytes()
+                data = base64.b64encode(raw).decode()
             part = {"inlineData": {"mimeType": self.tts_mime, "data": data}}
         else:
             text = self.stt_response
@@ -291,6 +296,7 @@ class FakeDeepgram:
 
     - POST /v1/listen — records query/auth/body, answers nova-shaped JSON;
       detected_language only included when the request asked for detection
+      and `stt_language` is not None (None = the API omitted the field)
     - POST /v1/speak — records query and JSON body, answers `tts_pcm` raw bytes
     - GET /v1/auth/token — key probe (self-test)
     """
@@ -321,7 +327,7 @@ class FakeDeepgram:
         if self.status != 200:
             return web.json_response({"err_msg": "boom"}, status=self.status)
         channel: dict = {"alternatives": [{"transcript": self.stt_text}]}
-        if "detect_language" in request.query:
+        if "detect_language" in request.query and self.stt_language is not None:
             channel["detected_language"] = self.stt_language
         return web.json_response({"results": {"channels": [channel]}})
 

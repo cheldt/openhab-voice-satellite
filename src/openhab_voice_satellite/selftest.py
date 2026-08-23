@@ -13,7 +13,7 @@ from typing import Awaitable, Callable
 
 import numpy as np
 
-from .config import Config
+from .config import SAMPLE_RATE, Config
 
 
 def check_audio(config: Config) -> None:
@@ -82,18 +82,32 @@ async def check_gemini(config: Config) -> None:
     async with aiohttp.ClientSession() as session:
         client = GeminiClient(config.gemini, session)
         if config.stt.engine == "gemini":
-            await client.check_model(config.gemini.stt_model)
+            await client.check_model(config.gemini.stt_model, config.gemini.stt_timeout_s)
         if config.tts.engine == "gemini":
-            await client.check_model(config.gemini.tts_model)
+            await client.check_model(config.gemini.tts_model, config.gemini.tts_timeout_s)
 
 
 async def check_deepgram(config: Config) -> None:
     import aiohttp
 
-    from .deepgram import DeepgramClient
+    from .deepgram import DeepgramClient, DeepgramTranscriber
 
     async with aiohttp.ClientSession() as session:
-        await DeepgramClient(config.deepgram, session).check_auth()
+        client = DeepgramClient(config.deepgram, session)
+        await client.check_auth()
+        # check_auth proves key + reachability only; probe the configured
+        # models per direction so a bad name fails here instead of as a
+        # silent per-utterance fallback at the first real utterance
+        if config.stt.engine == "deepgram":
+            transcriber = DeepgramTranscriber(
+                client, config.stt, config.tts.default_language
+            )
+            await transcriber.transcribe(np.zeros(SAMPLE_RATE // 10, dtype=np.int16))
+        if config.tts.engine == "deepgram":
+            for voice in config.deepgram.tts_voices.values():
+                await client.speak(
+                    "ok", [("model", voice)], config.deepgram.tts_timeout_s
+                )
 
 
 async def check_openhab(config: Config) -> None:

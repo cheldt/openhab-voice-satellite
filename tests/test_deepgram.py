@@ -168,3 +168,33 @@ async def test_check_auth(fake_deepgram, session):
     fake.status = 403
     with pytest.raises(DeepgramError):
         await client.check_auth()
+
+
+async def test_transcribe_missing_detection_defaults_to_first_language(
+    fake_deepgram, session
+):
+    fake, _ = fake_deepgram
+    fake.stt_language = None  # response carries no detected_language
+    transcriber = _transcriber(fake_deepgram, session, languages=["en", "de"])
+    result = await transcriber.transcribe(np.zeros(160, dtype=np.int16))
+    assert result.language == "en"  # languages[0], not tts.default_language
+
+
+async def test_transcribe_non_string_detection_defaults_to_first_language(
+    fake_deepgram, session
+):
+    fake, _ = fake_deepgram
+    fake.stt_language = {"code": "de"}  # defensive: never AttributeError
+    transcriber = _transcriber(fake_deepgram, session, languages=["en", "de"])
+    result = await transcriber.transcribe(np.zeros(160, dtype=np.int16))
+    assert result.language == "en"
+
+
+async def test_speak_no_voice_for_language_raises_provider_error(
+    fake_deepgram, session
+):
+    speaker = _speaker(
+        fake_deepgram, session, BufferAudioSink(), tts_voices={"fr": "aura-test-fr"}
+    )
+    with pytest.raises(DeepgramError, match="no voice"):
+        await speaker.speak("hi", "en")
