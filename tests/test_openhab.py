@@ -3,7 +3,7 @@ import pytest
 from aiohttp.test_utils import TestServer
 
 from openhab_voice_satellite.config import OpenHABConfig
-from openhab_voice_satellite.openhab import OpenHABClient, OpenHABTimeoutError
+from openhab_voice_satellite.openhab import OpenHABClient, OpenHABTimeoutError, make_session
 
 from .fakes import FakeOpenHAB
 
@@ -108,3 +108,79 @@ async def test_response_timeout(fake_openhab, session):
     # "openHAB timed out" and must not confuse it with other timeouts
     with pytest.raises(OpenHABTimeoutError):
         await _client(server, session, response_timeout_s=0.2).send_command("hallo")
+
+
+async def test_ping_proves_token_and_voice_endpoint(fake_openhab, session, monkeypatch):
+    fake, server = fake_openhab
+    monkeypatch.setenv("OPENHAB_TOKEN", "secret-token")
+    await _client(server, session).ping()
+    assert fake.ping_headers[0]["Authorization"] == "Bearer secret-token"
+
+
+async def test_ping_raises_on_rejected_token(fake_openhab, session):
+    fake, server = fake_openhab
+    fake.ping_status = 401
+    with pytest.raises(aiohttp.ClientResponseError):
+        await _client(server, session).ping()
+
+
+async def test_make_session_disables_ssl_verification(caplog):
+    config = OpenHABConfig(verify_ssl=False)
+    session = make_session(config)
+    try:
+        assert session.connector._ssl is False
+        assert "verification disabled" in caplog.text
+    finally:
+        await session.close()
+
+
+async def test_make_session_sets_default_timeout():
+    # ping passes no per-request timeout; without a session default it
+    # inherits aiohttp's 5-minute DEFAULT_TIMEOUT and stalls --check
+    config = OpenHABConfig(response_timeout_s=7.5)
+    session = make_session(config)
+    try:
+        assert session.timeout.total == 7.5
+    finally:
+        await session.close()
+
+
+async def test_no_auth_header_without_token(fake_openhab, session, monkeypatch):
+    # anonymous openHAB is a legitimate deployment: no token, no header
+    fake, server = fake_openhab
+    monkeypatch.delenv("OPENHAB_TOKEN", raising=False)
+    await _client(server, session).send_command("hallo")
+    assert "Authorization" not in fake.headers[0]
+
+
+async def test_empty_body_returns_empty_string(fake_openhab, session):
+    # an empty 200 is a silent round, not an error: the speakers all
+    # return early on empty text
+    fake, server = fake_openhab
+    fake.response = ""
+    assert await _client(server, session).send_command("hallo") == ""
+
+
+async def test_non_ascii_round_trip(fake_openhab, session):
+    fake, server = fake_openhab
+    await _client(server, session).send_command("wie warm ist es in der Küche")
+    assert fake.commands == ["wie warm ist es in der Küche"]
+    assert "charset=utf-8" in fake.headers[0]["Content-Type"]
+
+
+async def test_delete_404_logs_debug_not_warning(fake_openhab, session, caplog):
+    # a barge-in before the server created the conversation is expected
+    fake, server = fake_openhab
+    fake.delete_status = 404
+    with caplog.at_level("DEBUG"):
+        await _client(server, session).end_conversation("abc-123")
+    assert "conversation DELETE returned" not in caplog.text
+    assert "unknown to server" in caplog.text
+
+
+async def test_auth_error_names_the_token(fake_openhab, session, caplog):
+    fake, server = fake_openhab
+    fake.status = 401
+    with pytest.raises(aiohttp.ClientResponseError):
+        await _client(server, session).send_command("hallo")
+    assert "OPENHAB_TOKEN" in caplog.text
