@@ -4,7 +4,7 @@
 audio:
   input_device: null        # substring of a PipeWire node name/description (see: openhab-voice-satellite --list-devices); null = default node
   output_device: null
-  frame_ms: 80              # 1280 samples = one openWakeWord chunk
+  frame_ms: 80              # 1280 samples = one openWakeWord chunk; must be a multiple of 80 (shorter frames re-serve the previous score, which breaks patience)
   wakeup_preamble_ms: 0     # ramped noise before a sound after an idle gap; wakes powered speakers from signal-sensing mute (try 500)
   wakeup_preamble_idle_s: 60  # gap that counts as idle; match the speaker's mute delay (0 = preamble before every sound)
 
@@ -34,15 +34,15 @@ wakeword:
 
 vad:
   threshold: 0.5
-  silence_ms: 1200          # trailing silence that ends the utterance
+  silence_ms: 1200          # trailing silence that ends the utterance (must be > 0: 0 endpoints on the first chunk after speech starts)
   no_speech_timeout_s: 8    # LISTENING -> IDLE if nothing is said
   max_utterance_s: 15
 
 stt:
   engine: "local"           # "gemini"/"deepgram" = cloud STT; falls back to local whisper on failure
-  model: "small"            # faster-whisper model name or local path ("base" = faster, less accurate)
+  model: "small"            # faster-whisper model name, HuggingFace repo id, or a local CTranslate2 directory ("base" = faster, less accurate). Only an existing directory next to this file is resolved config-relative; names and repo ids pass through verbatim
   compute_type: "int8"
-  cpu_threads: 3            # leave 1 core free: wakeword must keep its 80 ms cadence during transcription (barge-in)
+  cpu_threads: 3            # leave 1 core free: wakeword must keep its 80 ms cadence during transcription (barge-in). Must be >= 1; ctranslate2 reads 0 as "all cores"
   beam_size: 1              # 1 = greedy (fastest); 5 = more accurate, much slower
   languages: ["de", "en"]   # auto-detect restricted to these; single entry skips detection
 
@@ -53,7 +53,8 @@ openhab:
   # "web-search" needs the org.openhab.voice.websearch add-on + a SearxNG instance.
   llm_tools: "item-send-command,item-get-state,get-date-time,web-search"
   response_timeout_s: 30    # raise for an LLM interpreter: several tool calls (or web-search) can exceed 30 s
-  verify_ssl: true          # false accepts self-signed certificates
+  ca_cert: null             # PEM bundle to trust, e.g. "openhab-ca.pem" — the way to use a self-signed server while still authenticating it
+  verify_ssl: true          # false disables verification ENTIRELY (any certificate is accepted, exposing api_token to anyone who can intercept) — prefer ca_cert
 
 tts:
   engine: "piper"          # "piper" = local; "gemini"/"deepgram" = cloud TTS, falls back to piper on failure

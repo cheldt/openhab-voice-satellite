@@ -239,3 +239,55 @@ def test_cloud_tts_default_language_must_have_cloud_voice():
             "deepgram": {"api_key": "k", "tts_voices": {}},
         }
     )
+
+
+# --- bounds: fields that used to accept nonsense their siblings reject -----
+
+
+@pytest.mark.parametrize("section, values", [
+    ("vad", {"silence_ms": 0}),
+    ("vad", {"silence_ms": -500}),
+    ("vad", {"no_speech_timeout_s": 0}),
+    ("vad", {"no_speech_timeout_s": -1}),
+    ("vad", {"max_utterance_s": 0}),
+    ("audio", {"frame_ms": 0}),
+    ("audio", {"frame_ms": 40}),   # legal-looking, but under one oww chunk
+    ("audio", {"frame_ms": 120}),  # not a multiple of 80
+    ("stt", {"cpu_threads": 0}),   # ctranslate2 reads 0 as "all cores"
+])
+def test_nonsense_values_are_rejected_at_load(section, values):
+    with pytest.raises(ValueError):
+        Config.model_validate({section: values})
+
+
+def test_the_documented_frame_sizes_still_validate():
+    # 80 ms is the shipped value; multiples of it stay legal
+    for frame_ms in (80, 160, 240):
+        assert Config.model_validate(
+            {"audio": {"frame_ms": frame_ms}}
+        ).audio.frame_ms == frame_ms
+
+
+# --- stt.model: a name, a repo id, or a path -------------------------------
+
+
+def test_stt_model_directory_resolves_against_the_config_file(tmp_path):
+    (tmp_path / "models" / "whisper-de-ct2").mkdir(parents=True)
+    path = tmp_path / "config.yaml"
+    path.write_text('stt:\n  model: "models/whisper-de-ct2"\n')
+    assert load_config(path).stt.model == str(tmp_path / "models/whisper-de-ct2")
+
+
+@pytest.mark.parametrize("model", ["small", "Systran/faster-whisper-small"])
+def test_stt_model_names_and_repo_ids_pass_through_verbatim(tmp_path, model):
+    # a repo id contains a separator but is not a path; rewriting it would
+    # hand faster-whisper an absolute path it then treats as a repo id
+    path = tmp_path / "config.yaml"
+    path.write_text(f'stt:\n  model: "{model}"\n')
+    assert load_config(path).stt.model == model
+
+
+def test_openhab_ca_cert_resolves_against_the_config_file(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text('openhab:\n  ca_cert: "certs/openhab-ca.pem"\n')
+    assert load_config(path).openhab.ca_cert == str(tmp_path / "certs/openhab-ca.pem")

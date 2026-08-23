@@ -199,7 +199,7 @@ beats losing the utterance, but it is a deliberate trade.
 
 | Component | Responsibility | Notable contract |
 |---|---|---|
-| `openhab.py` | `make_session` (honors `verify_ssl`, sets a session-wide `response_timeout_s` bound so no request can inherit aiohttp's 5-minute default), `OpenHABClient.ping` / `send_command` / `end_conversation`, `OpenHABTimeoutError` | `POST /rest/voice/interpreters`, `text/plain; charset=utf-8` in, `text/plain` out; the answer is the HTTP body, and an empty 200 is a silent round (every speaker returns early on empty text), not an error. Both query params are conditional: `llm_tools: null` omits `?llmTools=`, and `?conversation=` is sent only when `dialog.enabled` produced a uuid. Auth is `Authorization: Bearer` from `OPENHAB_TOKEN`-over-`api_token`; with neither, no header at all and no load-time error — unlike the cloud keys, because anonymous openHAB is a legitimate deployment. `DELETE /rest/voice/conversations/{id}` is best-effort and never raises except `CancelledError`, re-raised so `Pipeline.close()`'s drain bound (one `CONVERSATION_END_TIMEOUT_S` plus 1 s) can cancel a hung DELETE; a 404 — barge-in before the server created the conversation — logs at debug, other errors at warning |
+| `openhab.py` | `make_session` (honors `ca_cert` / `verify_ssl`, sets a session-wide `response_timeout_s` bound so no request can inherit aiohttp's 5-minute default), `OpenHABClient.ping` / `send_command` / `end_conversation`, `OpenHABTimeoutError` | `POST /rest/voice/interpreters`, `text/plain; charset=utf-8` in, `text/plain` out; the answer is the HTTP body, and an empty 200 is a silent round (every speaker returns early on empty text), not an error. Both query params are conditional: `llm_tools: null` omits `?llmTools=`, and `?conversation=` is sent only when `dialog.enabled` produced a uuid. TLS: `ca_cert` builds a context trusting that PEM bundle, which is the supported way to reach a self-signed server *while still authenticating it*; `verify_ssl: false` disables certificate **and** hostname checking, so any certificate is accepted and the bearer token below is exposed to anyone who can intercept the connection — hence the loud warning, and `ca_cert` taking precedence. Auth is `Authorization: Bearer` from `OPENHAB_TOKEN`-over-`api_token`; with neither, no header at all and no load-time error — unlike the cloud keys, because anonymous openHAB is a legitimate deployment. `DELETE /rest/voice/conversations/{id}` is best-effort and never raises except `CancelledError`, re-raised so `Pipeline.close()`'s drain bound (one `CONVERSATION_END_TIMEOUT_S` plus 1 s) can cancel a hung DELETE; a 404 — barge-in before the server created the conversation — logs at debug, other errors at warning |
 
 **Failure posture — the inverse of §3.5's.** openHAB is the brain, so no fallback
 exists. `OpenHABTimeoutError` is the only named failure (error earcon +
@@ -304,7 +304,7 @@ treat them as executable code. The stage-2 verifier loads data, not code: `np.lo
 without `allow_pickle` for the filterbank, and a plain ORT session behind a hard
 input-shape check. Cloud keys go in headers, never query strings — but they and
 `openhab.api_token` may sit in plaintext in `config.yaml` (env vars win and the file is
-gitignored; its mode is on the operator). `openhab.verify_ssl: false` logs a warning. Debug dumps (`$OVS_DUMP_UTTERANCES`,
+gitignored; its mode is on the operator). `openhab.verify_ssl: false` logs a warning naming the token exposure, and `openhab.ca_cert` exists so a self-signed deployment need not reach for it. Debug dumps (`$OVS_DUMP_UTTERANCES`,
 `$OVS_DUMP_WAKE`, `$OVS_DUMP_WAKE_SCORE`) write raw room audio to disk.
 
 ## 6. Config surface
@@ -312,11 +312,14 @@ gitignored; its mode is on the operator). `openhab.verify_ssl: false` logs a war
 `audio` (devices, `frame_ms`, wake-up preamble) · `wakeword` (model, thresholds, patience,
 per-speaker verifiers, `stage2`) · `vad` (threshold, `silence_ms`, `no_speech_timeout_s`,
 `max_utterance_s`) · `stt` (engine, model, `compute_type`, `cpu_threads`, `beam_size`,
-`languages`) · `openhab` (url, token, `llm_tools`, `response_timeout_s`, `verify_ssl`) ·
+`languages`) · `openhab` (url, token, `llm_tools`, `response_timeout_s`, `ca_cert`, `verify_ssl`) ·
 `tts` (engine, `default_language`) · `piper.voices` · `gemini.*` · `deepgram.*` ·
 `barge_in.resume_listening` · `dialog` (enabled, `followup_timeout_s`, earcon) ·
 `earcons.*` · `logging.level`.
 
-Relative paths in the config resolve against the config file's directory (pretrained
-openWakeWord phrase names like `hey_jarvis` pass through verbatim); a `Config` built
+Relative paths in the config resolve against the config file's directory, with two
+carve-outs for fields where a bare name is also legal: pretrained openWakeWord phrase
+names (`hey_jarvis`) pass through verbatim, and `stt.model` is resolved only when it
+names an existing directory next to the config — a faster-whisper size name (`small`)
+or a HuggingFace repo id (`org/model`) must reach the loader untouched. A `Config` built
 directly in tests keeps its paths as written.

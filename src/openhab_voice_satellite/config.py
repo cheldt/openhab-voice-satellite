@@ -32,7 +32,12 @@ class AudioConfig(BaseModel):
     # ClassVar keeps `config.audio.sample_rate` reads working while pydantic
     # ignores the key in old config files.
     sample_rate: ClassVar[int] = SAMPLE_RATE
-    frame_ms: int = 80
+    # openWakeWord only produces a new prediction per accumulated 1280
+    # samples (80 ms) and returns the *previous* score for anything shorter.
+    # A smaller or non-multiple frame therefore feeds EdgeTrigger duplicated
+    # scores, so `patience` counts one inference twice and the single-frame
+    # transients it exists to reject fire detections.
+    frame_ms: int = Field(80, ge=80)
     # ramped noise before a sound that follows an idle period; wakes powered
     # speakers whose signal-sensing mute ignores the keep-alive dither.
     # 0 = off.
@@ -40,6 +45,16 @@ class AudioConfig(BaseModel):
     # quiet gap after which the next sound gets the preamble; match this to
     # how fast the speaker's mute kicks in (0 = before every sound)
     wakeup_preamble_idle_s: float = Field(60.0, ge=0.0)
+
+    @field_validator("frame_ms")
+    @classmethod
+    def _whole_oww_chunks(cls, v: int) -> int:
+        if v % 80:
+            raise ValueError(
+                f"audio.frame_ms must be a multiple of 80 (one 1280-sample "
+                f"openWakeWord chunk at 16 kHz), got {v}"
+            )
+        return v
 
     @property
     def frame_samples(self) -> int:
@@ -148,9 +163,15 @@ class WakewordConfig(BaseModel):
 
 class VadConfig(BaseModel):
     threshold: float = Field(0.5, ge=0.0, le=1.0)
-    silence_ms: int = 1200
-    no_speech_timeout_s: float = 8.0
-    max_utterance_s: float = 15.0
+    # all three are gt=0 for the same reason the sibling fields carry bounds:
+    # nothing downstream treats a non-positive value as a disable switch, it
+    # just breaks. silence_ms <= 0 endpoints every utterance on the first VAD
+    # chunk after speech starts (vad.endpoint_reached: 0 >= 0), so whisper
+    # receives a fraction of a word and every command fails with no hint that
+    # the config caused it.
+    silence_ms: int = Field(1200, gt=0)
+    no_speech_timeout_s: float = Field(8.0, gt=0.0)
+    max_utterance_s: float = Field(15.0, gt=0.0)
 
 
 class SttConfig(BaseModel):
@@ -159,8 +180,11 @@ class SttConfig(BaseModel):
     compute_type: str = "int8"
     # 3, not 4: ctranslate2 runs with the GIL released and saturates its
     # threads; on the 4-core Pi 5 one core must stay free or the 80 ms
-    # wakeword cadence starves during THINKING (barge-in goes deaf)
-    cpu_threads: int = 3
+    # wakeword cadence starves during THINKING (barge-in goes deaf).
+    # ge=1 because ctranslate2 reads 0 as "auto" = every core, which slips
+    # past the saturation advisory in stt.py while causing exactly the
+    # starvation that advisory exists to flag.
+    cpu_threads: int = Field(3, ge=1)
     beam_size: int = Field(1, ge=1)
     languages: list[str] = Field(default_factory=lambda: ["de", "en"])
 
@@ -177,7 +201,13 @@ class OpenHABConfig(BaseModel):
     api_token: str | None = None
     llm_tools: str | None = "item-send-command"  # ?llmTools= param; null = omit
     response_timeout_s: float = 30.0
-    verify_ssl: bool = True  # False accepts self-signed certificates
+    # PEM bundle to trust in addition to nothing else — the way to reach a
+    # self-signed openHAB while still authenticating it. Wins over verify_ssl.
+    ca_cert: str | None = None
+    # False disables certificate *and* hostname verification entirely: any
+    # certificate is accepted, so the bearer token below and every voice
+    # command travel over TLS that authenticates nobody. Prefer ca_cert.
+    verify_ssl: bool = True
 
     @property
     def token(self) -> str | None:
@@ -329,6 +359,14 @@ def _resolve_config_paths(config: Config, base: Path) -> Config:
         value = getattr(wakeword.stage2, field)
         if value:
             setattr(wakeword.stage2, field, _resolve_path(value, base))
+    if config.openhab.ca_cert:
+        config.openhab.ca_cert = _resolve_path(config.openhab.ca_cert, base)
+    # stt.model is a faster-whisper *name* ("small"), a HuggingFace repo id
+    # ("org/model") or a local CTranslate2 directory, and only the last is a
+    # path. Resolve exactly that case: rewriting anything separator-shaped
+    # would turn a repo id into a bogus absolute path.
+    if (base / config.stt.model).is_dir():
+        config.stt.model = _resolve_path(config.stt.model, base)
     earcons = config.earcons
     earcons.wake, earcons.ack, earcons.error, earcons.idle = (
         _resolve_path(p, base)
