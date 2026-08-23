@@ -1,5 +1,33 @@
+import pytest
+from aiohttp.test_utils import TestServer
+
 from openhab_voice_satellite.config import Config
-from openhab_voice_satellite.selftest import run_checks, select_checks
+from openhab_voice_satellite.selftest import check_deepgram, run_checks, select_checks
+
+from .fakes import FakeDeepgram
+
+
+@pytest.fixture
+async def fake_deepgram():
+    fake = FakeDeepgram()
+    server = TestServer(fake.build_app())
+    await server.start_server(shutdown_timeout=0.2)
+    yield fake, server
+    await server.close()
+
+
+def _deepgram_config(server: TestServer, **engines) -> Config:
+    return Config.model_validate(
+        {
+            **{k: {"engine": v} for k, v in engines.items()},
+            "deepgram": {
+                "api_key": "k",
+                "base_url": str(server.make_url("")),
+                "stt_model": "nova-test",
+                "tts_voices": {"de": "aura-test-de", "en": "aura-test-en"},
+            },
+        }
+    )
 
 
 def _names(config: Config) -> list[str]:
@@ -77,3 +105,24 @@ async def test_run_checks_failure_reported_and_exit_code_one(capsys):
     assert "FAIL bad: model file missing" in out
     assert "ok   also good" in out  # a failure must not stop later checks
     assert "1 check(s) failed" in out
+
+
+# --- check_deepgram: per-direction model probes on top of check_auth --------
+
+
+async def test_check_deepgram_probes_models_per_direction(fake_deepgram):
+    fake, server = fake_deepgram
+    await check_deepgram(_deepgram_config(server, stt="deepgram", tts="deepgram"))
+    # a silence /v1/listen validates stt_model
+    assert any(("model", "nova-test") in query for query, _ in fake.listen_requests)
+    # a one-word /v1/speak validates every configured voice name
+    voices = sorted(dict(query)["model"] for query, _ in fake.speak_requests)
+    assert voices == ["aura-test-de", "aura-test-en"]
+
+
+async def test_check_deepgram_tts_only_skips_the_listen_probe(fake_deepgram):
+    fake, server = fake_deepgram
+    await check_deepgram(_deepgram_config(server, tts="deepgram"))
+    assert fake.listen_requests == []
+    assert len(fake.speak_requests) == 2
+    assert fake.auth_headers[0] == "Token k"  # check_auth still ran first

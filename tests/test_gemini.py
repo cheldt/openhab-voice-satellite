@@ -80,6 +80,15 @@ async def test_transcribe(fake_gemini, session):
     assert schema["properties"]["language"]["enum"] == ["de", "en"]
 
 
+async def test_transcribe_clamps_unknown_language(fake_gemini, session):
+    # an in-JSON label outside stt.languages clamps to the default language
+    fake, _ = fake_gemini
+    fake.stt_language = "fr"
+    transcriber = _transcriber(fake_gemini, session)
+    result = await transcriber.transcribe(np.zeros(160, dtype=np.int16))
+    assert result.language == "de"
+
+
 async def test_transcribe_survives_malformed_json(fake_gemini, session):
     fake, _ = fake_gemini
     fake.stt_response = "not json at all"
@@ -169,3 +178,31 @@ async def test_check_model(fake_gemini, session):
     fake.status = 403
     with pytest.raises(GeminiError):
         await client.check_model(STT_MODEL)
+
+
+async def test_speak_trims_odd_byte_payload(fake_gemini, session):
+    # an odd byte count is trimmed (like deepgram), not a ValueError that
+    # would escape FALLBACK_ERRORS
+    fake, _ = fake_gemini
+    fake.tts_raw = b"\x01\x02\x03"
+    sink = BufferAudioSink()
+    speaker = _speaker(fake_gemini, session, sink)
+    await speaker.speak("hi", "de")
+    assert len(sink.played[0][0]) == 1
+
+
+async def test_speak_bad_base64_raises_provider_error(fake_gemini, session):
+    # binascii.Error is wrapped so the fallback machinery catches it
+    fake, _ = fake_gemini
+    fake.tts_data_b64 = "abc"  # bad padding
+    speaker = _speaker(fake_gemini, session, BufferAudioSink())
+    with pytest.raises(GeminiError):
+        await speaker.speak("hi", "de")
+
+
+async def test_speak_no_voice_for_language_raises_provider_error(fake_gemini, session):
+    speaker = _speaker(
+        fake_gemini, session, BufferAudioSink(), tts_voices={"fr": "Aoede"}
+    )
+    with pytest.raises(GeminiError, match="no voice"):
+        await speaker.speak("hi", "en")

@@ -149,6 +149,36 @@ def test_zero_followup_timeout_rejected():
         Config.model_validate({"dialog": {"followup_timeout_s": 0}})
 
 
+def test_cloud_tts_default_language_must_have_cloud_voice():
+    with pytest.raises(ValueError, match="gemini.tts_voices"):
+        Config.model_validate(
+            {
+                "tts": {"engine": "gemini", "default_language": "de"},
+                "gemini": {"api_key": "k", "tts_voices": {"en": "Puck"}},
+            }
+        )
+    with pytest.raises(ValueError, match="deepgram.tts_voices"):
+        Config.model_validate(
+            {
+                "tts": {"engine": "deepgram", "default_language": "de"},
+                "deepgram": {"api_key": "k", "tts_voices": {"en": "aura-2-thalia-en"}},
+            }
+        )
+    # default language covered -> valid; STT-only cloud needs no TTS voice
+    Config.model_validate(
+        {
+            "tts": {"engine": "gemini", "default_language": "de"},
+            "gemini": {"api_key": "k", "tts_voices": {"de": "Kore"}},
+        }
+    )
+    Config.model_validate(
+        {
+            "stt": {"engine": "deepgram"},
+            "deepgram": {"api_key": "k", "tts_voices": {}},
+        }
+    )
+
+
 # -- wakeword engine selection ------------------------------------------
 
 
