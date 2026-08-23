@@ -99,7 +99,9 @@ class DeepgramTranscriber:
             text = str(channel["alternatives"][0]["transcript"]).strip()
         except (KeyError, IndexError, TypeError) as exc:
             raise DeepgramError(f"malformed response: {exc}") from exc
-        detected = channel.get("detected_language") or languages[0]
+        detected = channel.get("detected_language")
+        if not isinstance(detected, str) or not detected:
+            detected = languages[0]  # missing detection: assume the primary language
         language = detected.split("-")[0]  # BCP-47 tag -> bare code
         if language not in languages:
             language = self._default_language
@@ -117,7 +119,9 @@ class DeepgramSpeaker:
             self._client.config.tts_voices, language, self._tts_config.default_language
         )
         if voice is None:
-            raise DeepgramError("deepgram.tts_voices is empty")
+            raise DeepgramError(
+                f"deepgram.tts_voices has no voice for {language!r} or the default language"
+            )
         return voice
 
     async def speak(self, text: str, language: str) -> None:

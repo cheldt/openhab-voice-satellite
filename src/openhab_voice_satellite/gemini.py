@@ -46,10 +46,10 @@ class GeminiClient:
             await raise_for_status(resp, GeminiError, model)
             return json.loads(await resp.text())
 
-    async def check_model(self, model: str) -> None:
+    async def check_model(self, model: str, timeout_s: float | None = None) -> None:
         """GET the model metadata: validates key, model name and reachability."""
         url = f"{self.config.base_url}/v1beta/models/{model}"
-        timeout = aiohttp.ClientTimeout(total=self.config.stt_timeout_s)
+        timeout = aiohttp.ClientTimeout(total=timeout_s or self.config.stt_timeout_s)
         async with self._session.get(url, headers=self._headers(), timeout=timeout) as resp:
             await raise_for_status(resp, GeminiError, f"model {model}")
 
@@ -125,7 +125,9 @@ class GeminiSpeaker:
             self._client.config.tts_voices, language, self._tts_config.default_language
         )
         if voice is None:
-            raise GeminiError("gemini.tts_voices is empty")
+            raise GeminiError(
+                f"gemini.tts_voices has no voice for {language!r} or the default language"
+            )
         return voice
 
     async def speak(self, text: str, language: str) -> None:
@@ -158,10 +160,11 @@ class GeminiSpeaker:
                 part = response["candidates"][0]["content"]["parts"][0]["inlineData"]
                 raw = base64.b64decode(part["data"])
                 mime = part.get("mimeType", "")
-            except (KeyError, IndexError, TypeError) as exc:
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                # ValueError also covers binascii.Error from a bad base64 payload
                 raise GeminiError(f"malformed TTS response: {exc}") from exc
             match = _RATE_RE.search(mime)
             rate = int(match.group(1)) if match else DEFAULT_TTS_RATE
-            return np.frombuffer(raw, dtype=np.int16), rate
+            return np.frombuffer(raw[: len(raw) & ~1], dtype=np.int16), rate
 
         await play_pipelined(chunks, fetch, self._sink)

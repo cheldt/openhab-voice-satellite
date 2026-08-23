@@ -22,6 +22,8 @@ async def raise_for_status(
 def pick_voice(voices: dict[str, str], language: str, default_language: str) -> str | None:
     """Voice for `language`, falling back to the default language's voice.
 
-    None means the map is empty — the caller raises its own provider error.
+    None means neither language has an entry — a config error the caller
+    turns into its own provider error. Load-time validation guarantees the
+    default language's voice for the engine selected in tts.engine.
     """
     return voices.get(language) or voices.get(default_language)
