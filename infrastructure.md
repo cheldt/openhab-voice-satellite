@@ -199,13 +199,25 @@ beats losing the utterance, but it is a deliberate trade.
 
 | Component | Responsibility | Notable contract |
 |---|---|---|
-| `openhab.py` | `make_session` (honors `verify_ssl`), `OpenHABClient.ping` / `send_command` / `end_conversation`, `OpenHABTimeoutError` | `POST /rest/voice/interpreters` with `?llmTools=…&conversation=…`, `text/plain` in and out; the answer is the HTTP body. `DELETE /rest/voice/conversations/{id}` is best-effort and never raises |
+| `openhab.py` | `make_session` (honors `verify_ssl`, sets a session-wide `response_timeout_s` bound so no request can inherit aiohttp's 5-minute default), `OpenHABClient.ping` / `send_command` / `end_conversation`, `OpenHABTimeoutError` | `POST /rest/voice/interpreters`, `text/plain; charset=utf-8` in, `text/plain` out; the answer is the HTTP body, and an empty 200 is a silent round (every speaker returns early on empty text), not an error. Both query params are conditional: `llm_tools: null` omits `?llmTools=`, and `?conversation=` is sent only when `dialog.enabled` produced a uuid. Auth is `Authorization: Bearer` from `OPENHAB_TOKEN`-over-`api_token`; with neither, no header at all and no load-time error — unlike the cloud keys, because anonymous openHAB is a legitimate deployment. `DELETE /rest/voice/conversations/{id}` is best-effort and never raises except `CancelledError`, re-raised so `Pipeline.close()`'s drain bound (one `CONVERSATION_END_TIMEOUT_S` plus 1 s) can cancel a hung DELETE; a 404 — barge-in before the server created the conversation — logs at debug, other errors at warning |
+
+**Failure posture — the inverse of §3.5's.** openHAB is the brain, so no fallback
+exists. `OpenHABTimeoutError` is the only named failure (error earcon +
+`Event.ERROR`); every other HTTP/connection error reaches the pipeline's generic
+handler as an untyped crash behind the same earcon. The interpreter's error body is
+logged (truncated at 500 chars) but never spoken; 401/403 get a dedicated log line
+naming `api_token`/`OPENHAB_TOKEN`, the single most likely misconfiguration. `ping` —
+`--check`'s probe — GETs `/rest/voice/interpreters`, not `/rest/`: the interpreters
+list requires auth when security is enabled and proves the voice subsystem is present,
+so a bad token fails at `--check` instead of at the first utterance. The shipped
+`response_timeout_s: 30` is the knob to raise when the interpreter is an LLM doing
+several tool calls.
 
 ### 3.7 Diagnostics and evaluation
 
 | Component | Responsibility |
 |---|---|
-| `selftest.py` | `--check`: audio devices + real capture probe, wakeword (2.5 s of frames so the engine's context window fills), VAD, whisper, piper, cloud probes (gemini: model metadata per configured direction; deepgram: key check plus a silence `/v1/listen` and a one-word `/v1/speak` per voice), openHAB ping. Each check imports lazily and reports independently |
+| `selftest.py` | `--check`: audio devices + real capture probe, wakeword (2.5 s of frames so the engine's context window fills), VAD, whisper, piper, cloud probes (gemini: model metadata per configured direction; deepgram: key check plus a silence `/v1/listen` and a one-word `/v1/speak` per voice), openHAB interpreters probe (proves the token and the voice subsystem, not just reachability). Each check imports lazily and reports independently |
 | `probe.py` | `--probe-mic`: 30 s field diagnostic on the same source/sink the app uses — per-second RMS/peak/wake score plus wall and process CPU ms per frame against the `frame_ms` budget, earcons at t=8 s and t=18 s, capture written to `diagnose_capture.wav`. The module docstring is the interpretation guide (silent node, wrong node, clock mismatch, playback poisoning capture, sleeping speaker) |
 | `bench.py` | Offline wakeword evaluation through `build_detector` and the real `EdgeTrigger`: `--score-wav` (per-file distribution + threshold × patience sweep over 15 thresholds × patience 1–3), `--compare MODEL` (two candidates on identical frames), `--positives/--negatives` (recall vs false accepts per hour — the promotion gate). Appends silence after each file so a deferred stage-2 verdict still flushes |
 
