@@ -199,7 +199,16 @@ def _real_models() -> list[str]:
     from importlib import metadata
     from pathlib import Path
 
-    if metadata.version("openwakeword") != wakeword_buffer.PATCHED_VERSION:
+    # This runs at import time (the skipif below), so it must not raise:
+    # openwakeword is deliberately absent from pyproject.toml and uv.lock
+    # (its metadata hard-requires tflite-runtime), so CI has no such
+    # distribution and an uncaught PackageNotFoundError would fail
+    # collection of this whole module instead of skipping one test.
+    try:
+        installed = metadata.version("openwakeword")
+    except metadata.PackageNotFoundError:
+        return []
+    if installed != wakeword_buffer.PATCHED_VERSION:
         return []
     root = Path(__file__).resolve().parent.parent / "models" / "wakeword"
     return [str(p) for p in sorted(root.glob("*.onnx"))[:1]]
