@@ -25,8 +25,26 @@ from .vad import SpeechEndpointer
 log = logging.getLogger(__name__)
 
 LOG_ANSWER_CHARS = 200
-# mic backlog younger than this survives the post-earcon trim; matches the
-# sink's playout residual so it postdates the earcon's audible end
+# Mic backlog younger than this survives the post-earcon trim.
+#
+# It is the sink's playout residual (gst_sink.SINK_RESIDUAL_S), and the earlier
+# claim here — that matching the residual makes the kept frames postdate the
+# earcon — had it exactly backwards. `play()` returns SINK_RESIDUAL_S after the
+# last byte leaves appsrc, and that residual is precisely the pulse ring plus
+# one in-flight buffer still *playing* it ("that tail is exactly when echo
+# self-triggers", gst_sink.play). So the window kept here is the window during
+# which the earcon was audible, not one after it. Nothing shorter of zero would
+# be guaranteed to postdate the audible end.
+#
+# Kept anyway, as a deliberate trade: these are also the frames that can hold a
+# user who started speaking under the earcon, and losing a speech onset costs
+# more than a chime at the head of a recording. Measured on the shipped chimes,
+# the echo tops out at VAD probability 0.24-0.27 even under heavy simulated
+# reverb, below the 0.5 threshold, so it does not flip
+# SpeechEndpointer.speech_started. That bound is a property of the shipped
+# earcons, not of the design: a speech-like earcon WAV — which the config
+# permits — can trip the endpointer here and end the interaction with a phantom
+# empty utterance.
 EARCON_ECHO_GUARD_MS = 300
 
 
@@ -186,9 +204,9 @@ class Pipeline:
         without echo cancellation the earcon's echo would set the
         endpointer's speech flag, and an echo-only utterance ends the whole
         interaction (empty transcript -> None is terminal) or feeds echo to
-        STT. Frames from the last EARCON_ECHO_GUARD_MS survive — the sink's
-        play() returns a beat after the audio finished, so those postdate
-        the earcon and may hold the user's speech onset.
+        STT. Frames from the last EARCON_ECHO_GUARD_MS survive — not because
+        they postdate the earcon (they do not; see the constant) but because
+        they are where a speech onset that began under the earcon would be.
         """
         dialog = self._config.dialog
         frames = self._broadcaster.subscribe()
@@ -208,7 +226,11 @@ class Pipeline:
             self._broadcaster.unsubscribe(frames)
 
     def _drain_earcon_echo(self, frames: asyncio.Queue) -> None:
-        """Drop queued mic frames older than the echo guard window."""
+        """Drop queued mic frames older than the echo guard window.
+
+        The window that survives still overlaps the earcon's audible tail —
+        EARCON_ECHO_GUARD_MS explains why that is the accepted trade.
+        """
         keep = -(-EARCON_ECHO_GUARD_MS // self._config.audio.frame_ms)  # ceil
         stale = drain_stale(frames, keep)
         if stale:

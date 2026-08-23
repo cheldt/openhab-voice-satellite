@@ -122,12 +122,22 @@ on 5.48 h of continuous speech, the same verifier rejects 99 % of stage-1
 triggers whichever head produced them.
 
 Tests: `.venv/bin/pytest` (fast; the GStreamer tests skip without PyGObject).
-Three env vars dump audio for debugging, each taking a directory:
-`OVS_DUMP_UTTERANCES` (the recorded utterance, after the wakeword) and
-`OVS_DUMP_WAKE` (the audio *around* a detection, which is the only way to
-collect real false accepts). Add `OVS_DUMP_WAKE_SCORE=0.3` to also capture
-near misses — frames that almost fired. Those dumps are the hard negatives a
-retrain needs.
+
+Three env vars help debug in the field. Two take a directory:
+`OVS_DUMP_UTTERANCES` writes the recorded utterance (everything after the
+wakeword), and `OVS_DUMP_WAKE` writes the 2.5 s of audio *leading up to* a
+detection — pre-roll only, nothing after the verdict frame, which is the only
+way to collect real false accepts. The third, `OVS_DUMP_WAKE_SCORE=0.3`, takes
+a **score**, not a path: it adds near misses (frames that almost fired) and
+verifier rejections to what `OVS_DUMP_WAKE` writes, and does nothing on its
+own. Those rejections are the hard negatives a retrain needs.
+
+Note on logs: at the shipped `logging.level: INFO` every transcript and every
+openHAB answer is written to the journal, so the household's spoken-command
+history accumulates there under the journal's own retention. Set
+`logging.level: WARNING` to stop that (at the cost of the transcript lines
+that make field debugging possible), or bound it with
+`journalctl --user --vacuum-time=`.
 
 Pi installation + systemd service: see [deploy/install.md](deploy/install.md).
 

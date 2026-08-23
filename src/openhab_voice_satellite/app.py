@@ -99,14 +99,21 @@ def _dump_wake_audio(
     state: State,
     score_floor: float | None,
 ) -> None:
-    """Write the audio around a detection to $OVS_DUMP_WAKE for field debugging.
+    """Write the audio leading up to a detection to $OVS_DUMP_WAKE.
+
+    Pre-roll only: WAKE_DUMP_PREROLL_S of mic audio ending at the verdict
+    frame, with nothing after it. Analysis scripts written for audio *around*
+    a detection will mis-slice these, and on a stage-1-only config (the
+    default, no verifier) the edge trigger fires before the phrase ends, so a
+    dump can clip the tail of the wakeword itself.
 
     Unlike the utterance dump this captures what actually fired the detector,
     which is the only way to collect real false accepts. $OVS_DUMP_WAKE_SCORE
     additionally catches near misses — the frames that almost triggered — and
     verifier rejections, gated on the candidate's stage-1 peak because the
     current frame's score has decayed by the time the verdict lands. Those
-    rejections are the hard negatives the retraining loop feeds on.
+    rejections are the hard negatives the retraining loop feeds on. It takes a
+    score, not a directory, and is inert without $OVS_DUMP_WAKE.
     """
     dump_dir = os.environ.get("OVS_DUMP_WAKE")
     if not dump_dir:

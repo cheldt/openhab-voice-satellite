@@ -71,7 +71,7 @@ All modules live under `src/openhab_voice_satellite/`.
 |---|---|---|
 | `__main__.py` | CLI: `--config`, `--list-devices`, `--check`, `--probe-mic`, `--score-wav`, `--model`, `--engine`, `--compare`, `--positives`, `--negatives` | Every mode imports its stack lazily, so a missing GStreamer/openwakeword shows up as one failed step, not an import crash. Dispatch is a first-match if-chain, so the flag sets it would only half-honor are rejected up front: a scoring override (`--model`/`--engine`/`--compare`) with no scoring flag used to launch the full app with the config's old model — field-testing a model that never loaded — and two modes together ran only the first while looking like both. `--score-wav` keys off `is not None`, so a bare flag with no paths is still a scoring run: that is how ultiwake's `gate.sh` passes `--positives`/`--negatives` alone. `CaptureClosedError` maps to exit 1, which is the other half of the unit's `Restart=on-failure` |
 | `app.py` | Process wiring and the always-on wakeword monitor: builds detector/endpointer/transcriber, opens audio via `AsyncExitStack`, wraps local engines with cloud primaries, starts/cancels the interaction task | Capture starts **after** model loading (`start_capture=False` → `source.start()`): a live stream nobody services xruns itself out of PipeWire scheduling. After a barge-in cancel, listening resumes only when the trigger was `wake`, the state was SPEAKING **and** `barge_in.resume_listening` is set — otherwise the idle earcon plays and the system returns to IDLE |
-| `pipeline.py` | One interaction: LISTENING → THINKING → SPEAKING, dialog follow-up rounds, earcon echo guard, utterance dumps, conversation lifecycle | A dialog is one server-side conversation (uuid per wake); TTS language locks to the first round's detection (follow-ups are too short to detect reliably). `conversation_started` is set **before** the interpreter POST is awaited, so a barge-in landing mid-POST still deletes a conversation the server may already have created; `close()` — called from the monitor's `finally` before the exit stack tears down the session the DELETEs need — drains those fire-and-forget tasks, bounded at 5 s |
+| `pipeline.py` | One interaction: LISTENING → THINKING → SPEAKING, dialog follow-up rounds, earcon echo guard, utterance dumps, conversation lifecycle | A dialog is one server-side conversation (uuid per wake); TTS language locks to the first round's detection (follow-ups are too short to detect reliably). The id whose conversation may exist server-side is recorded **before** the interpreter POST is awaited, so a barge-in landing mid-POST still deletes a conversation the server may already have created; `close()` — called from the monitor's `finally` before the exit stack tears down the session the DELETEs need — drains those fire-and-forget tasks, bounded at 5 s |
 | `state.py` | `State` and `Event` enums. No I/O | Single source of truth for the four states |
 | `config.py` | YAML + pydantic models, `SAMPLE_RATE = 16000`, config-relative path resolution, cross-field validation | Env wins over file for `OPENHAB_TOKEN`, `GEMINI_API_KEY`, `DEEPGRAM_API_KEY`; cloud engine without a key and a `default_language` without a Piper voice are load-time errors. Unknown keys are silently ignored (pydantic's default `extra="ignore"`): a misspelled key falls back to its default without a word, and `audio.sample_rate` is a `ClassVar` deliberately so old configs carrying the key still load |
 
@@ -274,7 +274,14 @@ stop word and barge-in must survive playback); duck-and-confirm on a pre-thresho
 raise the bar too, while ducking gates on SPEAKING — earcons never duck, and one started
 between monitor frames can begin ducked until the next update);
 the post-earcon echo guard that drops the backlog captured while an earcon was audible
-(keeping the last 300 ms, which may hold the user's speech onset); stale-backlog
+(keeping the last 300 ms — which, contrary to what the code used to claim, is the
+sink's playout residual and therefore still *inside* the earcon's audible tail, not
+after it: `play()` returns `SINK_RESIDUAL_S` past the last byte leaving appsrc and that
+residual is the pulse ring still playing it. It is kept as a trade, because it is also
+where a speech onset begun under the earcon would be, and the shipped chimes measure
+0.24–0.27 VAD probability even under heavy reverb — under the 0.5 threshold. That bound
+belongs to the shipped earcons, not to the design: a speech-like earcon WAV, which the
+config permits, can flip the endpointer here); stale-backlog
 abandonment after every detector reset; keepalive dither so the amp never auto-standbys
 and clips the first sound. Hardware AEC (PipeWire `libpipewire-module-echo-cancel`) is
 documented in `deploy/install.md` as the optional real fix.
@@ -305,7 +312,11 @@ without `allow_pickle` for the filterbank, and a plain ORT session behind a hard
 input-shape check. Cloud keys go in headers, never query strings — but they and
 `openhab.api_token` may sit in plaintext in `config.yaml` (env vars win and the file is
 gitignored; its mode is on the operator). `openhab.verify_ssl: false` logs a warning naming the token exposure, and `openhab.ca_cert` exists so a self-signed deployment need not reach for it. Debug dumps (`$OVS_DUMP_UTTERANCES`,
-`$OVS_DUMP_WAKE`, `$OVS_DUMP_WAKE_SCORE`) write raw room audio to disk.
+`$OVS_DUMP_WAKE`, `$OVS_DUMP_WAKE_SCORE`) write raw room audio to disk. And at the
+shipped `logging.level: INFO`, `pipeline.py` logs every transcript and every openHAB
+answer, so the household's complete spoken-command history persists in the journal under
+whatever retention journald is configured for — no opt-out short of `WARNING`, which also
+costs the lines field debugging depends on.
 
 ## 6. Config surface
 
