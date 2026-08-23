@@ -245,6 +245,32 @@ def test_gate_refuses_to_pass_a_model_that_never_fires(tmp_path, monkeypatch, ca
     assert "recall 0%" in out
 
 
+def test_compare_columns_survive_a_path_reached_through_two_groups(
+    tmp_path, monkeypatch, capsys
+):
+    # `--score-wav corpus/ --positives corpus/pos --negatives corpus/neg`
+    # reaches every gated file twice. Without dedup each appearance is scored
+    # per config, so scored[p][1] is config 0's *second* result and every
+    # model-B report silently describes model A.
+    corpus = tmp_path / "corpus"
+    positives = corpus / "pos"
+    negatives = corpus / "neg"
+    positives.mkdir(parents=True)
+    negatives.mkdir()
+    _wav(positives / "p.wav")
+    _wav(negatives / "n.wav")
+    # scripts sized for each file scored exactly once per config: a duplicate
+    # would drain them early and read 0.0 where model B's scores belong
+    config = _scripted_config(monkeypatch, {"wake": _script([0.1] * 12, [0.95] * 12)})
+    StubModel.scripts["other"] = _script([0.1] * 12, [0.2] * 12)
+    assert score_wavs(
+        config, [corpus], compare="other", positives=positives, negatives=negatives
+    ) == 0
+    out = capsys.readouterr().out
+    assert "weakest positive 0.95, strongest negative 0.1" in out
+    assert "weakest positive 0.2, strongest negative 0.1" in out
+
+
 def test_gate_needs_both_sides(tmp_path, monkeypatch, capsys):
     positives = tmp_path / "pos"
     positives.mkdir()

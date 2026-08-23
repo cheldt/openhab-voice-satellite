@@ -159,11 +159,14 @@ class ScriptedDetector:
         detections: dict[int, str] | None = None,
         scores: dict[int, float] | None = None,
         rejections: dict[int, float] | None = None,
+        verifier_scores: dict[int, float] | None = None,
     ) -> None:
         self.detections = detections or {}
         self.scores = scores or {}
         # frame index -> the rejected candidate's stage-1 peak
         self.rejections = rejections or {}
+        # frame index -> verifier score, set on the frame a verdict lands
+        self.verifier_scores = verifier_scores or {}
         self.frames_seen = 0
         self.speaking_flags: list[bool] = []
         self.resets = 0
@@ -178,6 +181,8 @@ class ScriptedDetector:
         self.speaking_flags.append(speaking)
         self._last_score = self.scores.get(i, 0.0)
         self.last_rejection = self.rejections.get(i)
+        if i in self.verifier_scores:
+            self.last_verifier_score = self.verifier_scores[i]
         detection = self.detections.get(i)
         if detection == "wake":
             self.last_trigger_score = self._last_score

@@ -326,7 +326,11 @@ def score_wavs(
 
     positive_files = _expand([positives]) if positives else []
     negative_files = _expand([negatives]) if negatives else []
-    files = _expand(paths) + positive_files + negative_files
+    # deduped, order-preserving: a path reachable through more than one group
+    # (--score-wav corpus/ --positives corpus/positives) would otherwise be
+    # scored once per appearance, shifting the per-config columns in `scored`
+    # so that --compare reads config 0's second result as config 1's first
+    files = list(dict.fromkeys(_expand(paths) + positive_files + negative_files))
     missing = [p for p in files if not p.is_file()]
     if missing:
         for path in missing:
