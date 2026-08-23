@@ -30,6 +30,7 @@ returned, and a `--compare` across that asymmetry refuses to name a winner.
 
 from __future__ import annotations
 
+import wave
 from pathlib import Path
 from typing import NamedTuple
 
@@ -159,15 +160,33 @@ def _is_two_stage(config: Config) -> bool:
 
 def _report_files(
     configs: list[Config], paths: list[Path], frame_ms: int
-) -> dict[Path, list[FrameScores]]:
-    """Per-file score distributions, one column group per config."""
+) -> tuple[dict[Path, list[FrameScores]], set[Path]]:
+    """Per-file score distributions, one column group per config.
+
+    Returns the scores plus the files that could not be read at all. A wrong
+    sample rate or a corrupt container is a property of the file, not of the
+    config, so one failure is recorded on the first column and skipped on the
+    rest — otherwise `--compare`'s per-config columns would shift against each
+    other. Reporting and skipping beats propagating: a single 44.1 kHz phone
+    recording in a corpus of fifty used to abort the whole run mid-table with
+    a traceback, losing the sweep, the gate and the live lines for everything.
+    """
     scored: dict[Path, list[FrameScores]] = {}
+    failed: set[Path] = set()
     for config in configs:
         print(f"\n=== {_label(config)} ===")
         print(f"{'file':<34} {'dur':>6} {'frames':>7} "
               f"{'max':>7} {'p50':>7} {'p90':>7} {'p99':>7} {'fires':>6} {'live':>6}")
         for path in paths:
-            result = score_file(config, path)
+            if path in failed:
+                continue
+            try:
+                result = score_file(config, path)
+            except (ValueError, wave.Error) as exc:
+                failed.add(path)
+                scored.pop(path, None)
+                print(f"{path.name[:34]:<34} SKIPPED: {exc}")
+                continue
             scored.setdefault(path, []).append(result)
             scores = result.scores
             if not len(scores):
@@ -189,7 +208,7 @@ def _report_files(
         if _is_two_stage(config):
             print("  (stage-2 verifier configured: fires counts stage-1 triggers, "
                   "live counts what survived the verifier)")
-    return scored
+    return scored, failed
 
 
 def _report_sweep(config: Config, paths: list[Path],
@@ -302,6 +321,39 @@ def _report_gate(
 # -- entry point --------------------------------------------------------
 
 
+class _InputError(Exception):
+    """Bad corpus arguments; the message is what the user sees."""
+
+
+def _collect_files(
+    paths: list[Path], positives: Path | None, negatives: Path | None
+) -> tuple[list[Path], list[Path], list[Path]]:
+    """Expand every group and refuse anything that cannot be scored."""
+    positive_files = _expand([positives]) if positives else []
+    negative_files = _expand([negatives]) if negatives else []
+    # a directory that exists but holds no WAVs used to fall through to the
+    # generic "the gate needs both flags" message — naming a cause the user
+    # had already satisfied — and still exit 0, so a promotion script reading
+    # exit 0 as "evaluation ran" proceeded with no recall measured at all
+    for flag, given, found in (
+        ("--positives", positives, positive_files),
+        ("--negatives", negatives, negative_files),
+    ):
+        if given and not found:
+            raise _InputError(f"no WAV files under {given} (given as {flag})")
+    # deduped, order-preserving: a path reachable through more than one group
+    # (--score-wav corpus/ --positives corpus/positives) would otherwise be
+    # scored once per appearance, shifting the per-config columns in `scored`
+    # so that --compare reads config 0's second result as config 1's first
+    files = list(dict.fromkeys(_expand(paths) + positive_files + negative_files))
+    missing = [p for p in files if not p.is_file()]
+    if missing:
+        raise _InputError("\n".join(f"not a file: {p}" for p in missing))
+    if not files:
+        raise _InputError("nothing to score — pass WAV files or directories")
+    return files, positive_files, negative_files
+
+
 def score_wavs(
     config: Config,
     paths: list[Path],
@@ -324,24 +376,21 @@ def score_wavs(
             return 2
         configs.append(_override(config, None, other_model))
 
-    positive_files = _expand([positives]) if positives else []
-    negative_files = _expand([negatives]) if negatives else []
-    # deduped, order-preserving: a path reachable through more than one group
-    # (--score-wav corpus/ --positives corpus/positives) would otherwise be
-    # scored once per appearance, shifting the per-config columns in `scored`
-    # so that --compare reads config 0's second result as config 1's first
-    files = list(dict.fromkeys(_expand(paths) + positive_files + negative_files))
-    missing = [p for p in files if not p.is_file()]
-    if missing:
-        for path in missing:
-            print(f"not a file: {path}")
-        return 2
-    if not files:
-        print("nothing to score — pass WAV files or directories")
+    try:
+        files, positive_files, negative_files = _collect_files(
+            paths, positives, negatives
+        )
+    except _InputError as exc:
+        print(exc)
         return 2
 
     frame_ms = config.audio.frame_ms
-    scored = _report_files(configs, files, frame_ms)
+    scored, failed = _report_files(configs, files, frame_ms)
+    # unreadable files are out of every group, so the sweep, the gate and the
+    # false-accepts-per-hour denominator all describe what was actually scored
+    files = [p for p in files if p not in failed]
+    positive_files = [p for p in positive_files if p not in failed]
+    negative_files = [p for p in negative_files if p not in failed]
     for column, cfg in enumerate(configs):
         _report_sweep(cfg, files, scored, column)
     if positive_files and negative_files:
@@ -350,6 +399,11 @@ def score_wavs(
         print("\n(the gate needs both --positives and --negatives; "
               "showing the sweep only)")
     _warn_on_asymmetry(configs)
+    if failed:
+        # exit non-zero even though the report is complete: a corpus that lost
+        # files did not measure what the caller asked for
+        print(f"\n{len(failed)} file(s) could not be scored and were skipped")
+        return 2
     return 0
 
 

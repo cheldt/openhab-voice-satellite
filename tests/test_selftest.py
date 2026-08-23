@@ -126,3 +126,90 @@ async def test_check_deepgram_tts_only_skips_the_listen_probe(fake_deepgram):
     assert fake.listen_requests == []
     assert len(fake.speak_requests) == 2
     assert fake.auth_headers[0] == "Token k"  # check_auth still ran first
+
+
+# --- check_wakeword: every head that has a threshold read against it -------
+
+
+class _ProbeDetector:
+    """Detector stand-in with scriptable per-head scores and a verifier."""
+
+    def __init__(self, wake=0.0, stop=0.0, verify=0.5):
+        self._scores = {"wake": wake, "stop": stop}
+        self._verify_score = verify
+        self.verify_calls = 0
+
+    def process(self, frame, speaking=False):
+        return None
+
+    def score(self, key="wake"):
+        return self._scores[key]
+
+    def _verify(self):
+        self.verify_calls += 1
+        return self._verify_score
+
+
+def _check(monkeypatch, detector, **wakeword):
+    # check_wakeword imports build_detector lazily, so patch it at the source
+    from openhab_voice_satellite import selftest, wakeword as wakeword_module
+
+    monkeypatch.setattr(wakeword_module, "build_detector", lambda config: detector)
+    selftest.check_wakeword(
+        Config.model_validate({"wakeword": {"model": "w.onnx", **wakeword}})
+    )
+
+
+STAGE2 = {"model": "v.onnx", "mel_basis": "m.npy"}
+
+
+def test_a_healthy_two_stage_config_passes(monkeypatch):
+    detector = _ProbeDetector(verify=0.42)
+    _check(monkeypatch, detector, stage2=STAGE2)
+    assert detector.verify_calls == 1  # the verifier really ran
+
+
+def test_the_verifier_inference_is_exercised_not_just_its_shape(monkeypatch):
+    """--check feeds silence, which never crosses stage 1.
+
+    So _verify() was the one thing the self-test could not reach: a graph that
+    fails at run time, or a head emitting a logit instead of a probability,
+    passed a green --check and then broke the monitor loop at the first real
+    wake, hours later.
+    """
+    detector = _ProbeDetector(verify=7.3)  # a raw logit, not a probability
+    with pytest.raises(ValueError, match="stage-2 verifier scored 7.3"):
+        _check(monkeypatch, detector, stage2=STAGE2)
+
+
+def test_a_verifier_that_raises_fails_the_check(monkeypatch):
+    class Boom(_ProbeDetector):
+        def _verify(self):
+            raise RuntimeError("ONNX node failed at run time")
+
+    with pytest.raises(RuntimeError, match="run time"):
+        _check(monkeypatch, Boom(), stage2=STAGE2)
+
+
+def test_a_single_stage_config_never_calls_the_verifier(monkeypatch):
+    detector = _ProbeDetector()
+    _check(monkeypatch, detector)
+    assert detector.verify_calls == 0
+
+
+def test_the_stop_head_is_range_checked_too(monkeypatch):
+    """stop_threshold is read against these scores exactly like the wake bar.
+
+    openwakeword passes raw model output through unclamped, so a stop model
+    exported without its sigmoid used to pass --check and then either fire on
+    nearly any speech during playback or never fire at all.
+    """
+    detector = _ProbeDetector(stop=4.5)
+    with pytest.raises(ValueError, match="stop model scored 4.5"):
+        _check(monkeypatch, detector, stop_model="s.onnx")
+
+
+def test_the_stop_head_is_ignored_when_unconfigured(monkeypatch):
+    # score("stop") falls back to the wake trigger, so checking it without a
+    # stop model would assert the wake score twice under the wrong name
+    _check(monkeypatch, _ProbeDetector(stop=99.0))

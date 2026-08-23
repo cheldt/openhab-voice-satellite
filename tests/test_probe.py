@@ -173,3 +173,35 @@ def test_fails_cleanly_when_pipewire_nodes_cannot_be_listed(
     out = capsys.readouterr().out
     assert "cannot list PipeWire nodes" in out
     assert "deploy/install.md" in out
+
+
+def test_an_unwritable_dump_still_prints_the_summary(
+    tmp_path, monkeypatch, capsys
+):
+    """A probe reports, never crashes.
+
+    DUMP_WAV is CWD-relative and was written before any summary line, so
+    running from a directory the service user cannot write threw away the
+    whole 30 s diagnostic — peak scores, verdict counts, fps, engine cost,
+    capture accounting — for the sake of a convenience dump.
+    """
+    clock = FakeClock()
+    monkeypatch.setattr(probe, "time", clock)
+    detector = ScriptedDetector(
+        detections={3: "wake"}, scores={i: 0.2 for i in range(10)}
+    )
+    _wire(monkeypatch, tmp_path, detector, TickingSource(clock, frames=10))
+
+    def denied(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("openhab_voice_satellite.audio.wav.write_wav", denied)
+
+    assert probe.probe_mic(make_config()) == 0
+    out = capsys.readouterr().out
+    assert "could not write diagnose_capture.wav" in out
+    assert "peak wake score" in out          # the yield of the run survives
+    assert "wake events: 1" in out
+    assert "capture rate" in out
+    assert "capture accounting" in out
+    assert "play it back" not in out         # no dump to point at

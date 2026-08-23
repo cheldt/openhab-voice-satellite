@@ -30,6 +30,36 @@ def _list_devices() -> None:
         print("  (none found — is PipeWire running in this session?)")
 
 
+def _reject_unusable_combinations(parser: argparse.ArgumentParser, args) -> None:
+    """Fail on flag sets the dispatch below would silently ignore half of.
+
+    Dispatch is a first-match if-chain, so `--model candidate.onnx` on its own
+    used to launch the full app with the config's old model — the user then
+    field-tests a model they never loaded — and `--check --probe-mic` ran only
+    the self-test while looking like it had run both.
+    """
+    scoring = args.score_wav is not None or args.positives or args.negatives
+    overrides = [
+        name for name in ("model", "engine", "compare") if getattr(args, name)
+    ]
+    if overrides and not scoring:
+        flags = ", ".join("--" + n for n in overrides)
+        parser.error(
+            f"{flags} {'apply' if len(overrides) > 1 else 'applies'} to a "
+            f"scoring run only — add --score-wav, --positives or --negatives"
+        )
+    modes = [
+        name for name, on in (
+            ("--list-devices", args.list_devices),
+            ("--check", args.check),
+            ("--probe-mic", args.probe_mic),
+            ("--score-wav/--positives/--negatives", scoring),
+        ) if on
+    ]
+    if len(modes) > 1:
+        parser.error(f"pick one mode: {', '.join(modes)} cannot run together")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="openhab-voice-satellite", description=__doc__)
     parser.add_argument("--config", type=Path, default=Path("config.yaml"))
@@ -66,6 +96,7 @@ def main() -> None:
         help="WAVs that must not fire",
     )
     args = parser.parse_args()
+    _reject_unusable_combinations(parser, args)
 
     if args.list_devices:
         _list_devices()

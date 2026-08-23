@@ -270,6 +270,53 @@ async def _capture_loop(
                 break
 
 
+def _write_dump(captured: list[np.ndarray], sample_rate: int) -> bool:
+    """Write the capture dump; False (and a printed line) if it cannot be.
+
+    A probe reports, never crashes. DUMP_WAV is CWD-relative, so running from
+    a directory the service user cannot write — /etc/openhab-voice-satellite,
+    or / — used to throw away the whole 30 s diagnostic for the sake of a
+    convenience dump.
+    """
+    from .audio.wav import write_wav
+
+    try:
+        write_wav(DUMP_WAV, np.concatenate(captured), sample_rate)
+    except OSError as exc:  # noqa: BLE001 - reported, never fatal
+        print(f"\ncould not write {DUMP_WAV}: {exc}")
+        return False
+    return True
+
+
+def _report_summary(config: Config, stats, captured, capture) -> None:
+    """Everything the run measured; printed after the per-second rows."""
+    dumped = _write_dump(captured, config.audio.sample_rate)
+    wakeword = config.wakeword
+    print(f"\npeak wake score: {stats.peak_score:.3f} "
+          f"(threshold {wakeword.threshold}, {wakeword.threshold_speaking} during playback)")
+    if wakeword.stop_model:
+        print(f"peak stop score: {stats.peak_stop_score:.3f} "
+              f"(threshold {wakeword.stop_threshold}, "
+              f"{wakeword.effective_stop_threshold_speaking} during playback)")
+    verdicts = f"wake events: {stats.wake_events}"
+    if wakeword.stop_model:
+        verdicts += f", stop events: {stats.stop_events}"
+    if wakeword.stage2.model:
+        verdicts += f", rejected by stage 2: {stats.stage2_rejections}"
+    print(f"{verdicts}  (process() verdicts — what the app would act on)")
+    expected_fps = config.audio.sample_rate / config.audio.frame_samples
+    short = "  <-- capture is under-delivering" if stats.fps < 0.8 * expected_fps else ""
+    print(f"capture rate: {stats.fps:.1f} of {expected_fps:.1f} frames/s"
+          f"{short}")
+    print(f"{wakeword.engine} cost: {stats.cost.wall_ms:.1f} ms wall, "
+          f"{stats.cost.cpu_ms:.1f} ms process CPU per frame "
+          f"(budget {config.audio.frame_ms} ms)")
+    print(f"capture accounting — {capture.describe()}")
+    if dumped:
+        print(f"captured audio written to {DUMP_WAV} — play it back to hear "
+              f"what the app hears")
+
+
 async def _probe(config: Config) -> int:
     from .audio.io import audio_io, verify_links
 
@@ -307,31 +354,7 @@ async def _probe(config: Config) -> int:
                 task.cancel()
 
     if captured:
-        from .audio.wav import write_wav
-
-        wakeword = config.wakeword
-        write_wav(DUMP_WAV, np.concatenate(captured), config.audio.sample_rate)
-        print(f"\npeak wake score: {stats.peak_score:.3f} "
-              f"(threshold {wakeword.threshold}, {wakeword.threshold_speaking} during playback)")
-        if wakeword.stop_model:
-            print(f"peak stop score: {stats.peak_stop_score:.3f} "
-                  f"(threshold {wakeword.stop_threshold}, "
-                  f"{wakeword.effective_stop_threshold_speaking} during playback)")
-        verdicts = f"wake events: {stats.wake_events}"
-        if wakeword.stop_model:
-            verdicts += f", stop events: {stats.stop_events}"
-        if wakeword.stage2.model:
-            verdicts += f", rejected by stage 2: {stats.stage2_rejections}"
-        print(f"{verdicts}  (process() verdicts — what the app would act on)")
-        expected_fps = config.audio.sample_rate / config.audio.frame_samples
-        short = "  <-- capture is under-delivering" if stats.fps < 0.8 * expected_fps else ""
-        print(f"capture rate: {stats.fps:.1f} of {expected_fps:.1f} frames/s"
-              f"{short}")
-        print(f"{wakeword.engine} cost: {stats.cost.wall_ms:.1f} ms wall, "
-              f"{stats.cost.cpu_ms:.1f} ms process CPU per frame "
-              f"(budget {config.audio.frame_ms} ms)")
-        print(f"capture accounting — {capture.describe()}")
-        print(f"captured audio written to {DUMP_WAV} — play it back to hear what the app hears")
+        _report_summary(config, stats, captured, capture)
     # scriptable: a stalled/unlinked capture must fail the way --check does
     return 1 if timed_out else 0
 

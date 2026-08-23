@@ -31,8 +31,16 @@ def check_audio(config: Config) -> None:
 WAKEWORD_CHECK_SECONDS = 2.5
 
 
+def _require_probability(score: float, what: str) -> None:
+    if not np.isfinite(score) or not 0.0 <= score <= 1.0:
+        raise ValueError(
+            f"{what} scored {score}, which is not a probability — "
+            f"thresholds cannot be read against it"
+        )
+
+
 def check_wakeword(config: Config) -> None:
-    from .wakeword import WAKE, build_detector
+    from .wakeword import STOP, WAKE, build_detector
 
     detector = build_detector(config)
     frame = np.zeros(config.audio.frame_samples, dtype=np.int16)
@@ -40,14 +48,27 @@ def check_wakeword(config: Config) -> None:
     # fills, so a model whose scores are not probabilities at all would pass
     # while still reporting its startup zero
     frames = int(WAKEWORD_CHECK_SECONDS * 1000 / config.audio.frame_ms)
+    heads = [(WAKE, "wakeword model")]
+    if config.wakeword.stop_model:
+        # the stop head is read against stop_threshold at runtime exactly like
+        # the wake head, and openwakeword passes raw model output through
+        # unclamped — a stop model exported without its sigmoid otherwise
+        # passes here and then fires on nearly any speech, or never at all
+        heads.append((STOP, "stop model"))
     for _ in range(frames):
         detector.process(frame)
-        score = detector.score(WAKE)
-        if not np.isfinite(score) or not 0.0 <= score <= 1.0:
-            raise ValueError(
-                f"wakeword model scored {score}, which is not a probability — "
-                f"thresholds cannot be read against it"
-            )
+        for key, what in heads:
+            _require_probability(detector.score(key), what)
+
+    # Silence never crosses stage 1, so the verifier's own inference is the one
+    # thing this check could not otherwise reach: _build_verifier validates the
+    # input and output *shapes*, but a graph that fails at run time, or a head
+    # emitting a logit rather than a probability, would pass a green self-test
+    # and then break the monitor loop at the first real wake hours later. The
+    # ring already holds WAKEWORD_CHECK_SECONDS of audio, so this scores the
+    # same window a live verdict would.
+    if config.wakeword.stage2.model:
+        _require_probability(detector._verify(), "stage-2 verifier")
 
 
 def check_vad(config: Config) -> None:

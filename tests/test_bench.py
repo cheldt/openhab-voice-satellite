@@ -367,3 +367,77 @@ def test_compare_refuses_a_sweep_verdict_when_a_second_stage_is_configured(
     out = capsys.readouterr().out
     assert "NOT COMPARABLE from the sweep" in out
     assert "Compare the live lines" in out
+
+
+def test_an_existing_but_wav_empty_dir_is_named_and_fails(tmp_path, monkeypatch, capsys):
+    """A directory with no WAVs is not "you forgot a flag".
+
+    The gate ran on the expanded lists but the fallback message tested the
+    *flags*, so a freshly created or .flac-only directory printed "the gate
+    needs both --positives and --negatives" — naming a cause the user had
+    already satisfied — and still exited 0. A promotion script reading exit 0
+    as "evaluation ran" then proceeded with no recall measured at all.
+    """
+    positives = tmp_path / "pos"
+    negatives = tmp_path / "neg"
+    positives.mkdir()
+    negatives.mkdir()
+    _wav(negatives / "n.wav")
+    (positives / "phone.flac").write_bytes(b"not a wav")
+    config = _scripted_config(monkeypatch, {"wake": [0.1] * 40})
+
+    assert score_wavs(config, [], positives=positives, negatives=negatives) == 2
+    out = capsys.readouterr().out
+    assert f"no WAV files under {positives}" in out
+    assert "needs both" not in out
+
+
+def test_a_wrong_rate_file_is_skipped_not_fatal(tmp_path, monkeypatch, capsys):
+    """One unreadable file must not cost the whole corpus its report.
+
+    score_wavs pre-validated existence only, so the "resample first" ValueError
+    score_file raises for a non-16 kHz file propagated through _report_files to
+    main(): the run died mid-table with a traceback and the sweep, gate and
+    live lines for every other file were never produced.
+    """
+    good = _wav(tmp_path / "good.wav")
+    bad = tmp_path / "phone.wav"
+    write_wav(bad, np.zeros(44100, dtype=np.int16), 44100)
+    config = _scripted_config(monkeypatch, {"wake": [0.1] * 40})
+
+    assert score_wavs(config, [good, bad]) == 2  # scriptable: something was lost
+    out = capsys.readouterr().out
+    assert "SKIPPED" in out and "resample first" in out
+    assert "detection sweep" in out  # the rest of the report still landed
+    assert "1 file(s) could not be scored" in out
+
+
+def test_a_corrupt_container_is_skipped_too(tmp_path, monkeypatch, capsys):
+    good = _wav(tmp_path / "good.wav")
+    bad = tmp_path / "truncated.wav"
+    bad.write_bytes(b"RIFFnope")
+    config = _scripted_config(monkeypatch, {"wake": [0.1] * 40})
+
+    assert score_wavs(config, [good, bad]) == 2
+    out = capsys.readouterr().out
+    assert "SKIPPED" in out
+    assert "detection sweep" in out
+
+
+def test_a_skipped_file_leaves_the_gate_denominator_honest(
+    tmp_path, monkeypatch, capsys
+):
+    # a file dropped from scoring must also drop out of the corpora, or the
+    # gate divides false accepts by hours of audio it never scored
+    positives = tmp_path / "pos"
+    negatives = tmp_path / "neg"
+    positives.mkdir()
+    negatives.mkdir()
+    _wav(positives / "p.wav")
+    _wav(negatives / "n.wav")
+    write_wav(negatives / "bad.wav", np.zeros(44100, dtype=np.int16), 44100)
+    config = _scripted_config(monkeypatch, {"wake": [0.1] * 40})
+
+    assert score_wavs(config, [], positives=positives, negatives=negatives) == 2
+    out = capsys.readouterr().out
+    assert "1s of negatives" in out  # the one good negative, not two
