@@ -316,6 +316,10 @@ class FakeDeepgram:
         self.status = 200
         self.speak_statuses: list[int] = []  # FIFO per /v1/speak call; falls back to `status`
         self.response_delay_s = 0.0
+        # raw body served by /v1/listen instead of JSON; for the undecodable
+        # payload case (a TLS-terminating middlebox or a provider edge
+        # answering in something that is not UTF-8)
+        self.listen_raw_body: bytes | None = None
 
     def build_app(self) -> web.Application:
         app = web.Application()
@@ -329,6 +333,11 @@ class FakeDeepgram:
         self.listen_requests.append((query, await request.read()))
         self.auth_headers.append(request.headers.get("Authorization"))
         await asyncio.sleep(self.response_delay_s)
+        if self.listen_raw_body is not None:
+            return web.Response(
+                body=self.listen_raw_body, status=self.status,
+                content_type="application/json",
+            )
         if self.status != 200:
             return web.json_response({"err_msg": "boom"}, status=self.status)
         channel: dict = {"alternatives": [{"transcript": self.stt_text}]}
