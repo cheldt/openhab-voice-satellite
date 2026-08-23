@@ -1,0 +1,247 @@
+# Architecture Overview — openhab-voice-satellite
+
+An offline-first voice satellite for openHAB: wakeword → record → STT → openHAB voice
+interpreter → TTS, running as a single Python process on a Raspberry Pi 5 (4 cores) next
+to the PipeWire daemon in the same user session.
+
+- **Package:** `openhab_voice_satellite` (`src/` layout, `pyproject.toml`, Python ≥ 3.11)
+- **Entry point:** console script `openhab-voice-satellite` → `__main__:main`
+- **Config:** one YAML file validated by pydantic; secrets overridable by env
+- **Audio:** 16 kHz mono int16 end-to-end, 80 ms frames (1280 samples), non-negotiable
+  (Silero VAD, openWakeWord and whisper are all hardwired to 16 kHz)
+- **Concurrency:** one asyncio event loop, one GStreamer callback thread, a default
+  executor for blocking model calls (whisper, piper)
+
+---
+
+## 1. Runtime topology
+
+```
+                        ┌───────────────────────── one Python process ─────────────────────────┐
+                        │                                                                      │
+  mic ── PipeWire ──────┼─▶ PipewireSource (gst thread)                                        │
+        (pipewiresrc)   │        │ 80 ms int16 frames                                          │
+                        │        ▼                                                             │
+                        │   AudioBroadcaster ──┬──▶ wake_queue ──▶ App._interrupt_monitor       │
+                        │   (fan-out, bounded) │                     │ wakeword / stop / duck   │
+                        │                      │                     ▼                         │
+                        │                      └──▶ round queue ──▶ Pipeline.run_interaction    │
+                        │                          (per LISTENING)   │                         │
+                        │                                            ├─ recorder + Silero VAD   │
+                        │                                            ├─ Transcriber (executor) ─┼──▶ [Gemini | Deepgram]
+                        │                                            ├─ OpenHABClient ──────────┼──▶ openHAB /rest/voice
+                        │                                            └─ Speaker (piper/cloud) ──┼──▶ [Gemini | Deepgram]
+                        │                                                       │               │
+  speaker ◀── PipeWire ─┼──── PipewireSink (persistent FIFO + keepalive) ◀───────┘               │
+        (pulsesink)     │                                                                       │
+                        └───────────────────────────────────────────────────────────────────────┘
+```
+
+External dependencies: PipeWire/WirePlumber graph, openHAB REST API, optionally the
+Gemini and Deepgram HTTP APIs. Everything else (wakeword, VAD, STT, TTS) runs locally.
+
+## 2. Control flow
+
+State machine (`state.py`), owned by `app.py`, advanced by `pipeline.py`:
+
+```
+IDLE ──wake──▶ LISTENING ──endpoint──▶ THINKING ──answer──▶ SPEAKING ──┐
+  ▲                │                       │                    │     │ dialog.enabled
+  └────────────────┴───────────────────────┴────────────────────┴─────┘  loops back to LISTENING
+                        no-speech / error / barge-in                     (no wakeword needed)
+```
+
+- The wakeword monitor never stops running — it is the only always-on loop, and it is
+  what makes barge-in possible during `THINKING` and `SPEAKING`.
+- One interaction is exactly one cancellable `asyncio.Task`. Barge-in = `sink.stop()` +
+  `task.cancel()`; the `finally` blocks release the mic subscription and delete the
+  server-side conversation.
+- Terminal events: `NO_SPEECH`, `PLAYBACK_DONE`, `ERROR` (`state.Event`).
+
+---
+
+## 3. Component catalog
+
+All modules live under `src/openhab_voice_satellite/`.
+
+### 3.1 Core / orchestration
+
+| Component | Responsibility | Notable contract |
+|---|---|---|
+| `__main__.py` | CLI: `--config`, `--list-devices`, `--check`, `--probe-mic`, `--score-wav`, `--model`, `--engine`, `--compare`, `--positives`, `--negatives` | Every mode imports its stack lazily, so a missing GStreamer/openwakeword shows up as one failed step, not an import crash |
+| `app.py` | Process wiring and the always-on wakeword monitor: builds detector/endpointer/transcriber, opens audio via `AsyncExitStack`, wraps local engines with cloud primaries, starts/cancels the interaction task | Capture starts **after** model loading (`start_capture=False` → `source.start()`): a live stream nobody services xruns itself out of PipeWire scheduling. After a barge-in cancel, listening resumes only when the trigger was `wake`, the state was SPEAKING **and** `barge_in.resume_listening` is set — otherwise the idle earcon plays and the system returns to IDLE |
+| `pipeline.py` | One interaction: LISTENING → THINKING → SPEAKING, dialog follow-up rounds, earcon echo guard, utterance dumps, conversation lifecycle | A dialog is one server-side conversation (uuid per wake); TTS language locks to the first round's detection (follow-ups are too short to detect reliably). `conversation_started` is set **before** the interpreter POST is awaited, so a barge-in landing mid-POST still deletes a conversation the server may already have created; `close()` — called from the monitor's `finally` before the exit stack tears down the session the DELETEs need — drains those fire-and-forget tasks, bounded at 5 s |
+| `state.py` | `State` and `Event` enums. No I/O | Single source of truth for the four states |
+| `config.py` | YAML + pydantic models, `SAMPLE_RATE = 16000`, config-relative path resolution, cross-field validation | Env wins over file for `OPENHAB_TOKEN`, `GEMINI_API_KEY`, `DEEPGRAM_API_KEY`; cloud engine without a key and a `default_language` without a Piper voice are load-time errors. Unknown keys are silently ignored (pydantic's default `extra="ignore"`): a misspelled key falls back to its default without a word, and `audio.sample_rate` is a `ClassVar` deliberately so old configs carrying the key still load |
+
+Helpers inside `app.py` worth naming, because they carry behavior rather than plumbing:
+
+- `_CaptureHealth` — 10 s heartbeat: frame count vs expected fps, peak RMS, peak wake
+  score, queue evictions, and `CaptureStats` deltas. Distinguishes "the graph under-fed
+  us" from "we lost frames ourselves". A separate 10 s timeout (`MIC_STALL_WARN_S`) on
+  the wake queue logs a loud stall warning and restarts the health window so the dead
+  gap is not charged to the next one — two different timers that happen to share a value.
+- `_DuckController` — duck-and-confirm: a pre-threshold score (0.35) during playback
+  ducks the sink to 0.2 for ~1 s so the follow-up frames reach the detector cleanly.
+- `_dump_wake_audio` — `$OVS_DUMP_WAKE` writes the 2.5 s of audio leading up to a
+  detection (pre-roll only, nothing after it); `$OVS_DUMP_WAKE_SCORE` — only in addition
+  to `$OVS_DUMP_WAKE`, it is inert alone — also captures near misses and verifier
+  rejections, the latter gated on the candidate's stage-1 peak (the hard negatives for
+  retraining).
+- `_log_wake_detection` — logs the candidate's stage-1 peak, not the decayed score at
+  the verdict frame, and the verifier's score with it, since accepts are otherwise
+  invisible.
+- `_resync_detector` — after a reset, abandons the mic backlog that outran the detector,
+  otherwise our own TTS echo gets re-scored against the IDLE threshold.
+- `_build_engines` / `_build_speaker` — cloud primaries get their own aiohttp session
+  (openHAB's may have TLS verification disabled). Local STT stays loaded as the fallback
+  (whisper is constructed unconditionally); local TTS becomes a `LazySpeaker` that only
+  constructs piper on the first fallback, saving its RAM and ~3.5 s startup block.
+
+### 3.2 Audio I/O (`audio/` subpackage)
+
+| Component | Responsibility | Notable contract |
+|---|---|---|
+| `io.py` | `audio_io()` async context manager owning the source/sink pair; `verify_links()` | Sink construction failure closes an already-PLAYING source; link check waits 3 s for WirePlumber to settle |
+| `gst_source.py` | `PipewireSource`: `pipewiresrc → appsink`, chunked to fixed frames, `CaptureStats` (buffers, samples, PTS gaps, drops) | 5 s first-frame timeout; PTS gaps under 1 ms are jitter, not lost audio; deferred `start()` |
+| `gst_sink.py` | `PipewireSink`: persistent clock-free byte FIFO into `pulsesink`, byte-accounted `play()` completion, keepalive dither, wake-up preamble, `duck`/`unduck`/`stop` | `sync=false`, no PTS — clock-based scheduling was abandoned after repeated stack failures; `pipewiresink` is avoided because on PipeWire 1.2.x it wedges persistent streams and takes the capture stream down with it |
+| `gst_common.py` | `gst_init()`, `CLIENT_NAME`, s16 mono caps, sync bus handler | `gi` imported only where genuinely needed |
+| `gst_devices.py` | `AudioNode`, `match_node` (pure, importable without PyGObject), `list_audio_nodes`, `resolve_node`, `verify_stream_links` (pw-dump peers), `probe_capture` | Device config is a case-insensitive substring of node name or description; `null` = default node |
+| `broadcast.py` | `AudioBroadcaster` fan-out to bounded `SubscriberQueue`s; `drain_stale()` | Drop-oldest under backpressure with a `dropped` counter — gaps are never zero-filled, since fabricated silence would feed the endpointer's silence window |
+| `chunker.py` | `FrameChunker`: arbitrary buffers → exact `frame_samples` frames | Copies, because gst buffers are unmapped after the callback returns |
+| `wav.py` | `rms`, `read_wav_mono`, `write_wav`, `pcm_to_wav_bytes` | `rms` casts to float64: squaring int16 overflows |
+| `earcons.py` | `Earcons`: wake/ack/error/idle, pre-decoded to PCM at startup | Missing file = warning + silent skip; playback failure never propagates |
+| `source.py`, `sink.py` | `AudioSource` / `AudioSink` Protocols | The seam that keeps the app testable without a live graph |
+
+### 3.3 Wakeword
+
+| Component | Responsibility | Notable contract |
+|---|---|---|
+| `wakeword.py` | The engine-neutral contract: `WakewordProtocol`, `EdgeTrigger`, `BaseWakewordDetector`, `build_detector`, shared ORT `_session_options` | Engines supply **raw scores only**; thresholds, edge/patience and the speaking-threshold raise live here, because barge-in is tuned against all three. ORT sessions are single-threaded with spinning disabled |
+| `wakeword_oww.py` | `OpenWakewordDetector`: openWakeWord ONNX backend, wake + optional stop model, `ncpu=1`, per-speaker verifier pickles | Startup fails loudly on the two ways openwakeword's positional key mapping breaks (shared basenames, multi-output models); a custom verifier **replaces** the base score, so thresholds change meaning |
+| `wakeword_buffer.py` | `Int16Ring` plus `patch_preprocessor()`: two perf patches on openwakeword 0.6.0 internals — numpy ring instead of a deque of Python ints, and a snapshot restore instead of re-embedding 4 s of noise on every `reset()` | Version-gated and **fails open**: a mismatch logs a warning and keeps stock behavior |
+| `verifier_mel.py` | `MelPcenFrontend`: librosa's STFT → mel → PCEN pipeline reimplemented byte-for-byte in numpy + scipy, output `(40, 151)` | The mel filterbank ships as data (`.npy`), not code; parity is asserted against golden fixtures exported where librosa exists |
+
+**Two-stage detection.** Stage 1 (openWakeWord, per 80 ms frame) crosses a deliberately
+low threshold for recall. Each `wake` is then held for `stage2.delay_ms` of further audio
+and the last 1.5 s from the detector's own ring is re-scored by the mel-PCEN CNN
+(`stage2.model` + `stage2.mel_basis`, always a pair). Measured on 5.5 h of continuous
+speech, stage 2 rejects ~99 % of stage-1 triggers. `stop` is never deferred — a late stop
+defeats the purpose — and it also wins over a verifier accept landing on the same frame.
+The detector exposes `last_trigger_score` (the candidate's stage-1 peak — the score at
+the verdict frame has already decayed), `last_verifier_score`, and `last_rejection` (set
+only on the frame a rejection lands, for the dump gate).
+
+The raw-audio ring behind `tail()` belongs to `BaseWakewordDetector`, not the engine:
+it has to serve both the wake-audio dump and the verifier's window, and `process()` fills
+it before anything else runs.
+
+### 3.4 Speech (record / STT / TTS)
+
+| Component | Responsibility | Notable contract |
+|---|---|---|
+| `recorder.py` | `record_utterance()`: drain the frame queue until VAD endpoint, no-speech timeout, or `max_utterance_s`; `NoSpeechError` | Wall-clock stall guard (10 s) because the endpointer's own timeouts count *received* samples and can never fire on a silent queue; uses `asyncio.timeout`, not `wait_for` (3.11 gh-86296 swallows a cancel that races a completed `get()` — that cancel is a barge-in) |
+| `vad.py` | `SpeechEndpointer`: Silero VAD over 512-sample (32 ms) chunks, trailing-silence endpointing, residual carry | Exposes `speech_started`, `endpoint_reached`, `elapsed_s` for the recorder loop |
+| `stt.py` | `Transcriber`: faster-whisper on CPU, run in the executor, `Transcript(text, language)` | Auto-detect is restricted to `stt.languages`; a single configured language skips the detection pass entirely; `cpu_threads` ≥ core count warns but is never coerced |
+| `tts.py` | Shared TTS machinery: `split_sentences`, `tts_chunks` (400 chars), `play_pipelined`, `stream_synthesis` | Chunk N plays while N+1 is fetched/synthesized; a cloud failure after audio already played raises `PartialSpeechError` with the unspoken remainder |
+| `piper_tts.py` | `PiperSpeaker`: per-language voices, sentence-level overlapped synthesis, RTF debug logging | Unknown language falls back to the default language's voice |
+
+### 3.5 Cloud engines (optional, per direction)
+
+| Component | Responsibility | Notable contract |
+|---|---|---|
+| `gemini.py` | `GeminiClient` + `GeminiTranscriber` / `GeminiSpeaker`: plain REST `generateContent` — STT via JSON mode with inline base64 WAV, TTS via the AUDIO modality; `check_model()` for `--check` | API key travels in the `x-goog-api-key` header, never in a URL |
+| `deepgram.py` | `DeepgramClient` + transcriber/speaker: Nova-3 `/v1/listen` (language-restricted), Aura-2 `/v1/speak` raw linear16 | Key in the `Authorization` header; voice per language via the model suffix |
+| `cloud.py` | `raise_for_status`, `pick_voice` | Deliberately free functions: providers differ in auth, endpoints and error types, and keeping that visible beats a base class |
+| `fallback.py` | `CloudEngineError`, `PartialSpeechError`, `FALLBACK_ERRORS`, `FallbackTranscriber`, `FallbackSpeaker`, `LazySpeaker` | `CancelledError` (barge-in) is not an `Exception` and passes through both wrappers untouched; `LazySpeaker` defers the multi-second local model load to the executor, memoized and shielded so a barge-in mid-load does not start a second one |
+
+Cloud is per direction: `stt.engine` and `tts.engine` are chosen independently. Local
+STT stays loaded as the fallback; local TTS becomes a `LazySpeaker` and loads on the
+first fallback.
+
+### 3.6 openHAB integration
+
+| Component | Responsibility | Notable contract |
+|---|---|---|
+| `openhab.py` | `make_session` (honors `verify_ssl`), `OpenHABClient.ping` / `send_command` / `end_conversation`, `OpenHABTimeoutError` | `POST /rest/voice/interpreters` with `?llmTools=…&conversation=…`, `text/plain` in and out; the answer is the HTTP body. `DELETE /rest/voice/conversations/{id}` is best-effort and never raises |
+
+### 3.7 Diagnostics and evaluation
+
+| Component | Responsibility |
+|---|---|
+| `selftest.py` | `--check`: audio devices + real capture probe, wakeword (2.5 s of frames so the engine's context window fills), VAD, whisper, piper, Gemini/Deepgram auth, openHAB ping. Each check imports lazily and reports independently |
+| `probe.py` | `--probe-mic`: 30 s field diagnostic on the same source/sink the app uses — per-second RMS/peak/wake score plus wall and process CPU ms per frame against the `frame_ms` budget, earcons at t=8 s and t=18 s, capture written to `diagnose_capture.wav`. The module docstring is the interpretation guide (silent node, wrong node, clock mismatch, playback poisoning capture, sleeping speaker) |
+| `bench.py` | Offline wakeword evaluation through `build_detector` and the real `EdgeTrigger`: `--score-wav` (per-file distribution + threshold × patience sweep over 15 thresholds × patience 1–3), `--compare MODEL` (two candidates on identical frames), `--positives/--negatives` (recall vs false accepts per hour — the promotion gate). Appends silence after each file so a deferred stage-2 verdict still flushes |
+
+---
+
+## 4. Repository assets
+
+| Path | Role |
+|---|---|
+| `config.example.yaml` | Annotated template for every config key; `config.yaml` is gitignored |
+| `scripts/download_models.py` | Fetch openWakeWord models, Piper voices, whisper warmup |
+| `scripts/make_earcons.py` | Generate the sine-sweep earcons into `sounds/` |
+| `sounds/` | `wake.wav`, `ack.wav`, `error.wav`, `idle.wav` |
+| `models/piper/` | Piper voices (de_DE thorsten, en_GB alba, en_US lessac) |
+| `models/wakeword/` | openWakeWord wake/stop models, custom `shodan`/`showdaan`/`shohdaan` candidates, stage-2 verifiers with their `.config.json`, `verifier_melfb_40.npy`, `verifier_frontend_golden.npz`, plus the `wakeforge/` training artifacts |
+| `deploy/openhab-voice-satellite.service` | systemd **user** unit (PipeWire lives in the user session; needs `loginctl enable-linger`). Sets `HF_HOME`, `OMP_WAIT_POLICY=PASSIVE`, `OPENBLAS_NUM_THREADS=1` |
+| `deploy/install.md` | apt packages, openwakeword `--no-deps` pin, AEC config, 16 kHz graph clock pinning, powered-speaker preamble notes |
+| `tests/` | 28 `test_*.py` modules (~one per source module) plus `conftest.py`, `fakes.py`, `wakeword_stubs.py`; GStreamer tests skip without PyGObject; `test_verifier_mel.py` checks librosa parity against golden fixtures |
+| `.github/workflows/python-app.yml` | uv, Python 3.11–3.14 matrix, flake8 + pytest (runner has no PipeWire; live-audio tests skip) |
+| `.github/workflows/security-scan.yml` | Nightly `pip-audit` over the locked dependency set |
+
+External but coupled: **ultiwake** (the training pipeline that produces the stage-2
+verifier `.onnx`, its mel filterbank `.npy` and the golden frontend fixtures, and refuses
+to export a pair that has not passed its false-accept gate). `--score-wav` is driven by
+its `gate.sh` / `smoke.sh`, which is why `--engine` stays a flag despite having one
+choice.
+
+---
+
+## 5. Cross-cutting concerns
+
+**CPU budget.** Four cores on a Pi 5, and the 80 ms wakeword cadence must never miss —
+missing it means going deaf to barge-in. Hence: `ncpu=1` for openWakeWord, explicit
+single-thread ORT sessions with spinning disabled, `stt.cpu_threads: 3` (ctranslate2 runs
+with the GIL released and saturates its threads), `OMP_WAIT_POLICY=PASSIVE` and
+`OPENBLAS_NUM_THREADS=1` in the unit file, and blocking model calls pushed to the
+executor.
+
+**Echo mitigation, in layers.** `threshold_speaking` raised (raised, not disabled — the
+stop word and barge-in must survive playback); duck-and-confirm on a pre-threshold score;
+the post-earcon echo guard that drops the backlog captured while an earcon was audible
+(keeping the last 300 ms, which may hold the user's speech onset); stale-backlog
+abandonment after every detector reset; keepalive dither so the amp never auto-standbys
+and clips the first sound. Hardware AEC (PipeWire `libpipewire-module-echo-cancel`) is
+documented in `deploy/install.md` as the optional real fix.
+
+**Cancellation model.** The wakeword monitor is the only long-lived loop; every
+interaction is one task it can cancel. Cleanups that must outlive a cancel (conversation
+DELETE, the lazy TTS load) run as their own shielded/tracked tasks.
+
+**Failure posture.** Cloud errors fall back to local, per request, with only the unspoken
+remainder re-spoken. Frame loss is counted and reported, never hidden behind fabricated
+silence. Perf patches on third-party internals are version-gated and fail open. Config
+mistakes that would be silent at runtime (removed engine name, missing cloud key, voice
+without a language, a stage-2 model without its filterbank) are load-time errors, and a
+speaking threshold below the idle one is a warning.
+
+**Security notes.** openWakeWord custom verifier `.pkl` files are unpickled at startup —
+treat them as executable code. Cloud keys go in headers, never query strings.
+`openhab.verify_ssl: false` logs a warning. Debug dumps (`$OVS_DUMP_UTTERANCES`,
+`$OVS_DUMP_WAKE`, `$OVS_DUMP_WAKE_SCORE`) write raw room audio to disk.
+
+## 6. Config surface
+
+`audio` (devices, `frame_ms`, wake-up preamble) · `wakeword` (model, thresholds, patience,
+per-speaker verifiers, `stage2`) · `vad` (threshold, `silence_ms`, `no_speech_timeout_s`,
+`max_utterance_s`) · `stt` (engine, model, `compute_type`, `cpu_threads`, `beam_size`,
+`languages`) · `openhab` (url, token, `llm_tools`, `response_timeout_s`, `verify_ssl`) ·
+`tts` (engine, `default_language`) · `piper.voices` · `gemini.*` · `deepgram.*` ·
+`barge_in.resume_listening` · `dialog` (enabled, `followup_timeout_s`, earcon) ·
+`earcons.*` · `logging.level`.
+
+Relative paths in the config resolve against the config file's directory (pretrained
+openWakeWord phrase names like `hey_jarvis` pass through verbatim); a `Config` built
+directly in tests keeps its paths as written.
