@@ -159,11 +159,18 @@ it before anything else runs.
 
 | Component | Responsibility | Notable contract |
 |---|---|---|
-| `recorder.py` | `record_utterance()`: drain the frame queue until VAD endpoint, no-speech timeout, or `max_utterance_s`; `NoSpeechError` | Wall-clock stall guard (10 s) because the endpointer's own timeouts count *received* samples and can never fire on a silent queue; uses `asyncio.timeout`, not `wait_for` (3.11 gh-86296 swallows a cancel that races a completed `get()` — that cancel is a barge-in) |
-| `vad.py` | `SpeechEndpointer`: Silero VAD over 512-sample (32 ms) chunks, trailing-silence endpointing, residual carry | Exposes `speech_started`, `endpoint_reached`, `elapsed_s` for the recorder loop |
-| `stt.py` | `Transcriber`: faster-whisper on CPU, run in the executor, `Transcript(text, language)` | Auto-detect is restricted to `stt.languages`; a single configured language skips the detection pass entirely; `cpu_threads` ≥ core count warns but is never coerced |
-| `tts.py` | Shared TTS machinery: `split_sentences`, `tts_chunks` (400 chars), `play_pipelined`, `stream_synthesis` | Chunk N plays while N+1 is fetched/synthesized; a cloud failure after audio already played raises `PartialSpeechError` with the unspoken remainder |
-| `piper_tts.py` | `PiperSpeaker`: per-language voices, sentence-level overlapped synthesis, RTF debug logging | Unknown language falls back to the default language's voice |
+| `recorder.py` | `record_utterance()`: drain the frame queue until VAD endpoint, no-speech timeout, or `max_utterance_s`; `NoSpeechError` on no speech and on a closed source | Round 0 passes `no_speech_timeout_s=None`, meaning `vad.no_speech_timeout_s`; follow-up rounds pass `dialog.followup_timeout_s` (§3.1). Two stall guards with distinct messages: a per-`get` 10 s wall-clock cap ("mic stalled" — the endpointer's own timeouts count *received* samples and can never fire on a silent queue) and an overall deadline of `no_speech_timeout_s + max_utterance_s + 10 s` ("listening window exhausted" — for a trickling mic whose rare frames keep resetting the per-get cap while the sample clock barely advances). A stall *mid-utterance* is not an error: with speech started and frames collected, it breaks and transcribes the partial utterance under a warning. Reads `frames.dropped` on exit and warns how much audio was spliced out — §3.2's never-zero-filled policy, enforced at the consumer; the counter is per-utterance because the queue is subscribed per round. Uses `asyncio.timeout`, not `wait_for` (3.11 gh-86296 swallows a cancel that races a completed `get()` — that cancel is a barge-in) |
+| `vad.py` | `SpeechEndpointer`: Silero VAD over 512-sample (32 ms) chunks, trailing-silence endpointing, residual carry | Exposes `speech_started`, `endpoint_reached`, `elapsed_s` for the recorder loop. The engine is `pysilero-vad` 2.1.1's bundled silero v5 ONNX, whose own session already runs single-threaded — §5's ORT posture holds for VAD for free. One endpointer lives for the process lifetime (`app.py`); that is safe because `record_utterance` calls `reset()` on entry (silero state, residual, flags). `speech_started` is sticky: one 32 ms chunk over threshold disables the no-speech timeout for the round — endpointing, not the timeout, then ends it. `probability()` is public as the monkeypatch seam for `test_vad.py` |
+| `stt.py` | `Transcriber`: faster-whisper on CPU, run in the executor, `Transcript(text, language)` | With more than one configured language the decode runs under whisper's own detection (`language=None`); only the *reported* language is remapped into `stt.languages` afterwards (best allowed entry of `all_language_probs`, else `tts.default_language`) — an out-of-set utterance returns foreign text under an allowed label, and that label locks the TTS voice for the whole dialog (§3.1). A single configured language skips the detection pass entirely; `cpu_threads` ≥ core count warns but is never coerced |
+| `tts.py` | Shared TTS machinery: `split_sentences`, `tts_chunks` (400 chars), `play_pipelined`, `stream_synthesis` | Chunk N plays while N+1 is fetched/synthesized; a cloud failure after audio already played raises `PartialSpeechError` with the unspoken remainder. `play_pipelined` touches `chunks[0]` before any guard — a non-empty list is a caller-side invariant (all three callers check first). `split_sentences` splits on whitespace after `.!?:;`, so spaced German abbreviations ("z. B.", "u. a.") fragment into sub-sentence pieces — a prosody cost (and one cloud request per fragment), not a failure; "21.30 Uhr" has no whitespace and is safe. A prefetch that failed before a barge-in cancels the loop is never retrieved — asyncio logs "Task exception was never retrieved" at GC; log noise only |
+| `piper_tts.py` | `PiperSpeaker`: per-language voices, sentence-level overlapped synthesis, RTF debug logging | `__init__` loads every configured voice up front — the RAM figure behind §3.1's `LazySpeaker`. Unknown language falls back to the default language's voice via a bare dict access that cannot `KeyError` only because a `default_language` without a voice is a load-time error (§3.1). Empty synthesis returns `rate=0`, which `play_pipelined` skips via `if len(pcm)` |
+
+**Cancellation stops the await, never the executor thread.** `Transcriber.transcribe`
+and `stream_synthesis`'s fetch both `run_in_executor`. A barge-in during THINKING
+cancels the await while ctranslate2 keeps decoding on `stt.cpu_threads` threads; one
+during piper playback lets the next sentence finish synthesizing. Both burn cores
+exactly when the 80 ms wakeword cadence matters most. §5's "every interaction is one
+task it can cancel" is true of the event-loop task only.
 
 ### 3.5 Cloud engines (optional, per direction)
 
@@ -236,8 +243,9 @@ and clips the first sound. Hardware AEC (PipeWire `libpipewire-module-echo-cance
 documented in `deploy/install.md` as the optional real fix.
 
 **Cancellation model.** The wakeword monitor is the only long-lived loop; every
-interaction is one task it can cancel. Cleanups that must outlive a cancel (conversation
-DELETE, the lazy TTS load) run as their own shielded/tracked tasks.
+interaction is one task it can cancel. The cancel reaches the await, not executor
+threads already decoding or synthesizing (§3.4). Cleanups that must outlive a cancel
+(conversation DELETE, the lazy TTS load) run as their own shielded/tracked tasks.
 
 **Failure posture.** Cloud errors fall back to local, per request, with only the unspoken
 remainder re-spoken. Frame loss is counted and reported, never hidden behind fabricated
