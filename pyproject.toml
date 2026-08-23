@@ -53,3 +53,15 @@ where = ["src"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Warnings are failures. With asyncio_mode = "auto" a forgotten await is a
+# RuntimeWarning and nothing else — the test passes vacuously, asserting
+# nothing — and a leaked transport or unclosed session only ever shows up as
+# a PytestUnraisableExceptionWarning. Neither could fail a build before.
+# The one ignore is third-party and outside our reach: PyGObject's own
+# overrides call a deprecated GLib symbol on import. Matched by message
+# rather than by class so the filter cannot fail to resolve on a checkout
+# without PyGObject installed (where the gst tests skip anyway).
+filterwarnings = [
+    "error",
+    "ignore:GLib.unix_signal_add_full is deprecated:DeprecationWarning",
+]

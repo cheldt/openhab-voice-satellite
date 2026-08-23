@@ -291,3 +291,20 @@ def test_openhab_ca_cert_resolves_against_the_config_file(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text('openhab:\n  ca_cert: "certs/openhab-ca.pem"\n')
     assert load_config(path).openhab.ca_cert == str(tmp_path / "certs/openhab-ca.pem")
+
+
+def test_the_shipped_example_config_validates():
+    """`cp config.example.yaml config.yaml` is the documented first step.
+
+    config.py rejects removed enum values at load by design, and this repo's
+    history removes them regularly (Kokoro TTS, the violawake engine), so
+    example-vs-schema drift is a live risk that CI could not see: every new
+    install would crash at first startup on the very file the docs told the
+    user to copy.
+    """
+    from pathlib import Path
+
+    example = Path(__file__).parent.parent / "config.example.yaml"
+    config = load_config(example)
+    assert config.wakeword.engine == "openwakeword"
+    assert config.stt.engine == "local"  # the example must not need cloud keys

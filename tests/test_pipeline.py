@@ -41,6 +41,12 @@ async def env():
 
     await broadcaster.stop()
     source.close()
+    # release first, then let the loop run: a handler left mid-delay by a
+    # timeout test has to finish and close its connection *before* the client
+    # and server go away, or the abandoned server-side transport resurfaces
+    # later as an unraisable attributed to some unrelated test
+    fake_oh.release()
+    await asyncio.sleep(0)
     await session.close()
     await server.close()
 

@@ -21,7 +21,11 @@ scipy:
 Output shape (40, 151). Parity against the training-side frontend is asserted
 by tests/test_verifier_mel.py over golden fixtures generated where librosa
 exists (ultiwake, scripts/export_verifier_frontend.py), which re-exports them
-alongside every verifier it deploys.
+alongside every verifier it deploys. A 3-clip subset of that export lives in
+tests/fixtures/ and is committed, so the parity check actually runs in CI and
+on any checkout — the full export under models/ is gitignored, which for a
+while meant these tests had never run anywhere but the author's machine while
+this docstring claimed the guarantee held.
 """
 
 from __future__ import annotations

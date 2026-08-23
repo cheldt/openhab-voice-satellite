@@ -239,12 +239,12 @@ not threshold crossings, so what an operator sees on the device is what the app 
 | `scripts/download_models.py` | Fetch openWakeWord models, Piper voices, whisper warmup |
 | `scripts/make_earcons.py` | Generate the sine-sweep earcons into `sounds/` |
 | `sounds/` | `wake.wav`, `ack.wav`, `error.wav`, `idle.wav` |
-| `models/piper/` | Piper voices (de_DE thorsten, en_GB alba, en_US lessac) |
-| `models/wakeword/` | openWakeWord wake/stop models, custom `shodan`/`showdaan`/`shohdaan` candidates, stage-2 verifiers with their `.config.json`, `verifier_melfb_40.npy`, `verifier_frontend_golden.npz`, plus the `wakeforge/` training artifacts |
+| `models/piper/` | **Gitignored, local:** Piper voices. `download_models.py` provisions de_DE thorsten and en_GB alba; an en_US lessac copy on the author's box is provisioned by nothing |
+| `models/wakeword/` | **Gitignored, local:** openWakeWord wake/stop models, custom `shodan`/`showdaan`/`shohdaan` candidates, stage-2 verifiers with their `.config.json`, `verifier_melfb_40.npy`, `verifier_frontend_golden.npz`, plus the `wakeforge/` training artifacts. Deposited by ultiwake's `./run.sh deploy`, fetched by no CI job — so nothing here can gate a test |
 | `deploy/openhab-voice-satellite.service` | systemd **user** unit (PipeWire lives in the user session; needs `loginctl enable-linger`). Sets `HF_HOME`, `OMP_WAIT_POLICY=PASSIVE`, `OPENBLAS_NUM_THREADS=1`. `Restart=on-failure` pairs with the non-zero capture-death exit (§3.2) |
 | `deploy/install.md` | apt packages, openwakeword `--no-deps` pin, AEC config, 16 kHz graph clock pinning, powered-speaker preamble notes |
-| `tests/` | 29 `test_*.py` modules (~one per source module) plus `conftest.py`, `fakes.py`, `wakeword_stubs.py`; GStreamer tests skip without PyGObject; `test_verifier_mel.py` checks librosa parity against golden fixtures |
-| `.github/workflows/python-app.yml` | uv, Python 3.11–3.14 matrix, flake8 + pytest (runner has no PipeWire; live-audio tests skip) |
+| `tests/` | 30 `test_*.py` modules (~one per source module) plus `conftest.py`, `fakes.py`, `wakeword_stubs.py` and the committed `fixtures/` (a 3-clip golden subset + the mel filterbank, so `test_verifier_mel.py`'s librosa-parity check runs in CI rather than skipping on every checkout without a `models/` tree). GStreamer tests skip without PyGObject; the two tests covering the *deployed* verifier pair still skip off-device, which the `-rs` in CI makes visible instead of invisible |
+| `.github/workflows/python-app.yml` | uv, Python 3.11–3.14 matrix, flake8 + pytest `-rs` (runner has no PipeWire; live-audio tests skip, and the report says which). Warnings are failures (`filterwarnings = error`), so a forgotten await or a leaked transport cannot pass as a green vacuous test |
 | `.github/workflows/security-scan.yml` | Nightly `pip-audit` over the locked dependency set |
 
 External but coupled: **ultiwake** (the training pipeline that produces the stage-2

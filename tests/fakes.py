@@ -195,7 +195,13 @@ class ScriptedDetector:
         return np.zeros(int(seconds * 16000), dtype=np.int16)
 
     def reset(self) -> None:
+        # the real detector clears these; a fake that keeps them drifts from
+        # WakewordProtocol at exactly the seam app.py resets after every
+        # dispatch, which is where a stale last_* would be read next
         self.resets += 1
+        self.last_trigger_score = None
+        self.last_verifier_score = None
+        self.last_rejection = None
 
 
 class FakePipeline:
@@ -371,6 +377,16 @@ class FakeOpenHAB:
     - POST /rest/voice/interpreters: records the text and answers with the
       scripted plain-text response after `response_delay_s`
     - DELETE /rest/voice/conversations/{cid}: records the deleted id
+
+    `response_delay_s` is an interruptible wait, not a plain sleep. A test that
+    scripts a long delay to exercise the client's timeout leaves the handler
+    mid-sleep when the client gives up, and aiohttp's TestServer cannot close a
+    connection whose handler is still running: the server-side transport is
+    abandoned, GC'd later, and on 3.14 its __del__ re-enters
+    asyncio.base_events.Server._wakeup after _waiters is already None, which
+    surfaces as a bewildering unraisable TypeError attributed to whichever
+    unrelated test happened to trigger the collection. `release()` ends the
+    wait so teardown closes cleanly.
     """
 
     def __init__(self, response: str = "Okay.", response_delay_s: float = 0.05) -> None:
@@ -387,6 +403,17 @@ class FakeOpenHAB:
         self.ping_status = 200  # e.g. 401 to test a rejected token
         self.ping_headers: list[dict[str, str]] = []
         self.error_body = ""  # body sent along with a non-200 status
+        self._released = asyncio.Event()
+
+    def release(self) -> None:
+        """Cut every pending response delay short (teardown)."""
+        self._released.set()
+
+    async def _wait(self) -> None:
+        try:
+            await asyncio.wait_for(self._released.wait(), self.response_delay_s)
+        except TimeoutError:
+            pass  # the full delay elapsed, which is the normal case
 
     def build_app(self) -> web.Application:
         app = web.Application()
@@ -406,7 +433,7 @@ class FakeOpenHAB:
         self.llm_tools.append(request.query.get("llmTools"))
         self.conversations.append(request.query.get("conversation"))
         self.headers.append(dict(request.headers))
-        await asyncio.sleep(self.response_delay_s)
+        await self._wait()
         if self.status != 200:
             return web.Response(status=self.status, text=self.error_body)
         text = self.responses.pop(0) if self.responses else self.response

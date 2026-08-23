@@ -39,6 +39,10 @@ async def fake_openhab():
     server = TestServer(fake.build_app())
     await server.start_server(shutdown_timeout=0.2)
     yield fake, server
+    # release before closing: a handler left mid-delay (the timeout tests)
+    # keeps its connection open past the shutdown timeout, and the abandoned
+    # server-side transport resurfaces later as an unraisable from another test
+    fake.release()
     await server.close()
 
 
