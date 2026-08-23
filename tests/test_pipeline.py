@@ -48,6 +48,13 @@ async def env():
     fake_oh.release()
     await asyncio.sleep(0)
     await session.close()
+    # and let the loop run the connector's close callbacks: on 3.11 the
+    # connection the timeout test abandoned mid-request is still open when
+    # close() returns, and the socket then outlives this fixture and lands as
+    # an unraisable ResourceWarning inside whatever test runs next. Yields, not
+    # a sleep, so there is no wall-clock guess to go flaky on.
+    for _ in range(10):
+        await asyncio.sleep(0)
     await server.close()
 
 

@@ -67,11 +67,15 @@ testpaths = ["tests"]
 # RuntimeWarning and nothing else — the test passes vacuously, asserting
 # nothing — and a leaked transport or unclosed session only ever shows up as
 # a PytestUnraisableExceptionWarning. Neither could fail a build before.
-# The one ignore is third-party and outside our reach: PyGObject's own
-# overrides call a deprecated GLib symbol on import. Matched by message
-# rather than by class so the filter cannot fail to resolve on a checkout
-# without PyGObject installed (where the gst tests skip anyway).
+# Both ignores are third-party and outside our reach, and both come from
+# PyGObject: its import machinery trips ImportWarning on the Pi's 3.11 (the
+# deployment target), and its overrides call a deprecated GLib symbol.
+# ImportWarning is ignored by CPython's own default filters, so restoring that
+# for it costs nothing — "error" had promoted a warning Python itself does not
+# show. The GLib one is matched by message rather than by class so the filter
+# cannot fail to resolve on a checkout without PyGObject (where gst tests skip).
 filterwarnings = [
     "error",
+    "ignore::ImportWarning",
     "ignore:GLib.unix_signal_add_full is deprecated:DeprecationWarning",
 ]
