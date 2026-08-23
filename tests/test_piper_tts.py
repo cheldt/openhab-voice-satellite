@@ -86,3 +86,31 @@ async def test_empty_synthesis_not_played(speaker):
     spk._voices["de"].empty = True
     await spk.speak("Hallo.", "de")
     assert sink.played == []
+
+
+async def test_an_unpunctuated_long_answer_is_chunked(speaker):
+    """The case TTS_CHUNK_CHARS exists for reaches piper too.
+
+    A "list all items" answer is one giant comma-separated sentence, so
+    splitting on punctuation alone handed it to piper as a single
+    synthesize() call — the whole thing materialized before a byte could
+    play, pipelining gone, the satellite silent in SPEAKING for the duration.
+    """
+    from openhab_voice_satellite.tts import TTS_CHUNK_CHARS
+
+    items = ", ".join(f"Lampe {i}" for i in range(120))  # no sentence end
+    assert len(items) > 2 * TTS_CHUNK_CHARS
+    spk, sink = speaker
+    await spk.speak(items, "de")
+
+    spoken = spk._voices["de"].sentences
+    assert len(spoken) > 2                              # actually pipelined
+    assert all(len(c) <= TTS_CHUNK_CHARS for c in spoken)
+    assert len(sink.played) == len(spoken)
+
+
+async def test_a_punctuated_answer_still_splits_per_sentence(speaker):
+    # chunking must not change the ordinary case: short sentences pass through
+    spk, sink = speaker
+    await spk.speak("Eins. Zwei. Drei.", "de")
+    assert spk._voices["de"].sentences == ["Eins.", "Zwei.", "Drei."]

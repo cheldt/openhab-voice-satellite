@@ -13,9 +13,14 @@ import aiohttp
 async def raise_for_status(
     resp: aiohttp.ClientResponse, exc_type: type[Exception], what: str
 ) -> None:
-    """Raise the provider's error type with a truncated body on HTTP >= 400."""
+    """Raise the provider's error type with a truncated body on HTTP >= 400.
+
+    Decoded leniently on purpose: an error body is a diagnostic, so a gateway
+    answering 502 in some other encoding should still produce the provider's
+    error naming the status, not a UnicodeDecodeError standing in for it.
+    """
     if resp.status >= 400:
-        body = await resp.text()
+        body = (await resp.read()).decode("utf-8", "replace")
         raise exc_type(f"HTTP {resp.status} from {what}: {body[:500]}")
 
 
