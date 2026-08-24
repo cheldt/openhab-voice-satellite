@@ -8,3 +8,6 @@ config.yaml
 
 # the review report is a working document, not a repo artifact
 review.md
+
+# local scratch: the session resume command
+resume
