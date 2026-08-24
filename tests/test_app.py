@@ -208,6 +208,69 @@ async def test_stop_word_never_resumes():
         assert m.app.state is State.IDLE
 
 
+async def test_barge_in_logs_the_scores_that_caused_it(caplog):
+    """A barge-in used to log only "interaction cancelled".
+
+    That makes a deliberate interruption and the assistant self-triggering on
+    its own TTS echo the same line in the journal — and the echo case is the
+    one the raised speaking threshold exists to prevent, so it is the one
+    worth being able to see. Only the IDLE branch logged its scores.
+    """
+    detector = ScriptedDetector(
+        detections={0: "wake", 1: "wake"},
+        scores={0: 0.9, 1: 0.42},
+        verifier_scores={0: 0.99, 1: 0.71},
+    )
+    async with Monitor(
+        detector=detector,
+        pipeline_kwargs={"state_on_run": State.SPEAKING, "hold_s": 10.0},
+    ) as m:
+        with caplog.at_level(logging.INFO):
+            await m.feed()  # wake from IDLE
+            m.sink.is_playing = True  # our TTS is audible
+            await m.feed()  # wake during SPEAKING -> barge-in
+    assert "barge-in: wake during SPEAKING" in caplog.text
+    assert "score 0.42, verifier 0.710" in caplog.text
+    assert "our output was audible" in caplog.text
+
+
+async def test_a_barge_in_in_a_quiet_room_says_nothing_about_our_output(caplog):
+    # the clause is the informative half; it must not appear when the sink
+    # was idle, or every barge-in reads as a possible echo
+    detector = ScriptedDetector(detections={0: "wake", 1: "wake"}, scores={1: 0.5})
+    async with Monitor(
+        detector=detector,
+        pipeline_kwargs={"state_on_run": State.LISTENING, "hold_s": 10.0},
+    ) as m:
+        with caplog.at_level(logging.INFO):
+            await m.feed()
+            await m.feed()
+    assert "barge-in: wake during LISTENING (score 0.50)" in caplog.text
+    assert "audible" not in caplog.text
+
+
+async def test_a_stop_barge_in_reports_the_stop_head_not_the_wake_peak(caplog):
+    """A stop is never deferred and never verified.
+
+    Reporting last_trigger_score/last_verifier_score for one would print the
+    wake head's numbers — stale from the accept that started the interaction.
+    """
+    detector = ScriptedDetector(
+        detections={0: "wake", 1: "stop"},
+        scores={0: 0.9, 1: 0.55},
+        verifier_scores={0: 0.99},
+    )
+    async with Monitor(
+        detector=detector,
+        pipeline_kwargs={"state_on_run": State.SPEAKING, "hold_s": 10.0},
+    ) as m:
+        with caplog.at_level(logging.INFO):
+            await m.feed()
+            await m.feed()
+    assert "barge-in: stop during SPEAKING (score 0.55)" in caplog.text
+    assert "verifier" not in caplog.text.split("barge-in")[1]
+
+
 async def test_duck_on_prethreshold_then_unduck_after_hold():
     # score crosses DUCK_PRETHRESHOLD once while SPEAKING, then stays low
     scores = {1: 0.4}

@@ -55,22 +55,28 @@ class CaptureClosedError(RuntimeError):
     """
 
 
-def _log_wake_detection(detector: WakewordProtocol, score: float) -> None:
-    """Log the candidate's stage-1 peak, not this frame's decayed score.
+def _detection_scores(
+    detector: WakewordProtocol, detection: str, score: float
+) -> str:
+    """The scores behind a detection, as a log suffix.
 
-    With a verifier the detection lands `delay_ms` past the peak that fired
-    it; the verifier's own score goes into the same line, since accepts are
-    otherwise invisible.
+    The candidate's stage-1 peak, not this frame's decayed score: with a
+    verifier the detection lands `delay_ms` past the peak that fired it. The
+    verifier's own score goes in beside it, since accepts are otherwise
+    invisible. A stop is never deferred and never verified, so it reports its
+    own live score rather than the wake head's stale one.
     """
+    if detection == "stop":
+        return f"score {detector.score('stop'):.2f}"
     trigger_score = detector.last_trigger_score
     trigger_score = score if trigger_score is None else trigger_score
     if detector.last_verifier_score is not None:
-        log.info(
-            "wakeword detected (score %.2f, verifier %.3f)",
-            trigger_score, detector.last_verifier_score,
-        )
-    else:
-        log.info("wakeword detected (score %.2f)", trigger_score)
+        return f"score {trigger_score:.2f}, verifier {detector.last_verifier_score:.3f}"
+    return f"score {trigger_score:.2f}"
+
+
+def _log_wake_detection(detector: WakewordProtocol, score: float) -> None:
+    log.info("wakeword detected (%s)", _detection_scores(detector, "wake", score))
 
 
 def _wake_score_floor() -> float | None:
@@ -470,7 +476,8 @@ class App:
                 # the sink, not the state, knows whether the room is loud:
                 # THINKING is silent for its whole whisper roundtrip, while
                 # the wake and ack earcons are audible outside SPEAKING
-                detection = detector.process(frame, speaking=sink.is_playing)
+                speaking = sink.is_playing
+                detection = detector.process(frame, speaking=speaking)
                 score = detector.score("wake")
                 health.observe(
                     frame, score, getattr(wake_queue, "dropped", 0), source.stats()
@@ -490,7 +497,20 @@ class App:
                     self._resync_detector(detector, wake_queue)
                     self._start_pipeline(pipeline, earcons)
                 elif self.state in (State.LISTENING, State.THINKING, State.SPEAKING):
-                    # wakeword or stop-word during an interaction = barge-in
+                    # wakeword or stop-word during an interaction = barge-in.
+                    # Logged before the cancel, with the scores that caused it
+                    # and whether our own output was audible at the time:
+                    # without those, a deliberate interruption and the
+                    # assistant self-triggering on its own TTS echo are the
+                    # same "interaction cancelled" line in the journal, and
+                    # the echo case is the one the raised speaking threshold
+                    # exists to prevent — so it is the one worth seeing.
+                    log.info(
+                        "barge-in: %s during %s (%s%s)",
+                        detection, self.state.name,
+                        _detection_scores(detector, detection, score),
+                        ", our output was audible" if speaking else "",
+                    )
                     was_speaking = await self._cancel_pipeline(sink)
                     duck.release(sink)
                     self._resync_detector(detector, wake_queue)

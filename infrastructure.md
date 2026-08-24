@@ -89,9 +89,14 @@ Helpers inside `app.py` worth naming, because they carry behavior rather than pl
   to `$OVS_DUMP_WAKE`, it is inert alone — also captures near misses and verifier
   rejections, the latter gated on the candidate's stage-1 peak (the hard negatives for
   retraining).
-- `_log_wake_detection` — logs the candidate's stage-1 peak, not the decayed score at
-  the verdict frame, and the verifier's score with it, since accepts are otherwise
-  invisible.
+- `_log_wake_detection` / `_detection_scores` — logs the candidate's stage-1 peak, not
+  the decayed score at the verdict frame, and the verifier's score with it, since accepts
+  are otherwise invisible. The barge-in branch reports the same scores plus whether our
+  own output was audible at the time: without that, a deliberate interruption and the
+  assistant self-triggering on its own TTS echo are the same "interaction cancelled" line
+  in the journal, and the echo case is the one `threshold_speaking` exists to prevent. A
+  stop reports its own live score — it is never deferred and never verified, so the wake
+  head's `last_*` would be stale from the accept that opened the interaction.
 - `_resync_detector` — after a reset, abandons the mic backlog that outran the detector,
   otherwise our own TTS echo gets re-scored against the IDLE threshold.
 - `_build_engines` / `_build_speaker` — cloud primaries get their own aiohttp session
