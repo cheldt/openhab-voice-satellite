@@ -147,7 +147,14 @@ listening.
 | `verifier_mel.py` | `MelPcenFrontend`: librosa's STFT → mel → PCEN pipeline reimplemented byte-for-byte in numpy + scipy, output `(40, 151)` | The mel filterbank ships as data (`.npy`), not code; parity is asserted against golden fixtures exported where librosa exists |
 
 **Two-stage detection.** Stage 1 (openWakeWord, per 80 ms frame) crosses a deliberately
-low threshold for recall. Each `wake` is then held for `stage2.delay_ms` of further audio
+low threshold for recall. `stage2.delay_ms` is a **tuning** value, not a constant: the
+verifier's score is sharply peaked in where its 1.5 s window lands, so the same utterance
+replayed at 80 ms offsets can swing from 0.001 to 0.989. A window past the peak costs
+recall (measured on device: two real wakes at 0.335/0.658 with 4 frames, 0.616/0.971 with
+3) and a window well before it costs false accepts (a conversation sample reached 0.748 at
+1 frame). Sweep it per model against positives *and* negatives — the training pipeline's
+promotion gate bounds false accepts only, so recall is unconstrained by anything upstream.
+Each `wake` is then held for `stage2.delay_ms` of further audio
 and the last 1.5 s from the detector's own ring is re-scored by the mel-PCEN CNN
 (`stage2.model` + `stage2.mel_basis`, always a pair). Measured on 5.5 h of continuous
 speech, stage 2 rejects ~99 % of stage-1 triggers. `stop` is never deferred — a late stop

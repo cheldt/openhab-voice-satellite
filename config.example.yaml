@@ -30,7 +30,17 @@ wakeword:
   #   model: null             # path to a verifier .onnx (input: 40x151 mel-PCEN)
   #   mel_basis: null         # path to the matching verifier_melfb_40.npy
   #   threshold: 0.1          # verifier score needed to release a wake
-  #   delay_ms: 300           # audio gathered past the trigger before scoring
+  #   delay_ms: 300           # audio gathered past the trigger before scoring.
+  #                           # TUNE THIS PER MODEL. The verifier's response is
+  #                           # sharply peaked in window position: replaying real
+  #                           # wake audio through a deployed v8 pair at 80 ms
+  #                           # offsets moved one score from 0.001 to 0.989, and
+  #                           # 300 (4 frames) sat past the peak while 240 and 160
+  #                           # scored real wakes far higher. Too low is dangerous
+  #                           # the other way: at 80 ms a sample of ordinary
+  #                           # conversation scored 0.748. Sweep it against
+  #                           # positives AND negatives — ultiwake's gate bounds
+  #                           # false accepts only, so nothing constrains recall.
 
 vad:
   threshold: 0.5

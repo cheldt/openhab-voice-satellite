@@ -134,7 +134,8 @@ def test_second_trigger_keeps_the_first_countdown(verified_factory):
 def test_a_trigger_on_a_rejections_verdict_frame_is_not_swallowed(verified_factory):
     """A wake that lands where a rejection expires must get its own verdict.
 
-    Rejections run about once a minute live, so a real wakeword whose stage-1
+    Rejections are common live — once a minute in a quiet room, several times
+    a second while someone is talking — so a real wakeword whose stage-1
     crossing happens to fall on one used to be folded into the dying countdown
     and thrown away with it — and its edge trigger was already disarmed, so the
     rest of the phrase could not re-fire either. The word was simply lost.

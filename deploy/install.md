@@ -74,7 +74,11 @@ which otherwise fails with a missing-model error.
 
 A mel-PCEN CNN that re-scores the 1.5 s window behind every stage-1 trigger,
 so stage 1 can run low for recall while false accepts are somebody else's
-problem. It runs roughly once a minute and rejects ~99 % of what reaches it.
+problem. It rejects ~99 % of what reaches it. How *often* it runs depends
+entirely on the room: roughly once a minute with nobody talking, but four
+times in nine seconds during a conversation (measured on the reference Pi) —
+stage 1 crosses its deliberately low bar on ordinary speech, which is the
+load the verifier exists to absorb.
 On the shipped model that is the difference between 0.7 false accepts an hour
 at 99 % recall and 37.6 an hour at 94 %.
 
