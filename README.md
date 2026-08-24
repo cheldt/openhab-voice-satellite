@@ -80,7 +80,9 @@ playback through the configured output, stream-link verification, and a
 `diagnose_capture.wav` dump of exactly what the app heard. It exits non-zero
 when the capture stream stalls, so it can gate scripts like `--check` does. Speech at the intended distance should read roughly
 1000–5000 RMS — openWakeWord does no input normalization, so a quiet mic
-degrades recall in a way no threshold can compensate for.
+degrades recall in a way no threshold can compensate for. On a mic array with
+an on-board DSP that band is a gain setting, not a fact about the room: see
+the ReSpeaker section in [deploy/install.md](deploy/install.md).
 
 To judge a wakeword *model* rather than the audio path, `--score-wav` replays
 recorded 16 kHz mono WAVs through the configured engine and prints, per file,

@@ -225,11 +225,60 @@ the only writable path (`ReadWritePaths=`), so `HF_HOME` must stay inside it,
 and PipeWire is reached over `AF_UNIX` in `$XDG_RUNTIME_DIR`, not through the
 home directory `ProtectHome=read-only` covers.
 
+## Mic arrays with an on-board DSP (ReSpeaker Mic Array v2.0 and similar)
+
+Check before configuring any of the software audio processing below —
+`lsusb` showing **2886:0018** is a ReSpeaker Mic Array v2.0, whose XMOS
+XVF-3000 already does echo cancellation, beamforming, noise suppression and
+AGC on-chip. Playback through the same USB device gives it the far-end
+reference it needs, so the PipeWire echo canceller in the next section is
+redundant there and only doubles the processing. Measured on the reference Pi:
+during an earcon the mic saw peak 629 against speech peaks of 2300–3700, and
+stage 1 read 0.004 — the hardware AEC works.
+
+Its parameters are readable and writable over USB HID with Seeed's
+`usb_4_mic_array/tuning.py` (needs pyusb, and root or a udev rule). Two of
+them matter here.
+
+**AGC.** `AGCONOFF` is what decides whether far-field speech reaches the
+1000–5000 RMS the README asks for. With it off, speech at conversational
+distance measured rms ~270 and STT returned garbled or empty transcripts at
+the bottom of that range — the wakeword itself came back as "Short on this".
+With AGC on it measured ~2800, in band, with clean transcripts. Cap the gain
+though: at the stock `AGCMAXGAIN` of 31.6 the loop idles wound-up and phrase
+onsets clip before `AGCTIME` (~1 s) can react — 5 of 12 dumped wakes touched
+full scale. `AGCMAXGAIN 16` removed the clipping entirely (0 of 8) at almost
+no cost in level, because the loop regulates to ~16x on speech anyway.
+
+Its cost is on the other side: idle gain lifts the room floor (rms 7–13 raw,
+~110–210 at 16x), which Silero can read as speech. Expect follow-up rounds
+that run to `vad.max_utterance_s` and transcribe to nothing; `vad.threshold`
+is the lever if that becomes a nuisance.
+
+**Reverberation cannot be fixed here.** There is no de-reverberation control:
+`RT60` is read-only and `RT60ONOFF` exists to size the *echo* suppressor's
+tail, not to dereverberate the near-end talker. A room measuring RT60 0.44 s
+is an ordinary living room, and a wakeword model has to cope with it — so
+reverberant false rejects are a training-data problem (RIR augmentation on the
+positives), not something to tune out of the microphone.
+
+Persist whatever you settle on; XVF-3000 parameters are runtime-only and reset
+on reboot or USB re-plug. A `oneshot` system unit that sleeps a few seconds for
+USB enumeration and then runs the `tuning.py` calls is enough.
+
+**Changing any of this invalidates the wakeword calibration.** The verifier was
+trained and calibrated *through* the front-end, so its operating point is not
+portable across DSP settings. Enabling AGC measurably moved which
+`stage2.delay_ms` scores best on the same speaker in the same room. Re-collect
+`$OVS_DUMP_WAKE` audio and re-check after every change, and change one thing at
+a time.
+
 ## Optional: robust barge-in with echo cancellation
 
-The mic hears the speaker during TTS playback. The service mitigates this in
-software (raised wakeword threshold + volume ducking), but for reliable
-"stop"-while-speaking use PipeWire's echo canceller:
+Not needed on a mic array that does AEC on-chip (see above) — this is for
+plain microphones. The mic hears the speaker during TTS playback. The service
+mitigates this in software (raised wakeword threshold + volume ducking), but
+for reliable "stop"-while-speaking use PipeWire's echo canceller:
 
 ```bash
 mkdir -p ~/.config/pipewire/pipewire.conf.d
