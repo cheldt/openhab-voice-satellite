@@ -85,7 +85,11 @@ deliberate wakeword recordings — with
 `openhab-voice-satellite --score-wav dumps/*.wav`: it prints a per-evaluation
 score trace and a grid of how many detections each `wakeword.threshold` /
 `wakeword.patience` pair would have produced, using the app's own decision
-rule. Every detection also logs its recent score history (`trace 0.01 0.02
+rule. A run of evaluations that clears the bar and still fires nothing — what a
+raised `wakeword.patience` rejects — is logged as `near miss: 2 evaluations
+above the bar, peak 0.84` and dumped the same way, because otherwise raising
+patience only removes lines from the journal and cannot be judged from it.
+Every detection also logs its recent score history (`trace 0.01 0.02
 0.85*`, `*` = cleared the bar that applied on that frame), which is what
 separates a one-evaluation transient from a phrase the head genuinely liked.
 

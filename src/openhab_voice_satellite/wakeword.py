@@ -50,6 +50,9 @@ class WakewordProtocol(Protocol):
     # detection line needs to say whether it was a spike or a plateau
     def trace(self, key: str = WAKE) -> str: ...
 
+    # the last above-bar run that produced no detection, consumed on read
+    def take_rejection(self, key: str = WAKE) -> tuple[int, float] | None: ...
+
     def tail(self, seconds: float) -> np.ndarray: ...
 
     def reset(self) -> None: ...
@@ -87,12 +90,40 @@ class EdgeTrigger:
         # whether each score met the threshold of its own frame
         self.passes: deque[bool] = deque(maxlen=RECENT_SCORES)
         self.armed = True
+        # (length, peak) of the last run of above-bar observations that
+        # produced no detection; see `_close_run`
+        self.rejection: tuple[int, float] | None = None
+        self._run = 0
+        self._run_peak = 0.0
+        self._run_fired = False
+
+    def _close_run(self) -> None:
+        """End a run of above-bar observations and record it if it lost.
+
+        A run that cleared the bar and still yielded nothing is the event a
+        rejected false accept leaves behind, and without it a raised
+        `patience` is unfalsifiable in the field: the detections it prevents
+        are exactly the ones that stop being logged. Reported when the run
+        *ends* rather than per observation, so a genuine wake is one line and
+        not one line per frame of its plateau.
+        """
+        if self._run and not self._run_fired:
+            self.rejection = (self._run, self._run_peak)
+        self._run = 0
+        self._run_peak = 0.0
+        self._run_fired = False
 
     def observe(self, score: float, threshold: float) -> None:
         """Advance the history by one observation without deciding anything."""
         score = float(score)
         self.scores.append(score)
-        self.passes.append(score >= threshold)
+        passed = score >= threshold
+        self.passes.append(passed)
+        if passed:
+            self._run += 1
+            self._run_peak = max(self._run_peak, score)
+        else:
+            self._close_run()
 
     def fired(self, threshold: float, patience: int) -> bool:
         """Whether the newest observed score completes a detection.
@@ -104,6 +135,7 @@ class EdgeTrigger:
             window = list(self.passes)[-patience:]
             if len(window) == patience and all(window):
                 self.armed = False
+                self._run_fired = True  # this run won; it is not a rejection
                 return True
             return False
         if self.scores and self.scores[-1] < threshold / 2:
@@ -142,6 +174,10 @@ class EdgeTrigger:
         self.scores.clear()
         self.passes.clear()
         self.armed = True
+        self.rejection = None
+        self._run = 0
+        self._run_peak = 0.0
+        self._run_fired = False
 
 
 class BaseWakewordDetector:
@@ -263,6 +299,16 @@ class BaseWakewordDetector:
         being able to.
         """
         return self._trigger(key).trace()
+
+    def take_rejection(self, key: str = WAKE) -> tuple[int, float] | None:
+        """(length, peak) of the last above-bar run that fired nothing, once.
+
+        Consumed on read so the caller logs each rejected run a single time;
+        a second reader would see None, which is why nothing else reads it.
+        """
+        trigger = self._trigger(key)
+        rejection, trigger.rejection = trigger.rejection, None
+        return rejection
 
     def reset(self) -> None:
         self._engine_reset()

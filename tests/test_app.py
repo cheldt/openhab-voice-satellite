@@ -659,3 +659,45 @@ async def test_a_failing_dump_does_not_swallow_the_wake(tmp_path, monkeypatch, c
             await m.feed(1 + AFTER)
         assert m.pipeline.calls == [True]
     assert "wake audio dump failed" in caplog.text
+
+
+# --- near misses ----------------------------------------------------------
+
+
+async def test_a_rejected_run_is_logged_and_dumped(tmp_path, monkeypatch, caplog):
+    """What `patience` prevents has to leave a record, or it cannot be judged.
+
+    Raising patience removes detections from the journal; the runs it
+    rejected are invisible, so "quiet since the change" and "the change
+    works" become the same observation.
+    """
+    monkeypatch.setenv("OVS_DUMP_WAKE", str(tmp_path))
+    detector = ScriptedDetector(
+        scores={0: 0.84}, trace="0.31 0.84* 0.12", tail=TONE,
+        rejections={1: (1, 0.84)},
+    )
+    async with Monitor(detector=detector) as m:
+        with caplog.at_level(logging.INFO):
+            await m.feed(2 + AFTER)
+        assert m.pipeline.calls == []  # no interaction was started
+    assert "near miss: 1 evaluation above the bar, peak 0.84, trace 0.31 0.84* 0.12" in (
+        caplog.text
+    )
+    dumps = sorted(tmp_path.iterdir())
+    assert len(dumps) == 1 and dumps[0].name.startswith("nearmiss-")
+
+
+async def test_a_longer_rejected_run_reads_as_plural(tmp_path, monkeypatch, caplog):
+    detector = ScriptedDetector(rejections={0: (3, 0.91)}, trace="0.91*")
+    async with Monitor(detector=detector) as m:
+        with caplog.at_level(logging.INFO):
+            await m.feed()
+    assert "near miss: 3 evaluations above the bar, peak 0.91" in caplog.text
+
+
+async def test_an_ordinary_quiet_frame_logs_nothing(caplog):
+    detector = ScriptedDetector(scores={0: 0.02})
+    async with Monitor(detector=detector) as m:
+        with caplog.at_level(logging.INFO):
+            await m.feed()
+    assert "near miss" not in caplog.text

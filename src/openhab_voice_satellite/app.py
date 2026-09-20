@@ -495,6 +495,18 @@ class App:
                 duck.update(self.state is State.SPEAKING, score, sink)
 
                 if detection is None:
+                    # a run that cleared the bar and still fired nothing is
+                    # what a raised `patience` leaves behind, and it is
+                    # otherwise invisible: the accepts it prevents simply
+                    # stop being logged, so the setting cannot be judged
+                    near_miss = detector.take_rejection()
+                    if near_miss is not None:
+                        length, peak = near_miss
+                        log.info(
+                            "near miss: %d evaluation%s above the bar, peak %.2f, trace %s",
+                            length, "" if length == 1 else "s", peak, detector.trace(),
+                        )
+                        wake_dump.arm(detector, "nearmiss", peak)
                     continue
 
                 # before either branch: both reset() the detector, which drops

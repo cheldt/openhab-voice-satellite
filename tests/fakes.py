@@ -152,9 +152,11 @@ class ScriptedDetector:
         scores: dict[int, float] | None = None,
         trace: str = "",
         tail: np.ndarray | None = None,
+        rejections: dict[int, tuple[int, float]] | None = None,
     ) -> None:
         self.detections = detections or {}
         self.scores = scores or {}
+        self.rejections = rejections or {}
         self.frames_seen = 0
         self.speaking_flags: list[bool] = []
         self.resets = 0
@@ -182,6 +184,11 @@ class ScriptedDetector:
 
     def trace(self, key: str = "wake") -> str:
         return self._trace
+
+    def take_rejection(self, key: str = "wake") -> tuple[int, float] | None:
+        # consumed on read, like the real one: the monitor logs each rejected
+        # run once, and a fake that repeated it would hide a double log
+        return self.rejections.pop(self.frames_seen - 1, None)
 
     def tail(self, seconds: float) -> np.ndarray:
         # reset() clears the real ring and every later frame refills it. A

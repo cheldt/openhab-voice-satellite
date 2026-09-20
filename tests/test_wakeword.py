@@ -150,6 +150,61 @@ def test_reset_clears_the_trace(detector_factory):
     assert detector.trace("wake") == ""
 
 
+def test_a_run_that_fires_nothing_is_reported_once_it_ends(detector_factory):
+    """The event a raised `patience` leaves behind, and nothing else logs.
+
+    Raising patience removes detections from the journal; what it rejected
+    leaves no trace at all, so the setting cannot be judged in the field
+    without this.
+    """
+    detector = detector_factory(
+        {"wake": [0.9, 0.1]}, model="wake", threshold=0.5, patience=2
+    )
+    assert detector.process(FRAME) is None
+    assert detector.take_rejection() is None  # the run is still open
+    assert detector.process(FRAME) is None
+    assert detector.take_rejection() == (1, pytest.approx(0.9))
+
+
+def test_a_rejection_is_consumed_on_read(detector_factory):
+    detector = detector_factory(
+        {"wake": [0.9, 0.1]}, model="wake", threshold=0.5, patience=2
+    )
+    detector.process(FRAME)
+    detector.process(FRAME)
+    assert detector.take_rejection() is not None
+    assert detector.take_rejection() is None  # logged once, not every frame
+
+
+def test_a_run_that_fired_is_not_a_rejection(detector_factory):
+    # a genuine wake must not also report itself as a near miss
+    detector = detector_factory(
+        {"wake": [0.9, 0.9, 0.1]}, model="wake", threshold=0.5, patience=2
+    )
+    assert [detector.process(FRAME) for _ in range(3)] == [None, "wake", None]
+    assert detector.take_rejection() is None
+
+
+def test_the_rejection_reports_the_run_not_one_line_per_frame(detector_factory):
+    # patience 3 against a three-long run that never completes it: one event
+    detector = detector_factory(
+        {"wake": [0.6, 0.9, 0.7, 0.1]}, model="wake", threshold=0.5, patience=4
+    )
+    for _ in range(4):
+        detector.process(FRAME)
+    assert detector.take_rejection() == (3, pytest.approx(0.9))
+
+
+def test_reset_drops_a_pending_rejection(detector_factory):
+    detector = detector_factory(
+        {"wake": [0.9, 0.1]}, model="wake", threshold=0.5, patience=2
+    )
+    detector.process(FRAME)
+    detector.process(FRAME)
+    detector.reset()
+    assert detector.take_rejection() is None
+
+
 def test_stop_threshold_speaking_defaults_to_stop_threshold(detector_factory):
     detector = detector_factory(
         {"wake": [0.0, 0.0], "stop": [0.45, 0.45]},
