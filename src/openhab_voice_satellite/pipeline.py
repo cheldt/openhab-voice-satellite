@@ -207,11 +207,21 @@ class Pipeline:
     def _drain_earcon_echo(self, frames: asyncio.Queue) -> None:
         """Drop queued mic frames older than the echo guard window."""
         keep = -(-EARCON_ECHO_GUARD_MS // self._config.audio.frame_ms)  # ceil
+        dropped = 0
         while frames.qsize() > keep:
             if frames.get_nowait() is None:
                 # end-of-stream sentinel: keep it for the recorder
                 frames.put_nowait(None)
                 break
+            dropped += 1
+        if dropped:
+            lost_s = dropped * self._config.audio.frame_ms / 1000
+            # a backlog much longer than any earcon means a stalled consumer,
+            # and the drop may include the user's speech onset — without this
+            # the round just reads as "no speech" with nothing to point at
+            (log.warning if lost_s >= 1.0 else log.debug)(
+                "earcon echo guard dropped %d mic frames (%.1fs)", dropped, lost_s
+            )
 
     async def _capture_utterance(
         self,
