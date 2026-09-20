@@ -544,14 +544,16 @@ async def test_a_detection_carries_the_score_history_that_led_to_it(caplog):
 
 
 TONE = (np.arange(16000, dtype=np.int16) % 1000) - 500  # recognisable payload
+AFTER = 8  # frames the dump collects past a detection (WAKE_DUMP_AFTER_S / 80 ms)
 
 
-async def test_wake_audio_is_dumped_before_the_detector_is_reset(tmp_path, monkeypatch):
-    """The dump has to read the ring while it still holds the trigger audio.
+async def test_the_dump_spans_the_detection_not_just_its_run_up(tmp_path, monkeypatch):
+    """The file has to carry the evaluations `patience` would have counted.
 
-    reset() clears it, so a call placed after the reset would silently write
-    nothing at all — the fake's tail() empties after a reset for exactly that
-    reason, which makes the ordering a test failure rather than a comment.
+    detector.tail() ends on the evaluation that fired, so a dump of the tail
+    alone replays as "no patience above 1 would ever have fired" — for every
+    recording, true and false alike, which is the one question the dumps are
+    collected to answer.
     """
     monkeypatch.setenv("OVS_DUMP_WAKE", str(tmp_path))
     detector = ScriptedDetector(detections={0: "wake"}, scores={0: 0.85}, tail=TONE)
@@ -559,18 +561,53 @@ async def test_wake_audio_is_dumped_before_the_detector_is_reset(tmp_path, monke
         detector=detector, pipeline_kwargs={"event": Event.PLAYBACK_DONE}
     ) as m:
         await m.feed()
-        assert m.pipeline.calls == [True]
+        assert list(tmp_path.iterdir()) == []  # still collecting the trailing half
+        await m.feed(AFTER)
     dumps = sorted(tmp_path.iterdir())
     assert len(dumps) == 1
     assert dumps[0].name.startswith("wake-") and dumps[0].name.endswith("-0.85.wav")
     pcm, rate = read_wav_mono(dumps[0])
     assert rate == 16000
-    assert np.array_equal(pcm, TONE)
+    assert np.array_equal(pcm[:len(TONE)], TONE)
+    assert len(pcm) == len(TONE) + AFTER * len(FRAME)
+
+
+async def test_the_snapshot_is_taken_before_the_detector_is_reset(tmp_path, monkeypatch):
+    # reset() clears the ring tail() reads, so an arm() placed after it would
+    # silently write nothing — the fake's tail() empties on reset to make that
+    # a failure rather than a comment
+    monkeypatch.setenv("OVS_DUMP_WAKE", str(tmp_path))
+    detector = ScriptedDetector(detections={0: "wake"}, scores={0: 0.85}, tail=TONE)
+    async with Monitor(
+        detector=detector, pipeline_kwargs={"event": Event.PLAYBACK_DONE}
+    ) as m:
+        await m.feed(1 + AFTER)
+        assert detector.resets == 1
+    assert len(list(tmp_path.iterdir())) == 1
 
 
 async def test_a_barge_in_dumps_its_audio_too(tmp_path, monkeypatch):
     # the branch that keeps being the forgotten one: it is also the branch
     # where a TTS-echo accept would show up
+    monkeypatch.setenv("OVS_DUMP_WAKE", str(tmp_path))
+    detector = ScriptedDetector(
+        detections={0: "wake", 1 + AFTER: "stop"}, scores={0: 0.9, 1 + AFTER: 0.55},
+        tail=TONE,
+    )
+    async with Monitor(
+        detector=detector,
+        pipeline_kwargs={"state_on_run": State.SPEAKING, "hold_s": 10.0},
+    ) as m:
+        await m.feed(1 + AFTER)   # wake from IDLE, then its trailing window
+        await m.feed(1 + AFTER)   # stop during SPEAKING -> barge-in
+    names = sorted(path.name for path in tmp_path.iterdir())
+    assert len(names) == 2
+    assert names[0].startswith("stop-") and names[0].endswith("-0.55.wav")
+    assert names[1].startswith("wake-")
+
+
+async def test_a_second_detection_inside_the_window_flushes_the_first(tmp_path, monkeypatch):
+    # a truncated dump of the first is still evidence; dropping it is not
     monkeypatch.setenv("OVS_DUMP_WAKE", str(tmp_path))
     detector = ScriptedDetector(
         detections={0: "wake", 1: "stop"}, scores={0: 0.9, 1: 0.55}, tail=TONE
@@ -579,12 +616,8 @@ async def test_a_barge_in_dumps_its_audio_too(tmp_path, monkeypatch):
         detector=detector,
         pipeline_kwargs={"state_on_run": State.SPEAKING, "hold_s": 10.0},
     ) as m:
-        await m.feed()
-        await m.feed()
-    names = sorted(path.name for path in tmp_path.iterdir())
-    assert len(names) == 2
-    assert names[0].startswith("stop-") and names[0].endswith("-0.55.wav")
-    assert names[1].startswith("wake-")
+        await m.feed(2 + AFTER)
+    assert len(list(tmp_path.iterdir())) == 2
 
 
 async def test_nothing_is_written_without_the_env_var(tmp_path):
@@ -592,7 +625,7 @@ async def test_nothing_is_written_without_the_env_var(tmp_path):
     async with Monitor(
         detector=detector, pipeline_kwargs={"event": Event.PLAYBACK_DONE}
     ) as m:
-        await m.feed()
+        await m.feed(1 + AFTER)
         assert m.pipeline.calls == [True]
     assert list(tmp_path.iterdir()) == []
 
@@ -605,7 +638,7 @@ async def test_an_empty_ring_writes_no_file(tmp_path, monkeypatch):
     async with Monitor(
         detector=detector, pipeline_kwargs={"event": Event.PLAYBACK_DONE}
     ) as m:
-        await m.feed()
+        await m.feed(1 + AFTER)
     assert list(tmp_path.iterdir()) == []
 
 
@@ -623,6 +656,6 @@ async def test_a_failing_dump_does_not_swallow_the_wake(tmp_path, monkeypatch, c
         detector=detector, pipeline_kwargs={"event": Event.PLAYBACK_DONE}
     ) as m:
         with caplog.at_level(logging.INFO):
-            await m.feed()
+            await m.feed(1 + AFTER)
         assert m.pipeline.calls == [True]
     assert "wake audio dump failed" in caplog.text
