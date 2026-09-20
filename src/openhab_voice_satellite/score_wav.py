@@ -138,13 +138,20 @@ def _print_grid(replays: list[Replay], config: Config) -> None:
     scored = [r for r in replays if r.scores]
     if not scored:
         return
-    print(f"\nwould-fire count per (threshold, patience), {len(scored)} file(s):")
-    print("  thr \\ pat" + "".join(f"{p:>7}" for p in TRIAL_PATIENCES))
+    # detections/files rather than detections alone: over a positive corpus
+    # the number that matters is how many recordings still fire at all
+    # (recall), and a single file firing three times hides two that went
+    # silent. Over a false-positive corpus the total is the one to read.
+    print(
+        f"\nwould-fire detections/files per (threshold, patience), "
+        f"{len(scored)} file(s):"
+    )
+    print("  thr \\ pat" + "".join(f"{p:>9}" for p in TRIAL_PATIENCES))
     for threshold in TRIAL_THRESHOLDS:
-        cells = "".join(
-            f"{sum(would_fire(r.scores, threshold, p) for r in scored):>7}"
-            for p in TRIAL_PATIENCES
-        )
+        cells = ""
+        for patience in TRIAL_PATIENCES:
+            counts = [would_fire(r.scores, threshold, patience) for r in scored]
+            cells += f"{sum(counts):>6}/{sum(1 for n in counts if n):<3}"
         print(f"      {threshold:.2f}{cells}")
     live_threshold = config.wakeword.threshold
     live_patience = config.wakeword.patience

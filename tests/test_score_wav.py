@@ -109,7 +109,7 @@ def test_the_grid_shows_what_patience_would_have_prevented(tmp_path, capsys, mon
     row = next(
         line for line in capsys.readouterr().out.splitlines() if line.strip().startswith("0.90")
     )
-    assert row.split()[1:] == ["1", "0", "0", "0"]
+    assert row.split()[1:] == ["1/1", "0/0", "0/0", "0/0"]
 
 
 def test_every_file_starts_cold(tmp_path, capsys, monkeypatch):
