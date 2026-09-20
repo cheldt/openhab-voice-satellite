@@ -157,19 +157,26 @@ class ScriptedDetector:
         self.speaking_flags: list[bool] = []
         self.resets = 0
         self._last_score = 0.0
+        self.last_trigger_score: float | None = None
 
     def process(self, frame: np.ndarray, speaking: bool = False) -> str | None:
         i = self.frames_seen
         self.frames_seen += 1
         self.speaking_flags.append(speaking)
         self._last_score = self.scores.get(i, 0.0)
-        return self.detections.get(i)
+        detection = self.detections.get(i)
+        if detection == "wake":
+            self.last_trigger_score = self._last_score
+        return detection
 
     def score(self, key: str = "wake") -> float:
         return self._last_score
 
     def reset(self) -> None:
+        # the real detector clears this too; a fake that keeps it drifts from
+        # WakewordProtocol at exactly the seam app.py reads after a reset
         self.resets += 1
+        self.last_trigger_score = None
 
 
 class FakePipeline:
