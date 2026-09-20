@@ -124,6 +124,15 @@ class _WakeDump:
     def __init__(self, sample_rate: int, frame_samples: int) -> None:
         self._sample_rate = sample_rate
         self._frames_after = max(1, round(WAKE_DUMP_AFTER_S * sample_rate / frame_samples))
+        # A whole number of mic frames, or the file replays on a different
+        # grid than the one that produced the detection: 5 s is 80000
+        # samples, which is 62.5 frames, so the dump would start half a frame
+        # early and every embedding window in it would sit half an embedding
+        # stride off. That is not a rounding difference — the same audio
+        # replayed at the wrong phase scored 0.73 where the detector had seen
+        # 0.86, which reads as a dump that contradicts its own journal line.
+        tail_samples = int(WAKE_DUMP_SECONDS * sample_rate) // frame_samples * frame_samples
+        self._tail_seconds = tail_samples / sample_rate
         self._parts: list[np.ndarray] = []
         self._path: Path | None = None
         self._left = 0
@@ -146,7 +155,7 @@ class _WakeDump:
         dump_dir = os.environ.get("OVS_DUMP_WAKE")
         if not dump_dir:
             return
-        pcm = detector.tail(WAKE_DUMP_SECONDS)
+        pcm = detector.tail(self._tail_seconds)
         if not len(pcm):  # a detection before the ring filled: no 0-byte WAVs
             return
         if self._left > 0:  # a second detection inside the trailing window

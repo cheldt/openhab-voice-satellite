@@ -167,6 +167,7 @@ class ScriptedDetector:
             np.zeros(0, dtype=np.int16) if tail is None else np.asarray(tail, dtype=np.int16)
         )
         self._ring_filled = False
+        self.tail_seconds: list[float] = []
 
     def process(self, frame: np.ndarray, speaking: bool = False) -> str | None:
         self._ring_filled = True  # the real detector rings every frame it sees
@@ -191,6 +192,7 @@ class ScriptedDetector:
         return self.rejections.pop(self.frames_seen - 1, None)
 
     def tail(self, seconds: float) -> np.ndarray:
+        self.tail_seconds.append(seconds)
         # reset() clears the real ring and every later frame refills it. A
         # fake that ignored that would let a wake dump written *after* the
         # reset pass its test, which is the one ordering bug the dump can have

@@ -572,6 +572,23 @@ async def test_the_dump_spans_the_detection_not_just_its_run_up(tmp_path, monkey
     assert len(pcm) == len(TONE) + AFTER * len(FRAME)
 
 
+async def test_the_snapshot_is_a_whole_number_of_mic_frames(tmp_path, monkeypatch):
+    """Off-grid audio replays as different scores than the detector saw.
+
+    5 s is 62.5 frames at 80 ms, and half a frame is half an embedding
+    stride: the first false positive dumped this way replayed at 0.73 where
+    the journal had recorded 0.86, which makes the dump look like it
+    contradicts the line that produced it.
+    """
+    monkeypatch.setenv("OVS_DUMP_WAKE", str(tmp_path))
+    detector = ScriptedDetector(detections={0: "wake"}, scores={0: 0.85}, tail=TONE)
+    async with Monitor(detector=detector) as m:
+        await m.feed(1 + AFTER)
+    requested = detector.tail_seconds[0] * 16000
+    assert requested % len(FRAME) == 0
+    assert requested == 62 * len(FRAME)  # 4.96 s, the largest that fits in 5
+
+
 async def test_the_snapshot_is_taken_before_the_detector_is_reset(tmp_path, monkeypatch):
     # reset() clears the ring tail() reads, so an arm() placed after it would
     # silently write nothing — the fake's tail() empties on reset to make that
