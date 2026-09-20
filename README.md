@@ -77,9 +77,10 @@ the app heard.
 
 For a false accept, the audio that actually fired the wakeword head is the
 evidence, and it is gone by the time the recorder starts: set `OVS_DUMP_WAKE`
-to a directory and every detection also writes the 5 s that preceded it as
-`<wake|stop>-<date>-<time>-<score>.wav` (room audio from before a detection,
-so it is a debugging switch, not a default). Replay those — or a corpus of
+to a directory and every detection also writes the 5 s that preceded it plus
+the 0.64 s that followed as `<wake|stop>-<date>-<time>-<score>.wav` (room
+audio from around a detection, so it is a debugging switch, not a default;
+the trailing part contains our own wake earcon). Replay those — or a corpus of
 deliberate wakeword recordings — with
 `openhab-voice-satellite --score-wav dumps/*.wav`: it prints a per-evaluation
 score trace and a grid of how many detections each `wakeword.threshold` /

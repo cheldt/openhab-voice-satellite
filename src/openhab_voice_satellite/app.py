@@ -51,6 +51,12 @@ HEARTBEAT_S = 10.0  # capture-health DEBUG line interval
 # and still fits inside the detector's 10 s ring.
 WAKE_DUMP_SECONDS = 5.0
 
+# ... and how much is kept *after* it, so the replay can see the evaluations
+# `patience` would have counted. WakewordConfig caps patience at 10, but past
+# 4 (320 ms at hop 1) the added wake latency is audible, so 640 ms covers
+# every setting worth tabulating with the plateau's shape either side of it.
+WAKE_DUMP_AFTER_S = 0.64
+
 
 class CaptureClosedError(RuntimeError):
     """The capture stream ended mid-run (bus ERROR/EOS, e.g. PipeWire node loss).
@@ -94,33 +100,77 @@ def _detection_scores(detector: WakewordProtocol, detection: str, score: float) 
     )
 
 
-def _dump_wake(
-    detector: WakewordProtocol, detection: str, score: float, sample_rate: int
-) -> None:
-    """Write the audio that fired the head to $OVS_DUMP_WAKE, for field debugging.
+class _WakeDump:
+    """Writes the audio around each detection to $OVS_DUMP_WAKE, when set.
 
-    Has to run before `detector.reset()`, which clears the ring `tail()` reads
-    — the utterance dump ($OVS_DUMP_UTTERANCES, pipeline.py) starts after the
-    wake earcon and so never contains the audio actually under suspicion.
+    Around, not before. `detector.tail()` ends exactly on the evaluation that
+    fired, and that is the one window which cannot answer the question the
+    dump exists for: `patience` is about the evaluations that come *after* the
+    first crossing, and a file stopping at the crossing contains none of them
+    — replayed through --score-wav it reports that no patience above 1 would
+    ever have fired, for every recording, true and false alike. So the tail is
+    snapshotted at the detection and the following frames are appended until
+    WAKE_DUMP_AFTER_S has passed, then both halves are written as one file.
 
-    Off unless the env var is set: it writes room audio from *before* a
-    detection to disk, which is a debugging switch and not a default.
+    What the trailing half also contains is our own wake earcon, which starts
+    within it: scores read from the replay past roughly the trigger plus
+    300 ms are scores over the earcon, not over the room.
+
+    The snapshot has to be taken before `detector.reset()`, which clears the
+    very ring `tail()` reads. Off unless the env var is set — this is room
+    audio from before a detection, so it is a debugging switch, not a default.
     """
-    dump_dir = os.environ.get("OVS_DUMP_WAKE")
-    if not dump_dir:
-        return
-    pcm = detector.tail(WAKE_DUMP_SECONDS)
-    if not len(pcm):  # a detection before the ring filled: no 0-byte WAVs
-        return
-    # the date is in the name because a dump directory left enabled on a
-    # satellite runs for days, and %H%M%S alone would overwrite across
-    # midnight; the score is what a collected corpus gets triaged by
-    path = Path(dump_dir) / f"{detection}-{time.strftime('%Y%m%d-%H%M%S')}-{score:.2f}.wav"
-    try:
-        write_wav(path, pcm, sample_rate)
-        log.info("wake audio dumped: %s", path)
-    except OSError:
-        log.exception("wake audio dump failed")
+
+    def __init__(self, sample_rate: int, frame_samples: int) -> None:
+        self._sample_rate = sample_rate
+        self._frames_after = max(1, round(WAKE_DUMP_AFTER_S * sample_rate / frame_samples))
+        self._parts: list[np.ndarray] = []
+        self._path: Path | None = None
+        self._left = 0
+
+    def feed(self, frame: np.ndarray) -> None:
+        """Collect one frame towards an armed dump, and write when full.
+
+        Called for every mic frame; a no-op unless a detection armed it. It
+        runs before the detection branch, so the frame that fired is not
+        counted twice — it is already the last frame of the snapshot.
+        """
+        if self._left <= 0:
+            return
+        self._parts.append(frame)
+        self._left -= 1
+        if self._left == 0:
+            self._write()
+
+    def arm(self, detector: WakewordProtocol, detection: str, score: float) -> None:
+        dump_dir = os.environ.get("OVS_DUMP_WAKE")
+        if not dump_dir:
+            return
+        pcm = detector.tail(WAKE_DUMP_SECONDS)
+        if not len(pcm):  # a detection before the ring filled: no 0-byte WAVs
+            return
+        if self._left > 0:  # a second detection inside the trailing window
+            self._write()
+        # the date is in the name because a dump directory left enabled on a
+        # satellite runs for days, and %H%M%S alone would overwrite across
+        # midnight; the score is what a collected corpus gets triaged by
+        self._path = Path(dump_dir) / (
+            f"{detection}-{time.strftime('%Y%m%d-%H%M%S')}-{score:.2f}.wav"
+        )
+        self._parts = [pcm]
+        self._left = self._frames_after
+
+    def _write(self) -> None:
+        path, parts = self._path, self._parts
+        self._path, self._parts, self._left = None, [], 0
+        if path is None:
+            return
+        try:
+            write_wav(path, np.concatenate(parts), self._sample_rate)
+            log.info("wake audio dumped: %s", path)
+        except OSError:
+            # diagnostics must never cost an interaction
+            log.exception("wake audio dump failed")
 
 
 class _CaptureHealth:
@@ -409,6 +459,7 @@ class App:
         graph = source.stats if source is not None else None
         health = _CaptureHealth(audio.sample_rate / audio.frame_samples, graph)
         duck = _DuckController()
+        wake_dump = _WakeDump(audio.sample_rate, audio.frame_samples)
         try:
             while True:
                 try:
@@ -432,6 +483,7 @@ class App:
                         f"audio capture stream closed mid-run ({health.graph_report()})"
                     )
 
+                wake_dump.feed(frame)
                 speaking = self.state in (State.THINKING, State.SPEAKING)
                 detection = detector.process(frame, speaking=speaking)
                 score = detector.score("wake")
@@ -446,12 +498,9 @@ class App:
                     continue
 
                 # before either branch: both reset() the detector, which drops
-                # the ring the dump reads
-                _dump_wake(
-                    detector,
-                    detection,
-                    _detection_score(detector, detection, score),
-                    audio.sample_rate,
+                # the ring the snapshot reads
+                wake_dump.arm(
+                    detector, detection, _detection_score(detector, detection, score)
                 )
 
                 if self.state is State.IDLE and detection == "wake":
