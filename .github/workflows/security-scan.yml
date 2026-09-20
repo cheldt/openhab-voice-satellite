@@ -29,6 +29,16 @@ jobs:
       # pinned to exactly 0.6.0 forever by wakeword_buffer.PATCHED_VERSION.
       # Without this line the one production dependency guaranteed to grow
       # stale is the only one the scan structurally cannot see.
-      run: echo "openwakeword==0.6.0" >> requirements-audit.txt
+      #
+      # Hashed, because `uv export` emits a hashed file and pip-audit's
+      # --disable-pip mode refuses to mix: an unhashed line fails the whole
+      # step with "requirement openwakeword==0.6.0 does not contain a hash".
+      # Digests are the wheel and sdist from PyPI's release JSON.
+      run: |
+        cat >> requirements-audit.txt <<'EOF'
+        openwakeword==0.6.0 \
+            --hash=sha256:6f423a4e3ae9dd0e3cd12b50ff8abf69679f687b4ab349d7c82c021c0e2abc9d \
+            --hash=sha256:36858d90f1183e307485597a912a4e3c3384b14ea9923f83feaffae7c1565565
+        EOF
     - name: Audit dependencies
       run: uv run --with pip-audit pip-audit --strict -r requirements-audit.txt --disable-pip
