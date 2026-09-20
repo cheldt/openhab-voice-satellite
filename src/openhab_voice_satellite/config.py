@@ -353,10 +353,14 @@ def _resolve_config_paths(config: Config, base: Path) -> Config:
     }
     wakeword = config.wakeword
     # only path-shaped values: pretrained openwakeword phrases ("hey_jarvis")
-    # must pass through verbatim.
+    # must pass through verbatim. livekit has no name form at all, so its
+    # model values are paths whatever their suffix.
     for field in ("model", "stop_model", "verifier_model", "stop_verifier_model"):
         value = getattr(wakeword, field)
-        if value and value.endswith((".onnx", ".tflite", ".pkl")):
+        if not value:
+            continue
+        always_path = wakeword.engine == "livekit" and field in ("model", "stop_model")
+        if always_path or value.endswith((".onnx", ".tflite", ".pkl")):
             setattr(wakeword, field, _resolve_path(value, base))
     if config.openhab.ca_cert:
         config.openhab.ca_cert = _resolve_path(config.openhab.ca_cert, base)
