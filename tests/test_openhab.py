@@ -7,6 +7,31 @@ from openhab_voice_satellite.openhab import OpenHABClient, OpenHABTimeoutError, 
 
 from .fakes import FakeOpenHAB
 
+# A throwaway self-signed CA, only ever handed to load_verify_locations so the
+# ca_cert path can be asserted without a network peer. Never used to connect.
+THROWAWAY_CA_PEM = """\
+-----BEGIN CERTIFICATE-----
+MIIDNzCCAh+gAwIBAgIUJ8ePkvG2gt/vLfrOJ9BhhpDutu8wDQYJKoZIhvcNAQEL
+BQAwKjEoMCYGA1UEAwwfb3BlbmhhYi12b2ljZS1zYXRlbGxpdGUgdGVzdCBDQTAg
+Fw0yNjA4MjMyMjUxMThaGA8yMTI2MDczMDIyNTExOFowKjEoMCYGA1UEAwwfb3Bl
+bmhhYi12b2ljZS1zYXRlbGxpdGUgdGVzdCBDQTCCASIwDQYJKoZIhvcNAQEBBQAD
+ggEPADCCAQoCggEBAMh8W3rIEb7V1gM06PA9qeBptDPZS7yB3f493h/NAshyO4/v
+lq2e4k+3Dck5fslPBP6OlKv1FvwwZKRD5l/wxcYVnOXfs88ZTnY9KoNdn5h3mnFu
+gxcOpDknd9tNMEsYUGKHreOska9/EVDr0f/QJqIBDFqNmb2Ts05ZsEAY5Exfnlbv
+Cv47Db3c4aSriSRbi+o5GQHioe9ClOETn5+BZndsvZaGLzFzPZO8ZzZx8GxxLTU8
+RRVZc7vjgUlLJ/7oy8okwP8F8OhcD3eoVbFTSbOe+KIzxIyXCDecVrbTX4JTYXLf
+qncz5gmNJuk170SNSrbvNAYd8Sku8KPjIVdD5lECAwEAAaNTMFEwHQYDVR0OBBYE
+FJzS38gba7+Ap10v+ig57lPdyT27MB8GA1UdIwQYMBaAFJzS38gba7+Ap10v+ig5
+7lPdyT27MA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEBAFmumWOE
+LN4zJ5EFHepCHIDNe589GuFgW2LRyTRi4d+6qmh0nTpk9uGW8uJ4wkFqYbxN43o+
+pK4UDgdJ+2cZumvQPKikRqbAkQd3hOYhBw4ElK7J0EOj9Z2dy4teDeydXNZwGs1S
+uX0qgh5k5wx2H+NMncSzJ9MziPz1VWGppYgio4Ql8wdC8lTKLQIW8+8guROY+u5r
+C+S6QBX+F5rlayIlFVy0oBUzl8TF4apVeeK4An1p+7yMkr8srzm3gu6Tx0ApcFwv
+arR4tBSvuYTqAalzkDGymHHlP0Ar/aiqRHmWsInd41K+a75Rseo9Ahy8Dy6S8/ds
+Df5mYyoK8VctbmA=
+-----END CERTIFICATE-----
+"""
+
 
 @pytest.fixture
 async def fake_openhab():
@@ -129,7 +154,44 @@ async def test_make_session_disables_ssl_verification(caplog):
     session = make_session(config)
     try:
         assert session.connector._ssl is False
-        assert "verification disabled" in caplog.text
+        # the warning has to name the consequence: this is not "self-signed
+        # certificates are ok", it is "the bearer token is unprotected"
+        assert "any certificate" in caplog.text
+        assert "API token is exposed" in caplog.text
+    finally:
+        await session.close()
+
+
+async def test_ca_cert_authenticates_a_self_signed_server(tmp_path, caplog):
+    """The secure alternative to verify_ssl: false.
+
+    Without it a self-signed openHAB forced verification off entirely, which
+    hands the bearer token to anyone who can intercept the connection.
+    """
+    import ssl as ssl_module
+
+    ca = tmp_path / "ca.pem"
+    ca.write_text(THROWAWAY_CA_PEM)
+    session = make_session(OpenHABConfig(ca_cert=str(ca)))
+    try:
+        assert isinstance(session.connector._ssl, ssl_module.SSLContext)
+        assert session.connector._ssl.verify_mode is ssl_module.CERT_REQUIRED
+        assert session.connector._ssl.check_hostname is True
+        assert "verification disabled" not in caplog.text
+    finally:
+        await session.close()
+
+
+async def test_ca_cert_wins_over_verify_ssl_false(tmp_path):
+    # a config carrying both is a half-finished migration off verify_ssl;
+    # honoring the weaker one would silently keep the token exposed
+    import ssl as ssl_module
+
+    ca = tmp_path / "ca.pem"
+    ca.write_text(THROWAWAY_CA_PEM)
+    session = make_session(OpenHABConfig(ca_cert=str(ca), verify_ssl=False))
+    try:
+        assert isinstance(session.connector._ssl, ssl_module.SSLContext)
     finally:
         await session.close()
 

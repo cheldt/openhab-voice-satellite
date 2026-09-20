@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import ssl
 
 import aiohttp
 
@@ -22,14 +23,28 @@ class OpenHABTimeoutError(Exception):
 
 
 def make_session(config: OpenHABConfig) -> aiohttp.ClientSession:
-    """ClientSession honoring `verify_ssl` (self-signed certificates).
+    """ClientSession honoring `ca_cert` / `verify_ssl`.
+
+    `ca_cert` is the supported way to reach a self-signed openHAB: the server
+    still has to prove it holds that certificate, so the bearer token and the
+    voice traffic stay protected. `verify_ssl: false` accepts *any*
+    certificate — a LAN attacker terminating the connection harvests the token
+    on the first request — so it is a last resort and says so out loud.
 
     The session-level timeout bounds every request that does not pass its
     own (i.e. `ping`); without it aiohttp's default allows a 5-minute stall.
     """
     connector = None
-    if not config.verify_ssl:
-        log.warning("TLS certificate verification disabled (openhab.verify_ssl)")
+    if config.ca_cert:
+        connector = aiohttp.TCPConnector(
+            ssl=ssl.create_default_context(cafile=config.ca_cert)
+        )
+    elif not config.verify_ssl:
+        log.warning(
+            "TLS verification disabled (openhab.verify_ssl): any certificate "
+            "is accepted, so the API token is exposed to anyone who can "
+            "intercept the connection — set openhab.ca_cert instead"
+        )
         connector = aiohttp.TCPConnector(ssl=False)
     timeout = aiohttp.ClientTimeout(total=config.response_timeout_s)
     return aiohttp.ClientSession(connector=connector, timeout=timeout)
