@@ -15,12 +15,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    # full-SHA pins, not tags: see the note in python-app.yml
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
     - name: Install uv
-      uses: astral-sh/setup-uv@v5
+      uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
       with:
         python-version: "3.12"
     - name: Export locked requirements
       run: uv export --format requirements-txt --no-emit-project --all-extras -o requirements-audit.txt
+    - name: Add the production pins that live outside the lock
+      # openwakeword is deliberately absent from project metadata (its own
+      # metadata hard-requires tflite-runtime, see pyproject.toml) and is
+      # pinned to exactly 0.6.0 forever by wakeword_buffer.PATCHED_VERSION.
+      # Without this line the one production dependency guaranteed to grow
+      # stale is the only one the scan structurally cannot see.
+      run: echo "openwakeword==0.6.0" >> requirements-audit.txt
     - name: Audit dependencies
       run: uv run --with pip-audit pip-audit --strict -r requirements-audit.txt --disable-pip
