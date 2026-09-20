@@ -279,6 +279,10 @@ class App:
                 detection = detector.process(frame, speaking=speaking)
                 score = detector.score("wake")
                 health.observe(frame, score)
+                # two gates on purpose: the threshold raise above covers
+                # everything audible (earcons included), ducking covers TTS
+                # only — earcons are too short to duck, and one started
+                # between frames may begin ducked until the next update
                 duck.update(self.state is State.SPEAKING, score, sink)
 
                 if detection is None:
