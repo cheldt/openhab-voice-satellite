@@ -431,3 +431,28 @@ async def test_a_wake_during_the_idle_tail_does_not_orphan_the_next_interaction(
     assert await app._cancel_pipeline(BufferAudioSink()) is False  # not speaking
     assert second.cancelled()
     assert app._pipeline_task is None
+
+
+def test_degraded_capture_warning_attributes_the_shortfall(caplog, monkeypatch):
+    """The warning says whether the graph under-fed us or this loop fell behind."""
+    from openhab_voice_satellite.audio.gst_source import CaptureStats
+
+    snapshots = iter([
+        CaptureStats(buffers=100, samples=80000),                 # at window start
+        CaptureStats(buffers=112, samples=89600, pts_gaps=3, pts_gap_s=8.2),
+        CaptureStats(buffers=112, samples=89600, pts_gaps=3, pts_gap_s=8.2),  # next window start
+    ])
+    health = app_module._CaptureHealth(12.5, lambda: next(snapshots))
+    with caplog.at_level(logging.WARNING):
+        for _ in range(10):
+            health.observe(FRAME, 0.0)
+        health._start -= app_module.HEARTBEAT_S
+        health.observe(FRAME, 0.0)
+    assert "degraded capture" in caplog.text
+    # differenced against the window start, not cumulative
+    assert "12 buffers / 9600 samples, 3 PTS gaps totalling 8.2s" in caplog.text
+
+
+def test_health_without_a_source_still_reports(caplog):
+    health = app_module._CaptureHealth(12.5)
+    assert health.graph_report() == "no capture accounting"

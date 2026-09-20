@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from contextlib import AsyncExitStack
+from typing import TYPE_CHECKING, Callable
 
 import aiohttp
 import numpy as np
@@ -14,6 +15,7 @@ from .audio.broadcast import AudioBroadcaster
 from .audio.earcons import Earcons
 from .audio.io import audio_io, verify_links
 from .audio.sink import AudioSink
+from .audio.source import AudioSource
 from .audio.wav import rms
 from .config import Config
 from .deepgram import DeepgramClient, DeepgramSpeaker, DeepgramTranscriber
@@ -26,6 +28,9 @@ from .state import Event, State
 from .stt import Transcriber
 from .vad import SpeechEndpointer
 from .wakeword import WakewordProtocol, build_detector
+
+if TYPE_CHECKING:
+    from .audio.gst_source import CaptureStats
 
 log = logging.getLogger(__name__)
 
@@ -51,12 +56,33 @@ class CaptureClosedError(RuntimeError):
 class _CaptureHealth:
     """Frame-rate/RMS bookkeeping behind the heartbeat + degraded-capture logs."""
 
-    def __init__(self, expected_fps: float) -> None:
+    def __init__(
+        self, expected_fps: float, graph: Callable[[], CaptureStats] | None = None
+    ) -> None:
         self._expected_fps = expected_fps
+        # the source's cumulative capture accounting; differenced per window
+        # so a degraded window says whether PipeWire under-fed the graph or
+        # this loop fell behind
+        self._graph = graph
+        self._graph_at_start = graph() if graph else None
         self._frames = 0
         self._rms = 0
         self._score = 0.0
         self._start = time.monotonic()
+
+    def graph_report(self) -> str:
+        """What the graph delivered in the current window, or "" without a source."""
+        if self._graph is None:
+            return "no capture accounting"
+        return self._graph().since(self._graph_at_start).describe()
+
+    def _rewind_window(self, now: float) -> None:
+        self._frames = 0
+        self._rms = 0
+        self._score = 0.0
+        self._start = now
+        if self._graph is not None:
+            self._graph_at_start = self._graph()
 
     def restart(self) -> None:
         """Reset the window clock (after a stall, so the gap isn't counted).
@@ -67,10 +93,7 @@ class _CaptureHealth:
         muted the degraded-capture warning for exactly the window after a
         stall — the one where it matters.
         """
-        self._frames = 0
-        self._rms = 0
-        self._score = 0.0
-        self._start = time.monotonic()
+        self._rewind_window(time.monotonic())
 
     def observe(self, frame: np.ndarray, score: float) -> None:
         self._frames += 1
@@ -87,13 +110,10 @@ class _CaptureHealth:
         if self._frames < 0.8 * expected:
             log.warning(
                 "degraded capture: %d of %d expected mic frames in %.0fs "
-                "— wakeword detection will be unreliable",
-                self._frames, int(expected), now - self._start,
+                "— wakeword detection will be unreliable (%s)",
+                self._frames, int(expected), now - self._start, self.graph_report(),
             )
-        self._frames = 0
-        self._rms = 0
-        self._score = 0.0
-        self._start = now
+        self._rewind_window(now)
 
 
 class _DuckController:
@@ -190,7 +210,14 @@ class App:
         transcriber = Transcriber(config.stt, config.tts.default_language)
 
         async with AsyncExitStack() as stack:
-            source, sink = await stack.enter_async_context(audio_io(config.audio))
+            # capture starts once everything else is loaded: piper alone blocks
+            # this loop for ~3.5s, and a live mic stream that nobody services
+            # xruns its way out of PipeWire's scheduling for good — measured
+            # on the Pi as 17 of 140 expected frames per window, for the life
+            # of the process
+            source, sink = await stack.enter_async_context(
+                audio_io(config.audio, start_capture=False)
+            )
             earcons = Earcons(config.earcons, sink)
             speaker = _build_speaker(config, sink)
 
@@ -217,12 +244,19 @@ class App:
                 set_state=self._set_state,
             )
 
-            log.info("ready — say the wakeword (%s)", config.wakeword.model)
+            source.start()  # nothing blocking left; the monitor is next
+            log.info(
+                "ready — say the wakeword (%s via %s)",
+                config.wakeword.model,
+                config.wakeword.engine,
+            )
             link_check = asyncio.create_task(
                 verify_links(source.target, sink.target), name="verify-links"
             )
             try:
-                await self._interrupt_monitor(wake_queue, detector, pipeline, sink, earcons)
+                await self._interrupt_monitor(
+                    wake_queue, detector, pipeline, sink, earcons, source
+                )
             finally:
                 link_check.cancel()
                 await broadcaster.stop()
@@ -286,10 +320,16 @@ class App:
         pipeline: Pipeline,
         sink: AudioSink,
         earcons: Earcons,
+        source: AudioSource | None = None,
     ) -> None:
-        """Always-on wakeword loop; starts or cancels the interaction task."""
+        """Always-on wakeword loop; starts or cancels the interaction task.
+
+        `source` is only read for its capture accounting, so a shortfall can
+        be attributed to the graph or to this loop; None reports neither.
+        """
         audio = self._config.audio
-        health = _CaptureHealth(audio.sample_rate / audio.frame_samples)
+        graph = source.stats if source is not None else None
+        health = _CaptureHealth(audio.sample_rate / audio.frame_samples, graph)
         duck = _DuckController()
         try:
             while True:
@@ -304,15 +344,15 @@ class App:
                         frame = await wake_queue.get()
                 except asyncio.TimeoutError:
                     log.warning(
-                        "no mic frames for %.0fs — capture stream stalled?", MIC_STALL_WARN_S
+                        "no mic frames for %.0fs — capture stream stalled? (%s)",
+                        MIC_STALL_WARN_S, health.graph_report(),
                     )
                     health.restart()
                     continue
                 if frame is None:
-                    # the branch this came from appends source.stats() here;
-                    # that accounting is part of an audio-layer change not
-                    # ported, and the restart contract does not depend on it
-                    raise CaptureClosedError("audio capture stream closed mid-run")
+                    raise CaptureClosedError(
+                        f"audio capture stream closed mid-run ({health.graph_report()})"
+                    )
 
                 speaking = self.state in (State.THINKING, State.SPEAKING)
                 detection = detector.process(frame, speaking=speaking)

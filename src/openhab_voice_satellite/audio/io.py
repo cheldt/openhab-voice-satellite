@@ -16,11 +16,17 @@ log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def audio_io(audio: AudioConfig) -> AsyncIterator[tuple[PipewireSource, PipewireSink]]:
+async def audio_io(
+    audio: AudioConfig, start_capture: bool = True
+) -> AsyncIterator[tuple[PipewireSource, PipewireSink]]:
     """Open the capture source and playback sink; close both on exit.
 
     Imports stay lazy so `--check`/`--probe-mic` error paths can report a
     missing GStreamer stack instead of failing at import time.
+
+    `start_capture=False` leaves the mic stream out of the graph until the
+    caller calls `source.start()` — for callers whose remaining startup work
+    would leave a live stream unserviced. See PipewireSource.start().
     """
     from .gst_sink import PipewireSink
     from .gst_source import PipewireSource
@@ -29,6 +35,7 @@ async def audio_io(audio: AudioConfig) -> AsyncIterator[tuple[PipewireSource, Pi
         sample_rate=audio.sample_rate,
         frame_samples=audio.frame_samples,
         device=audio.input_device,
+        autostart=start_capture,
     )
     try:
         # sink construction can raise after the source is already PLAYING
