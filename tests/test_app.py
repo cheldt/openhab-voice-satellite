@@ -456,3 +456,55 @@ def test_degraded_capture_warning_attributes_the_shortfall(caplog, monkeypatch):
 def test_health_without_a_source_still_reports(caplog):
     health = app_module._CaptureHealth(12.5)
     assert health.graph_report() == "no capture accounting"
+
+
+# --- barge-in logging -----------------------------------------------------
+
+
+async def test_barge_in_logs_the_score_that_caused_it(caplog):
+    """A barge-in used to log only "interaction cancelled".
+
+    That makes a deliberate interruption and the assistant self-triggering on
+    its own TTS echo the same line in the journal — and the echo case is the
+    one the raised speaking threshold exists to prevent, so it is the one
+    worth being able to see. Only the IDLE branch logged its score.
+    """
+    detector = ScriptedDetector(detections={0: "wake", 1: "wake"}, scores={0: 0.9, 1: 0.42})
+    async with Monitor(
+        detector=detector,
+        pipeline_kwargs={"state_on_run": State.SPEAKING, "hold_s": 10.0},
+    ) as m:
+        with caplog.at_level(logging.INFO):
+            await m.feed()  # wake from IDLE
+            await m.feed()  # wake during SPEAKING -> barge-in
+    assert "wakeword detected (score 0.90)" in caplog.text
+    assert "barge-in: wake during SPEAKING (score 0.42, our output was audible)" in caplog.text
+
+
+async def test_a_barge_in_in_a_quiet_room_says_nothing_about_our_output(caplog):
+    # the clause is the informative half; it must not appear while the state
+    # is silent, or every barge-in reads as a possible echo
+    detector = ScriptedDetector(detections={0: "wake", 1: "wake"}, scores={1: 0.5})
+    async with Monitor(
+        detector=detector,
+        pipeline_kwargs={"state_on_run": State.LISTENING, "hold_s": 10.0},
+    ) as m:
+        with caplog.at_level(logging.INFO):
+            await m.feed()
+            await m.feed()
+    assert "barge-in: wake during LISTENING (score 0.50)" in caplog.text
+    assert "audible" not in caplog.text
+
+
+async def test_a_stop_barge_in_reports_the_stop_head_not_the_wake_peak(caplog):
+    """A stop reports its own live score, not the wake head's trigger score,
+    which is stale from the accept that started the interaction."""
+    detector = ScriptedDetector(detections={0: "wake", 1: "stop"}, scores={0: 0.9, 1: 0.55})
+    async with Monitor(
+        detector=detector,
+        pipeline_kwargs={"state_on_run": State.SPEAKING, "hold_s": 10.0},
+    ) as m:
+        with caplog.at_level(logging.INFO):
+            await m.feed()
+            await m.feed()
+    assert "barge-in: stop during SPEAKING (score 0.55, our output was audible)" in caplog.text

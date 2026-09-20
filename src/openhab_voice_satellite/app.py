@@ -53,6 +53,21 @@ class CaptureClosedError(RuntimeError):
     """
 
 
+def _detection_scores(detector: WakewordProtocol, detection: str, score: float) -> str:
+    """The score behind a detection, as a log suffix.
+
+    The candidate's trigger score rather than this frame's, where the engine
+    records one: on a window-scoring engine the frame that reports the
+    detection can already be a hop past the evaluation that fired it. A stop
+    reports its own live score; the wake head's last_trigger_score would be
+    stale from the accept that opened the interaction.
+    """
+    if detection == "stop":
+        return f"score {detector.score('stop'):.2f}"
+    trigger_score = getattr(detector, "last_trigger_score", None)
+    return f"score {score if trigger_score is None else trigger_score:.2f}"
+
+
 class _CaptureHealth:
     """Frame-rate/RMS bookkeeping behind the heartbeat + degraded-capture logs."""
 
@@ -368,11 +383,26 @@ class App:
                     continue
 
                 if self.state is State.IDLE and detection == "wake":
-                    log.info("wakeword detected (score %.2f)", score)
+                    log.info(
+                        "wakeword detected (%s)", _detection_scores(detector, detection, score)
+                    )
                     detector.reset()
                     self._start_pipeline(pipeline, earcons)
                 elif self.state in (State.LISTENING, State.THINKING, State.SPEAKING):
-                    # wakeword or stop-word during an interaction = barge-in
+                    # wakeword or stop-word during an interaction = barge-in.
+                    # Logged before the cancel, with the score that caused it
+                    # and whether our own output was audible at the time:
+                    # without those, a deliberate interruption and the
+                    # assistant self-triggering on its own TTS echo are the
+                    # same "interaction cancelled" line in the journal, and
+                    # the echo case is the one the raised speaking threshold
+                    # exists to prevent — so it is the one worth seeing.
+                    log.info(
+                        "barge-in: %s during %s (%s%s)",
+                        detection, self.state.name,
+                        _detection_scores(detector, detection, score),
+                        ", our output was audible" if speaking else "",
+                    )
                     was_speaking = await self._cancel_pipeline(sink)
                     duck.release(sink)
                     detector.reset()
