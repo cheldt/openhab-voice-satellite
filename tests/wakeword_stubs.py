@@ -74,12 +74,62 @@ def install_openwakeword(monkeypatch) -> None:
 # -- livekit -----------------------------------------------------------
 
 
-class StubLivekitModel:
-    """Scripted scores: each predict() pops the next score per classifier.
+class StubMelFrontend:
+    """Shape-faithful stand-in for livekit's MelSpectrogramFrontend.
 
-    `idle_score` is deliberately not 0.0. The engine's startup probe reads an
-    all-zero result as livekit's short-window sentinel and raises, so a stub
-    answering 0.0 would fail construction for a reason unrelated to the test.
+    Emits the frame count the real melspectrogram.onnx would for the samples
+    given — a 512 window at a hop of 160, no padding — so the engine's window
+    arithmetic is exercised for real; the values are zeros.
+    """
+
+    def __init__(self) -> None:
+        self.inputs: list[np.ndarray] = []
+
+    def __call__(self, audio: np.ndarray) -> np.ndarray:
+        audio = np.asarray(audio)
+        self.inputs.append(audio)
+        frames = max(0, (audio.shape[-1] - 512) // 160 + 1)
+        return np.zeros((1, frames, 32), dtype=np.float32)
+
+
+class StubSpeechEmbedding:
+    """(batch, 76, 32) -> (batch, 96), counting the windows it was asked for."""
+
+    def __init__(self) -> None:
+        self.windows: list[np.ndarray] = []
+
+    def __call__(self, mel_windows: np.ndarray) -> np.ndarray:
+        mel_windows = np.asarray(mel_windows)
+        assert mel_windows.shape[1:] == (76, 32), mel_windows.shape
+        self.windows.extend(mel_windows)
+        return np.zeros((mel_windows.shape[0], 96), dtype=np.float32)
+
+
+class StubClassifierSession:
+    """One classifier head: each run() pops the next scripted score."""
+
+    def __init__(self, model: "StubLivekitModel", name: str) -> None:
+        self._model = model
+        self._name = name
+
+    def run(self, _outputs, feed):
+        (x,) = feed.values()
+        self._model.head_inputs.append(np.asarray(x))
+        script = self._model.scripts.get(self._name, [])
+        score = script.pop(0) if script else self._model.idle_score
+        return [np.array([[score]], dtype=np.float32)]
+
+
+class StubLivekitModel:
+    """livekit's WakeWordModel as the engine actually drives it.
+
+    The engine never calls predict(); it streams through `_mel_frontend`,
+    `_speech_embedding` and the `_classifiers` dict of (session, input_name),
+    so those are what is stubbed. Scores are scripted per classifier name,
+    one popped per head run.
+
+    `idle_score` is deliberately not 0.0 so a test that needs a distinguishable
+    quiet score has one; the engine no longer treats zeros as a sentinel.
     """
 
     scripts: dict[str, list[float]] = {}
@@ -88,7 +138,10 @@ class StubLivekitModel:
 
     def __init__(self, models=None):
         self.classifiers: list[str] = []
-        self.windows: list[np.ndarray] = []
+        self.head_inputs: list[np.ndarray] = []
+        self._mel_frontend = StubMelFrontend()
+        self._speech_embedding = StubSpeechEmbedding()
+        self._classifiers: dict[str, tuple[StubClassifierSession, str]] = {}
         import onnxruntime as ort
 
         # captured so a test can prove the session wrapper was active here
@@ -99,15 +152,24 @@ class StubLivekitModel:
             self.load_model(path)
 
     def load_model(self, model_path, model_name=None):
-        self.classifiers.append(model_name or Path(model_path).stem)
+        name = model_name or Path(model_path).stem
+        self.classifiers.append(name)
+        self._classifiers[name] = (StubClassifierSession(self, name), "input")
 
-    def predict(self, audio):
-        self.windows.append(np.asarray(audio))
-        out = {}
-        for name in self.classifiers:
-            script = self.scripts.get(name, [])
-            out[name] = script.pop(0) if script else self.idle_score
-        return out
+    # what the tests read: the audio handed to the mel frontend, and the
+    # embedding windows the engine asked for
+    @property
+    def mel_inputs(self) -> list[np.ndarray]:
+        return self._mel_frontend.inputs
+
+    @property
+    def embedding_windows(self) -> list[np.ndarray]:
+        return self._speech_embedding.windows
+
+    def clear_calls(self) -> None:
+        self.head_inputs.clear()
+        self._mel_frontend.inputs.clear()
+        self._speech_embedding.windows.clear()
 
 
 def install_livekit(monkeypatch) -> None:
@@ -178,18 +240,20 @@ def prime(detector) -> None:
 
     openwakeword scores from its first frame; livekit is muted until 2 s of
     audio has arrived, and reset() clears that audio again. Priming the ring
-    directly rather than warming it with real frames keeps the score scripts
-    intact — 25 process() calls would pop 25 entries off them.
+    directly and rebuilding the frontend from it, rather than warming it with
+    real frames, keeps the score scripts intact — 25 process() calls would
+    pop 25 entries off them.
 
     A no-op for engines that hold no window, so the shared tests can call it
     unconditionally wherever an engine would otherwise be mid-prime.
     """
-    ring = getattr(detector, "_ring", None)
-    if ring is None:
+    warm = getattr(detector, "_prime_from_ring", None)
+    if warm is None:
         return
     from openhab_voice_satellite.wakeword_livekit import WINDOW_SAMPLES
 
-    ring.extend(np.zeros(WINDOW_SAMPLES, dtype=np.int16))
+    detector._ring.extend(np.zeros(WINDOW_SAMPLES, dtype=np.int16))
+    warm()
 
 
 def make_config(engine: str = "openwakeword", frame_ms: int = 80, **wakeword_kwargs):

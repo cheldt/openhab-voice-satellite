@@ -1,9 +1,11 @@
 """The livekit engine against the real livekit-wakeword library.
 
-Everything else about the engine is tested through a stub. These pin the two
-things a stub cannot: that the library still has the constructor shape the
-engine calls, and that the ORT session wrapper actually catches every session
-the library builds. Skips visibly (pytest -rs) when the extra is not installed.
+Everything else about the engine is tested through a stub. These pin what a
+stub cannot: that the library still has the constructor shape the engine
+calls and the private frontend attributes it streams through, that the ORT
+session wrapper actually catches every session the library builds, and that
+streaming the frontend frame by frame reproduces predict()'s scores exactly.
+Skips visibly (pytest -rs) when the extra is not installed.
 """
 
 from __future__ import annotations
@@ -37,6 +39,27 @@ def test_the_constructor_takes_no_required_arguments():
         if name != "self" and p.default is inspect.Parameter.empty
     ]
     assert required == []
+
+
+def test_the_frontend_seams_the_engine_streams_through_still_exist():
+    """wakeword_livekit drives these three private attributes directly."""
+    model = wakeword.WakeWordModel()
+    assert callable(model._mel_frontend)
+    assert callable(model._speech_embedding)
+    assert isinstance(model._classifiers, dict)
+    # and the constants it aligns its grid to
+    from livekit.wakeword.inference import model as inference
+
+    assert (inference.EMBEDDING_WINDOW, inference.EMBEDDING_STRIDE, inference.MIN_EMBEDDINGS) == (76, 8, 16)
+
+
+@pytest.mark.skipif(not MODEL.exists(), reason=f"no local livekit model at {MODEL}")
+def test_a_loaded_classifier_is_a_session_and_input_name():
+    model = wakeword.WakeWordModel()
+    model.load_model(str(MODEL), model_name="wake")
+    session, input_name = model._classifiers["wake"]
+    assert hasattr(session, "run")
+    assert isinstance(input_name, str)
 
 
 def test_installed_version_is_the_tested_one():
@@ -73,3 +96,39 @@ def test_no_ort_thread_pool_escapes_the_wrapper():
     assert detector.scored_last_frame is True
     assert 0.0 <= detector.score() <= 1.0
     assert len(os.listdir("/proc/self/task")) == before  # nothing lazy either
+
+
+@pytest.mark.skipif(not MODEL.exists(), reason=f"no local livekit model at {MODEL}")
+def test_streaming_reproduces_predict_on_the_aligned_window():
+    """Frame-by-frame streaming must score what predict() scores, not roughly.
+
+    The frontend is deterministic per mel frame, so the only difference is
+    where the grids sit: the engine's newest mel frame ends on the newest
+    sample and its newest embedding window ends on that frame, while predict()
+    frames its buffer from the start (128 samples behind) and drops its last
+    mel frame (160 more). Hence the 288-sample offset — see the module
+    docstring of wakeword_livekit.
+    """
+    from openhab_voice_satellite.wakeword_livekit import WINDOW_SAMPLES, LivekitDetector
+
+    detector = LivekitDetector(
+        WakewordConfig(engine="livekit", model=str(MODEL), livekit=LivekitConfig(hop_frames=1)),
+        80,
+    )
+    reference = detector._model  # predict() on the very same sessions
+
+    rng = np.random.default_rng(1)
+    audio = (rng.standard_normal(16000 * 5) * 300).astype(np.int16)
+    audio[40000:52000] = (rng.standard_normal(12000) * 8000).astype(np.int16)  # something loud
+    OFFSET = 288
+
+    compared = 0
+    for start in range(0, len(audio) - 1280 - OFFSET, 1280):
+        detector.process(audio[start:start + 1280])
+        end = start + 1280
+        if not detector.scored_last_frame or end + OFFSET < WINDOW_SAMPLES:
+            continue
+        expected = reference.predict(audio[end + OFFSET - WINDOW_SAMPLES:end + OFFSET])["wake"]
+        assert detector.score() == pytest.approx(expected, abs=1e-5)
+        compared += 1
+    assert compared >= 30

@@ -16,10 +16,15 @@ That is not a nicety. Measured here on x86 with onnxruntime 1.28, one
 Ten times slower, and the wall-clock figure understates it — the default pool
 sizes itself to the core count and spin-waits between runs, so it also burns
 whole cores while the satellite sits idle. This is the same pathology
-`ncpu=1` buys off for openWakeWord (see wakeword_oww), but the stakes are
-higher: livekit issues eighteen `session.run` calls per evaluation where
-openWakeWord issues three, each one another chance to wake a spinning worker
-that then contends with faster-whisper on a four-core Pi.
+`ncpu=1` buys off for openWakeWord (see wakeword_oww). The engine streams
+through the frontend itself (wakeword_livekit), so it is three `session.run`
+calls per frame rather than predict()'s eighteen per window, but each one is
+still a chance to wake a spinning worker that then contends with
+faster-whisper on a four-core Pi.
+
+`TESTED_VERSION` also covers the private attributes wakeword_livekit drives
+directly — `_mel_frontend`, `_speech_embedding` and the `_classifiers` dict of
+`(session, input_name)` tuples — since those are internals too.
 
 Fails open throughout: an unbindable seam logs and leaves stock behaviour.
 """
@@ -84,7 +89,9 @@ def warn_on_untested_version() -> None:
         log.warning(
             "livekit-wakeword %s installed, %s tested: re-check that its ONNX "
             "sessions are still built without options (models/feature_extractor.py, "
-            "inference/model.py) — an escaped session spins a thread pool per core",
+            "inference/model.py) — an escaped session spins a thread pool per core "
+            "— and that WakeWordModel still exposes _mel_frontend, _speech_embedding "
+            "and _classifiers, which the streaming engine drives directly",
             installed,
             TESTED_VERSION,
         )

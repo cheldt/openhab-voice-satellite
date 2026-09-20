@@ -62,15 +62,15 @@ class AudioConfig(BaseModel):
 
 
 class LivekitConfig(BaseModel):
-    # livekit's predict() is stateless: every call recomputes the
-    # melspectrogram and all 16 speech embeddings over the whole 2 s window,
-    # where openWakeWord's frontend updates incrementally and costs ~0.9 ms a
-    # frame. Measured single-threaded on x86, one call is ~13 ms — affordable
-    # at 12.5 frames/s there, not on the Pi 5. So the engine scores every Nth
-    # frame and reports the rest as skipped, which makes `patience` count
-    # engine evaluations rather than mic frames, and delays a detection by up
-    # to (hop_frames - 1) * audio.frame_ms.
-    hop_frames: int = Field(4, ge=1, le=12)
+    # Run the classifier head on every Nth frame only. The engine streams
+    # livekit's frontend itself (one mel chunk and one speech embedding per
+    # frame, ~4 ms on a Pi 5), and that part has to run on every frame
+    # regardless, so a hop above 1 saves only the ~0.4 ms head run. What it
+    # costs: `patience` counts engine evaluations rather than mic frames, and
+    # a detection is delayed by up to (hop_frames - 1) * audio.frame_ms. Kept
+    # for configs written when predict() rebuilt the whole 2 s window per
+    # call (65 ms on the Pi) and 4 was the only affordable setting.
+    hop_frames: int = Field(1, ge=1, le=12)
 
 
 class WakewordConfig(BaseModel):
