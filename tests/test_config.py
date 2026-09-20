@@ -270,3 +270,22 @@ def test_openwakeword_keeps_the_pretrained_name_default():
 def test_unknown_engine_is_rejected():
     with pytest.raises(ValidationError):
         WakewordConfig(engine="porcupine")
+
+
+def test_livekit_model_paths_resolve_whatever_their_suffix(tmp_path):
+    # livekit has no pretrained-name form, so a suffix-less model value is
+    # still a path and must become config-relative like the .onnx case
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        'wakeword:\n  engine: "livekit"\n  model: "models/lk/hey"\n'
+        '  stop_model: "models/lk/stop.onnx"\n'
+    )
+    config = load_config(path).wakeword
+    assert config.model == str(tmp_path / "models/lk/hey")
+    assert config.stop_model == str(tmp_path / "models/lk/stop.onnx")
+
+
+def test_openwakeword_pretrained_names_still_pass_through(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text('wakeword:\n  model: "hey_jarvis"\n')
+    assert load_config(path).wakeword.model == "hey_jarvis"
