@@ -383,3 +383,51 @@ async def test_capture_close_is_fatal_so_systemd_restarts_us():
         m.queue.put_nowait(None)
         with pytest.raises(CaptureClosedError, match="closed mid-run"):
             await asyncio.wait_for(m.task, timeout=2.0)
+
+
+# --- the idle tail --------------------------------------------------------
+
+
+async def test_a_wake_during_the_idle_tail_does_not_orphan_the_next_interaction():
+    """_run's finally must clear only its own task reference.
+
+    The state is IDLE while the idle earcon plays, so a wakeword in that
+    window starts the next interaction and re-points _pipeline_task at it.
+    The first task's finally then ran and set it to None — the second
+    interaction kept running with nothing tracking it, so barge-in found no
+    task to cancel and shutdown closed the sink underneath it.
+    """
+    class TwoPhasePipeline:
+        def __init__(self):
+            self.calls = 0
+
+        async def run_interaction(self, play_wake_earcon=True):
+            self.calls += 1
+            if self.calls == 1:
+                return Event.PLAYBACK_DONE  # first answer finishes at once
+            await asyncio.sleep(10)  # second interaction runs long
+
+    class SlowIdleEarcons(RecordingEarcons):
+        async def play(self, name):
+            await super().play(name)
+            await asyncio.sleep(0.1)  # the tail is audible for a while
+
+    app = App(Config())
+    pipeline, earcons = TwoPhasePipeline(), SlowIdleEarcons()
+    app._start_pipeline(pipeline, earcons)
+    first = app._pipeline_task
+    await asyncio.sleep(0.02)  # answer done, tail playing, state IDLE
+    assert app.state is State.IDLE and app._pipeline_task is first
+
+    app._start_pipeline(pipeline, earcons)  # the wake during the tail
+    second = app._pipeline_task
+    await asyncio.sleep(0.15)  # the first task's tail ends, its finally runs
+    assert first.done()
+    assert not second.done()
+    assert app._pipeline_task is second  # still tracked
+
+    # and the tracked task is cancellable, as barge-in and shutdown need
+    app.state = State.LISTENING
+    assert await app._cancel_pipeline(BufferAudioSink()) is False  # not speaking
+    assert second.cancelled()
+    assert app._pipeline_task is None
