@@ -108,6 +108,48 @@ def test_score_falls_back_to_wake_without_a_stop_model(detector_factory):
     assert detector.score("stop") == pytest.approx(0.42)
 
 
+def test_trace_reports_every_observation_oldest_first(detector_factory):
+    detector = detector_factory({"wake": [0.1, 0.9]}, model="wake", threshold=0.5)
+    detector.process(FRAME)
+    detector.process(FRAME)
+    assert detector.trace("wake") == "0.10 0.90*"
+
+
+def test_trace_marks_the_bar_that_applied_not_the_current_one(detector_factory):
+    """The `*` is a verdict, and verdicts were decided against a moving bar.
+
+    Rendering the marks from `score >= config.threshold` instead would star
+    both frames here and read as a sustained phrase, where the detector
+    actually saw one qualifying observation — and it would misread exactly
+    the frames around a playback boundary, which is where echo lives.
+    """
+    detector = detector_factory(
+        {"wake": [0.6, 0.6]}, model="wake", threshold=0.5, threshold_speaking=0.7
+    )
+    detector.process(FRAME, speaking=True)   # 0.6 < 0.7, no mark
+    detector.process(FRAME, speaking=False)  # 0.6 >= 0.5, marked
+    assert detector.trace("wake") == "0.60 0.60*"
+
+
+def test_trace_falls_back_to_wake_without_a_stop_model(detector_factory):
+    # app.py traces the stop head on a stop detection; no stop model
+    # configured must not KeyError, exactly as for score()
+    detector = detector_factory({"wake": [0.42]}, model="wake")
+    detector.process(FRAME)
+    assert detector.trace("stop") == detector.trace("wake") == "0.42"
+
+
+def test_trace_is_empty_before_anything_is_observed(detector_factory):
+    assert detector_factory({"wake": []}, model="wake").trace("wake") == ""
+
+
+def test_reset_clears_the_trace(detector_factory):
+    detector = detector_factory({"wake": [0.9]}, model="wake")
+    detector.process(FRAME)
+    detector.reset()
+    assert detector.trace("wake") == ""
+
+
 def test_stop_threshold_speaking_defaults_to_stop_threshold(detector_factory):
     detector = detector_factory(
         {"wake": [0.0, 0.0], "stop": [0.45, 0.45]},
@@ -217,3 +259,12 @@ def test_a_skipped_frame_does_not_move_the_reported_score():
     detector.process(FRAME)
     detector.process(FRAME)
     assert detector.score("wake") == pytest.approx(0.42)
+
+
+def test_a_skipped_frame_adds_nothing_to_the_trace():
+    # entries are evaluations, not mic frames — the property the livekit hop
+    # depends on, and the one that makes the trace readable against `patience`
+    detector = _skipping([0.42, None])
+    detector.process(FRAME)
+    detector.process(FRAME)
+    assert detector.trace("wake") == "0.42"  # below the default 0.5 bar, so unmarked

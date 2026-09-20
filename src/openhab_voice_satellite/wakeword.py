@@ -46,6 +46,10 @@ class WakewordProtocol(Protocol):
 
     def score(self, key: str = WAKE) -> float: ...
 
+    # the score history behind the last observations, as a log field — what a
+    # detection line needs to say whether it was a spike or a plateau
+    def trace(self, key: str = WAKE) -> str: ...
+
     def tail(self, seconds: float) -> np.ndarray: ...
 
     def reset(self) -> None: ...
@@ -110,6 +114,25 @@ class EdgeTrigger:
         """observe + fired, for callers tracking a single model."""
         self.observe(score, threshold)
         return self.fired(threshold, patience)
+
+    def trace(self) -> str:
+        """The score history as one log field, oldest first.
+
+        A `*` marks an observation that cleared the bar *its own frame* was
+        judged against. That is not `score >= threshold` for any one number:
+        the bar moves with playback, so a reader rebuilding the verdicts from
+        the scores and the configured threshold would misread exactly the
+        frames around a playback boundary — the ones echo lives in. Formatting
+        belongs here because `scores` and `passes` only mean anything zipped,
+        and that pairing is this class's invariant.
+
+        One entry per *observation*, so on an engine that skips frames the
+        entries are `hop_frames` apart rather than one frame apart.
+        """
+        return " ".join(
+            f"{score:.2f}{'*' if passed else ''}"
+            for score, passed in zip(self.scores, self.passes)
+        )
 
     @property
     def last(self) -> float:
@@ -223,9 +246,23 @@ class BaseWakewordDetector:
             return WAKE
         return None
 
+    def _trigger(self, key: str) -> EdgeTrigger:
+        # app.py reads both score() and trace() for a key that may not be
+        # configured at all, so the fallback lives in one place
+        return self._triggers.get(key) or self._triggers[WAKE]
+
     def score(self, key: str = WAKE) -> float:
-        trigger = self._triggers.get(key) or self._triggers[WAKE]
-        return trigger.last
+        return self._trigger(key).last
+
+    def trace(self, key: str = WAKE) -> str:
+        """`key`'s recent score history, for a detection log line.
+
+        The score alone cannot separate a single-evaluation transient from a
+        phrase the head liked for a second, and that is exactly the difference
+        between `patience` rejecting a false accept and only the threshold
+        being able to.
+        """
+        return self._trigger(key).trace()
 
     def reset(self) -> None:
         self._engine_reset()
