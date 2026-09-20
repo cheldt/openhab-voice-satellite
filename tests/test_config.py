@@ -1,6 +1,8 @@
 import pytest
 
-from openhab_voice_satellite.config import Config, load_config
+from pydantic import ValidationError
+
+from openhab_voice_satellite.config import Config, WakewordConfig, load_config
 
 
 def test_load_yaml(tmp_path):
@@ -145,3 +147,44 @@ def test_empty_languages_rejected():
 def test_zero_followup_timeout_rejected():
     with pytest.raises(ValueError):
         Config.model_validate({"dialog": {"followup_timeout_s": 0}})
+
+
+# -- wakeword engine selection ------------------------------------------
+
+
+def test_livekit_rejects_the_openwakeword_model_default():
+    """'hey_jarvis' is an openwakeword phrase name, not a path.
+
+    Left unset it would otherwise surface as a missing-file error from inside
+    the engine, naming a path the user never wrote.
+    """
+    with pytest.raises(ValidationError, match="openwakeword default"):
+        WakewordConfig(engine="livekit")
+
+
+def test_livekit_rejects_openwakeword_verifiers():
+    """Silently-ignored settings are the failure this guards against.
+
+    Custom verifiers are an openwakeword feature; livekit has no equivalent,
+    so the setting would do nothing at all and the thresholds tuned around it
+    would be wrong.
+    """
+    with pytest.raises(ValidationError, match="verifier_model"):
+        WakewordConfig(engine="livekit", model="m.onnx", verifier_model="v.pkl")
+    with pytest.raises(ValidationError, match="stop_verifier_model"):
+        WakewordConfig(engine="livekit", model="m.onnx", stop_verifier_model="v.pkl")
+
+
+def test_livekit_accepts_a_model_path():
+    config = WakewordConfig(engine="livekit", model="models/wakeword/livekit/x.onnx")
+    assert config.livekit.hop_frames == 4  # the measured default
+
+
+def test_openwakeword_keeps_the_pretrained_name_default():
+    assert WakewordConfig().engine == "openwakeword"
+    assert WakewordConfig().model == "hey_jarvis"
+
+
+def test_unknown_engine_is_rejected():
+    with pytest.raises(ValidationError):
+        WakewordConfig(engine="porcupine")

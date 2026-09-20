@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Annotated, ClassVar, Literal
 
 import yaml
 from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
+
+log = logging.getLogger(__name__)
 
 # Capture rate is not configurable: Silero VAD, openWakeWord and whisper are
 # all hardwired to 16 kHz.
@@ -43,12 +46,107 @@ class AudioConfig(BaseModel):
         return self.sample_rate * self.frame_ms // 1000
 
 
+class LivekitConfig(BaseModel):
+    # livekit's predict() is stateless: every call recomputes the
+    # melspectrogram and all 16 speech embeddings over the whole 2 s window,
+    # where openWakeWord's frontend updates incrementally and costs ~0.9 ms a
+    # frame. Measured single-threaded on x86, one call is ~13 ms — affordable
+    # at 12.5 frames/s there, not on the Pi 5. So the engine scores every Nth
+    # frame and reports the rest as skipped, which makes `patience` count
+    # engine evaluations rather than mic frames, and delays a detection by up
+    # to (hop_frames - 1) * audio.frame_ms.
+    hop_frames: int = Field(4, ge=1, le=12)
+
+
 class WakewordConfig(BaseModel):
+    # "openwakeword": pretrained phrase name or a custom .onnx.
+    # "livekit": path to a livekit-wakeword .onnx classifier; it ships no
+    # pretrained phrase library, so there is no name form.
+    engine: Literal["openwakeword", "livekit"] = "openwakeword"
     model: str = "hey_jarvis"
     threshold: float = Field(0.5, ge=0.0, le=1.0)
     threshold_speaking: float = Field(0.7, ge=0.0, le=1.0)
     stop_model: str | None = None
     stop_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    # None = reuse stop_threshold. The stop model runs during playback by
+    # definition and usually carries the lowest threshold in the system, so
+    # it is the first place echo false-accepts show up.
+    stop_threshold_speaking: float | None = Field(None, ge=0.0, le=1.0)
+    # consecutive observations above threshold before a detection fires. 1
+    # keeps the historical single-frame trigger; 2 costs one observation of
+    # latency and rejects the transient spikes that make up most false
+    # accepts. Counts mic frames on openwakeword and engine evaluations on
+    # livekit — see LivekitConfig.hop_frames.
+    patience: int = Field(1, ge=1, le=10)
+    stop_patience: int = Field(1, ge=1, le=10)
+    # optional per-speaker verifier models (openwakeword custom verifiers).
+    # These are unpickled at startup: treat them like executable code.
+    verifier_model: str | None = None
+    stop_verifier_model: str | None = None
+    verifier_threshold: float = Field(0.1, ge=0.0, le=1.0)
+    livekit: LivekitConfig = Field(default_factory=LivekitConfig)
+
+    @property
+    def effective_stop_threshold_speaking(self) -> float:
+        if self.stop_threshold_speaking is None:
+            return self.stop_threshold
+        return self.stop_threshold_speaking
+
+    @model_validator(mode="after")
+    def _speaking_thresholds_are_raised(self) -> WakewordConfig:
+        """Warn when the speaking threshold sits below the idle one.
+
+        The speaking variants exist to raise the bar while our own output is
+        audible; setting one lower makes the detector easiest to trigger
+        exactly when the room contains our TTS. Legal — a lower bar is how you
+        would deliberately favour barge-in — so this warns rather than raises,
+        but it is almost always a leftover from tuning the idle threshold up.
+        """
+        for name, idle, speaking in (
+            ("threshold", self.threshold, self.threshold_speaking),
+            (
+                "stop_threshold",
+                self.stop_threshold,
+                self.effective_stop_threshold_speaking,
+            ),
+        ):
+            if speaking < idle:
+                log.warning(
+                    "wakeword.%s_speaking (%.2f) is below wakeword.%s (%.2f): "
+                    "the bar drops while our own output is audible, so echo is "
+                    "more likely to trigger a detection than room speech is",
+                    name,
+                    speaking,
+                    name,
+                    idle,
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _engine_supports_settings(self) -> WakewordConfig:
+        """Reject settings the selected engine would silently ignore."""
+        if self.engine == "livekit":
+            unsupported = [
+                name
+                for name in ("verifier_model", "stop_verifier_model")
+                if getattr(self, name)
+            ]
+            if unsupported:
+                raise ValueError(
+                    f"wakeword.{', wakeword.'.join(unsupported)} "
+                    "only applies to engine 'openwakeword' — livekit has no "
+                    "per-speaker verifier, so the setting would do nothing"
+                )
+            if self.model == type(self).model_fields["model"].default:
+                # the default is an openwakeword pretrained phrase name;
+                # livekit ships no phrase library, so leaving it unset would
+                # fail later as a confusing missing-file error
+                raise ValueError(
+                    f"wakeword.model is still the openwakeword default "
+                    f"{self.model!r}; engine 'livekit' needs a path to a "
+                    "classifier .onnx"
+                )
+        return self
 
 
 class VadConfig(BaseModel):
