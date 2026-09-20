@@ -259,7 +259,7 @@ def test_livekit_rejects_openwakeword_verifiers():
 
 def test_livekit_accepts_a_model_path():
     config = WakewordConfig(engine="livekit", model="models/wakeword/livekit/x.onnx")
-    assert config.livekit.hop_frames == 4  # the measured default
+    assert config.livekit.hop_frames == 1  # the frontend streams; a hop only adds latency
 
 
 def test_openwakeword_keeps_the_pretrained_name_default():

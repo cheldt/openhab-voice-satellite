@@ -25,7 +25,7 @@ wakeword:
   stop_verifier_model: null
   verifier_threshold: 0.1
   livekit:                  # only read when engine is "livekit"
-    hop_frames: 4           # score every Nth frame; predict() rebuilds the whole 2 s window, so 1 is unaffordable on a Pi 5
+    hop_frames: 1           # run the classifier head every Nth frame; >1 only delays detection now that the frontend streams (~4 ms/frame on a Pi 5)
 
 vad:
   threshold: 0.5
