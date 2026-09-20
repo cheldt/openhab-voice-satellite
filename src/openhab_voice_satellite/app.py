@@ -37,6 +37,17 @@ MIC_STALL_WARN_S = 10.0  # no frames for this long -> loud warning
 HEARTBEAT_S = 10.0  # capture-health DEBUG line interval
 
 
+class CaptureClosedError(RuntimeError):
+    """The capture stream ended mid-run (bus ERROR/EOS, e.g. PipeWire node loss).
+
+    Deliberately fatal: in-process recovery would need set_state() from the
+    sync bus handler (which deadlocks, see gst_common.install_sync_handler),
+    and a wedged PipeWire stream rarely recovers its scheduling anyway. The
+    process exits non-zero so the systemd unit (Restart=on-failure) restarts
+    it with a fresh graph connection.
+    """
+
+
 class _CaptureHealth:
     """Frame-rate/RMS bookkeeping behind the heartbeat + degraded-capture logs."""
 
@@ -259,8 +270,10 @@ class App:
                     health.restart()
                     continue
                 if frame is None:
-                    log.info("audio source closed, monitor exiting")
-                    return
+                    # the branch this came from appends source.stats() here;
+                    # that accounting is part of an audio-layer change not
+                    # ported, and the restart contract does not depend on it
+                    raise CaptureClosedError("audio capture stream closed mid-run")
 
                 speaking = self.state in (State.THINKING, State.SPEAKING)
                 detection = detector.process(frame, speaking=speaking)
