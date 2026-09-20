@@ -75,6 +75,19 @@ RMS/peak and wakeword score, earcon playback through the configured output,
 stream-link verification, and a `diagnose_capture.wav` dump of exactly what
 the app heard.
 
+For a false accept, the audio that actually fired the wakeword head is the
+evidence, and it is gone by the time the recorder starts: set `OVS_DUMP_WAKE`
+to a directory and every detection also writes the 5 s that preceded it as
+`<wake|stop>-<date>-<time>-<score>.wav` (room audio from before a detection,
+so it is a debugging switch, not a default). Replay those — or a corpus of
+deliberate wakeword recordings — with
+`openhab-voice-satellite --score-wav dumps/*.wav`: it prints a per-evaluation
+score trace and a grid of how many detections each `wakeword.threshold` /
+`wakeword.patience` pair would have produced, using the app's own decision
+rule. Every detection also logs its recent score history (`trace 0.01 0.02
+0.85*`, `*` = cleared the bar that applied on that frame), which is what
+separates a one-evaluation transient from a phrase the head genuinely liked.
+
 Tests: `.venv/bin/pytest` (fast; the GStreamer tests skip without PyGObject).
 Recorded utterances can be dumped for debugging by setting the
 `OVS_DUMP_UTTERANCES` env var to a directory.

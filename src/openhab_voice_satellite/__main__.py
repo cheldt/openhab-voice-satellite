@@ -40,6 +40,12 @@ def main() -> None:
         help="30s field diagnostic: per-second mic RMS + wakeword score, "
              "with earcon playback and stream-link verification",
     )
+    parser.add_argument(
+        "--score-wav", type=Path, nargs="+", metavar="WAV",
+        help="offline: replay recorded WAVs (e.g. $OVS_DUMP_WAKE dumps) through "
+             "the configured detector — per-evaluation score trace and how many "
+             "detections each (threshold, patience) pair would have produced",
+    )
     args = parser.parse_args()
 
     if args.list_devices:
@@ -63,6 +69,16 @@ def main() -> None:
         from .probe import probe_mic
 
         sys.exit(probe_mic(config))
+
+    if args.score_wav:
+        # INFO: the engine logs which models it loaded and at what hop, and
+        # reading a trace against the wrong model is worse than reading none
+        logging.basicConfig(format="%(levelname)-7s %(name)s: %(message)s", level=logging.INFO)
+        config = load_config(args.config)
+
+        from .score_wav import score_wav
+
+        sys.exit(score_wav(config, args.score_wav))
 
     # handler first, level after: the configured level lives inside the file
     # being loaded, but load_config itself already logs (validator warnings)

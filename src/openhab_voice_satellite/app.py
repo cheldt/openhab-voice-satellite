@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from contextlib import AsyncExitStack
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 import aiohttp
@@ -16,7 +18,7 @@ from .audio.earcons import Earcons
 from .audio.io import audio_io, verify_links
 from .audio.sink import AudioSink
 from .audio.source import AudioSource
-from .audio.wav import rms
+from .audio.wav import rms, write_wav
 from .config import Config
 from .deepgram import DeepgramClient, DeepgramSpeaker, DeepgramTranscriber
 from .fallback import FallbackSpeaker, FallbackTranscriber, LazySpeaker
@@ -41,6 +43,14 @@ DUCK_HOLD_FRAMES = 13  # ~1 s of 80 ms frames
 MIC_STALL_WARN_S = 10.0  # no frames for this long -> loud warning
 HEARTBEAT_S = 10.0  # capture-health DEBUG line interval
 
+# audio kept behind a detection when $OVS_DUMP_WAKE names a directory. Sized
+# for replay rather than for listening: the livekit engine stays muted until
+# 2 s of window exists and EdgeTrigger holds 16 observations (~1.3 s at hop
+# 1), so under ~3.3 s the newest end of the trace cannot be reproduced
+# offline at all. Five buys the lead-in that says what was in the room first,
+# and still fits inside the detector's 10 s ring.
+WAKE_DUMP_SECONDS = 5.0
+
 
 class CaptureClosedError(RuntimeError):
     """The capture stream ended mid-run (bus ERROR/EOS, e.g. PipeWire node loss).
@@ -53,8 +63,8 @@ class CaptureClosedError(RuntimeError):
     """
 
 
-def _detection_scores(detector: WakewordProtocol, detection: str, score: float) -> str:
-    """The score behind a detection, as a log suffix.
+def _detection_score(detector: WakewordProtocol, detection: str, score: float) -> float:
+    """The score behind a detection.
 
     The candidate's trigger score rather than this frame's, where the engine
     records one: on a window-scoring engine the frame that reports the
@@ -63,9 +73,54 @@ def _detection_scores(detector: WakewordProtocol, detection: str, score: float) 
     stale from the accept that opened the interaction.
     """
     if detection == "stop":
-        return f"score {detector.score('stop'):.2f}"
+        return detector.score("stop")
     trigger_score = getattr(detector, "last_trigger_score", None)
-    return f"score {score if trigger_score is None else trigger_score:.2f}"
+    return score if trigger_score is None else trigger_score
+
+
+def _detection_scores(detector: WakewordProtocol, detection: str, score: float) -> str:
+    """The score behind a detection plus its run-up, as a log suffix.
+
+    The trace is what makes a false accept diagnosable from the journal alone:
+    one high evaluation between two low ones is a transient that `patience`
+    rejects for the cost of one frame, while a run of them means the head
+    genuinely scores that audio and only the threshold (or another model) can
+    help. Reading the score alone, the two are the same line.
+    """
+    key = "stop" if detection == "stop" else "wake"
+    return (
+        f"score {_detection_score(detector, detection, score):.2f}, "
+        f"trace {detector.trace(key)}"
+    )
+
+
+def _dump_wake(
+    detector: WakewordProtocol, detection: str, score: float, sample_rate: int
+) -> None:
+    """Write the audio that fired the head to $OVS_DUMP_WAKE, for field debugging.
+
+    Has to run before `detector.reset()`, which clears the ring `tail()` reads
+    — the utterance dump ($OVS_DUMP_UTTERANCES, pipeline.py) starts after the
+    wake earcon and so never contains the audio actually under suspicion.
+
+    Off unless the env var is set: it writes room audio from *before* a
+    detection to disk, which is a debugging switch and not a default.
+    """
+    dump_dir = os.environ.get("OVS_DUMP_WAKE")
+    if not dump_dir:
+        return
+    pcm = detector.tail(WAKE_DUMP_SECONDS)
+    if not len(pcm):  # a detection before the ring filled: no 0-byte WAVs
+        return
+    # the date is in the name because a dump directory left enabled on a
+    # satellite runs for days, and %H%M%S alone would overwrite across
+    # midnight; the score is what a collected corpus gets triaged by
+    path = Path(dump_dir) / f"{detection}-{time.strftime('%Y%m%d-%H%M%S')}-{score:.2f}.wav"
+    try:
+        write_wav(path, pcm, sample_rate)
+        log.info("wake audio dumped: %s", path)
+    except OSError:
+        log.exception("wake audio dump failed")
 
 
 class _CaptureHealth:
@@ -260,10 +315,18 @@ class App:
             )
 
             source.start()  # nothing blocking left; the monitor is next
+            # the bar and the patience window go in the line because the
+            # detection lines below print a raw score trace: a journal excerpt
+            # that does not carry what the trace was judged against cannot be
+            # graded by anyone who does not also have the config
             log.info(
-                "ready — say the wakeword (%s via %s)",
+                "ready — say the wakeword (%s via %s, threshold %.2f, "
+                "%.2f while speaking, patience %d)",
                 config.wakeword.model,
                 config.wakeword.engine,
+                config.wakeword.threshold,
+                config.wakeword.threshold_speaking,
+                config.wakeword.patience,
             )
             link_check = asyncio.create_task(
                 verify_links(source.target, sink.target), name="verify-links"
@@ -381,6 +444,15 @@ class App:
 
                 if detection is None:
                     continue
+
+                # before either branch: both reset() the detector, which drops
+                # the ring the dump reads
+                _dump_wake(
+                    detector,
+                    detection,
+                    _detection_score(detector, detection, score),
+                    audio.sample_rate,
+                )
 
                 if self.state is State.IDLE and detection == "wake":
                     log.info(

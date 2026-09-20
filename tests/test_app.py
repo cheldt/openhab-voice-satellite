@@ -26,6 +26,7 @@ from openhab_voice_satellite.fallback import (
     FallbackTranscriber,
     LazySpeaker,
 )
+from openhab_voice_satellite.audio.wav import read_wav_mono
 from openhab_voice_satellite.state import Event, State
 
 from .fakes import (
@@ -469,7 +470,9 @@ async def test_barge_in_logs_the_score_that_caused_it(caplog):
     one the raised speaking threshold exists to prevent, so it is the one
     worth being able to see. Only the IDLE branch logged its score.
     """
-    detector = ScriptedDetector(detections={0: "wake", 1: "wake"}, scores={0: 0.9, 1: 0.42})
+    detector = ScriptedDetector(
+        detections={0: "wake", 1: "wake"}, scores={0: 0.9, 1: 0.42}, trace="0.12 0.90*"
+    )
     async with Monitor(
         detector=detector,
         pipeline_kwargs={"state_on_run": State.SPEAKING, "hold_s": 10.0},
@@ -477,14 +480,19 @@ async def test_barge_in_logs_the_score_that_caused_it(caplog):
         with caplog.at_level(logging.INFO):
             await m.feed()  # wake from IDLE
             await m.feed()  # wake during SPEAKING -> barge-in
-    assert "wakeword detected (score 0.90)" in caplog.text
-    assert "barge-in: wake during SPEAKING (score 0.42, our output was audible)" in caplog.text
+    assert "wakeword detected (score 0.90, trace 0.12 0.90*)" in caplog.text
+    assert (
+        "barge-in: wake during SPEAKING (score 0.42, trace 0.12 0.90*, "
+        "our output was audible)"
+    ) in caplog.text
 
 
 async def test_a_barge_in_in_a_quiet_room_says_nothing_about_our_output(caplog):
     # the clause is the informative half; it must not appear while the state
     # is silent, or every barge-in reads as a possible echo
-    detector = ScriptedDetector(detections={0: "wake", 1: "wake"}, scores={1: 0.5})
+    detector = ScriptedDetector(
+        detections={0: "wake", 1: "wake"}, scores={1: 0.5}, trace="0.50*"
+    )
     async with Monitor(
         detector=detector,
         pipeline_kwargs={"state_on_run": State.LISTENING, "hold_s": 10.0},
@@ -492,14 +500,16 @@ async def test_a_barge_in_in_a_quiet_room_says_nothing_about_our_output(caplog):
         with caplog.at_level(logging.INFO):
             await m.feed()
             await m.feed()
-    assert "barge-in: wake during LISTENING (score 0.50)" in caplog.text
+    assert "barge-in: wake during LISTENING (score 0.50, trace 0.50*)" in caplog.text
     assert "audible" not in caplog.text
 
 
 async def test_a_stop_barge_in_reports_the_stop_head_not_the_wake_peak(caplog):
     """A stop reports its own live score, not the wake head's trigger score,
     which is stale from the accept that started the interaction."""
-    detector = ScriptedDetector(detections={0: "wake", 1: "stop"}, scores={0: 0.9, 1: 0.55})
+    detector = ScriptedDetector(
+        detections={0: "wake", 1: "stop"}, scores={0: 0.9, 1: 0.55}, trace="0.55*"
+    )
     async with Monitor(
         detector=detector,
         pipeline_kwargs={"state_on_run": State.SPEAKING, "hold_s": 10.0},
@@ -507,4 +517,112 @@ async def test_a_stop_barge_in_reports_the_stop_head_not_the_wake_peak(caplog):
         with caplog.at_level(logging.INFO):
             await m.feed()
             await m.feed()
-    assert "barge-in: stop during SPEAKING (score 0.55, our output was audible)" in caplog.text
+    assert (
+        "barge-in: stop during SPEAKING (score 0.55, trace 0.55*, "
+        "our output was audible)"
+    ) in caplog.text
+
+
+async def test_a_detection_carries_the_score_history_that_led_to_it(caplog):
+    """The trace is what separates a phrase from a transient without audio.
+
+    A false accept on room speech is one high evaluation in an otherwise
+    quiet run; a real wakeword climbs and holds. At patience 1 that
+    difference is invisible in the single score above, and it is exactly the
+    question every tuning round asks of the journal.
+    """
+    detector = ScriptedDetector(
+        detections={0: "wake"}, scores={0: 0.85}, trace="0.01 0.02 0.31 0.85*"
+    )
+    async with Monitor(detector=detector) as m:
+        with caplog.at_level(logging.INFO):
+            await m.feed()
+    assert "wakeword detected (score 0.85, trace 0.01 0.02 0.31 0.85*)" in caplog.text
+
+
+# --- wake-audio dumps -----------------------------------------------------
+
+
+TONE = (np.arange(16000, dtype=np.int16) % 1000) - 500  # recognisable payload
+
+
+async def test_wake_audio_is_dumped_before_the_detector_is_reset(tmp_path, monkeypatch):
+    """The dump has to read the ring while it still holds the trigger audio.
+
+    reset() clears it, so a call placed after the reset would silently write
+    nothing at all — the fake's tail() empties after a reset for exactly that
+    reason, which makes the ordering a test failure rather than a comment.
+    """
+    monkeypatch.setenv("OVS_DUMP_WAKE", str(tmp_path))
+    detector = ScriptedDetector(detections={0: "wake"}, scores={0: 0.85}, tail=TONE)
+    async with Monitor(
+        detector=detector, pipeline_kwargs={"event": Event.PLAYBACK_DONE}
+    ) as m:
+        await m.feed()
+        assert m.pipeline.calls == [True]
+    dumps = sorted(tmp_path.iterdir())
+    assert len(dumps) == 1
+    assert dumps[0].name.startswith("wake-") and dumps[0].name.endswith("-0.85.wav")
+    pcm, rate = read_wav_mono(dumps[0])
+    assert rate == 16000
+    assert np.array_equal(pcm, TONE)
+
+
+async def test_a_barge_in_dumps_its_audio_too(tmp_path, monkeypatch):
+    # the branch that keeps being the forgotten one: it is also the branch
+    # where a TTS-echo accept would show up
+    monkeypatch.setenv("OVS_DUMP_WAKE", str(tmp_path))
+    detector = ScriptedDetector(
+        detections={0: "wake", 1: "stop"}, scores={0: 0.9, 1: 0.55}, tail=TONE
+    )
+    async with Monitor(
+        detector=detector,
+        pipeline_kwargs={"state_on_run": State.SPEAKING, "hold_s": 10.0},
+    ) as m:
+        await m.feed()
+        await m.feed()
+    names = sorted(path.name for path in tmp_path.iterdir())
+    assert len(names) == 2
+    assert names[0].startswith("stop-") and names[0].endswith("-0.55.wav")
+    assert names[1].startswith("wake-")
+
+
+async def test_nothing_is_written_without_the_env_var(tmp_path):
+    detector = ScriptedDetector(detections={0: "wake"}, scores={0: 0.85}, tail=TONE)
+    async with Monitor(
+        detector=detector, pipeline_kwargs={"event": Event.PLAYBACK_DONE}
+    ) as m:
+        await m.feed()
+        assert m.pipeline.calls == [True]
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_an_empty_ring_writes_no_file(tmp_path, monkeypatch):
+    # a detection before the ring filled (or after a reset) must not leave a
+    # 0-byte WAV behind for --score-wav to choke on
+    monkeypatch.setenv("OVS_DUMP_WAKE", str(tmp_path))
+    detector = ScriptedDetector(detections={0: "wake"}, scores={0: 0.85})
+    async with Monitor(
+        detector=detector, pipeline_kwargs={"event": Event.PLAYBACK_DONE}
+    ) as m:
+        await m.feed()
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_a_failing_dump_does_not_swallow_the_wake(tmp_path, monkeypatch, caplog):
+    """Diagnostics must never cost an interaction.
+
+    An unwritable dump directory is a debugging mistake; losing the wakeword
+    over it would turn a mistake into an outage.
+    """
+    not_a_directory = tmp_path / "file"
+    not_a_directory.write_bytes(b"")
+    monkeypatch.setenv("OVS_DUMP_WAKE", str(not_a_directory))
+    detector = ScriptedDetector(detections={0: "wake"}, scores={0: 0.85}, tail=TONE)
+    async with Monitor(
+        detector=detector, pipeline_kwargs={"event": Event.PLAYBACK_DONE}
+    ) as m:
+        with caplog.at_level(logging.INFO):
+            await m.feed()
+        assert m.pipeline.calls == [True]
+    assert "wake audio dump failed" in caplog.text

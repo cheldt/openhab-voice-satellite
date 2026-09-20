@@ -150,6 +150,8 @@ class ScriptedDetector:
         self,
         detections: dict[int, str] | None = None,
         scores: dict[int, float] | None = None,
+        trace: str = "",
+        tail: np.ndarray | None = None,
     ) -> None:
         self.detections = detections or {}
         self.scores = scores or {}
@@ -158,8 +160,14 @@ class ScriptedDetector:
         self.resets = 0
         self._last_score = 0.0
         self.last_trigger_score: float | None = None
+        self._trace = trace
+        self._tail = (
+            np.zeros(0, dtype=np.int16) if tail is None else np.asarray(tail, dtype=np.int16)
+        )
+        self._ring_filled = False
 
     def process(self, frame: np.ndarray, speaking: bool = False) -> str | None:
+        self._ring_filled = True  # the real detector rings every frame it sees
         i = self.frames_seen
         self.frames_seen += 1
         self.speaking_flags.append(speaking)
@@ -172,11 +180,21 @@ class ScriptedDetector:
     def score(self, key: str = "wake") -> float:
         return self._last_score
 
+    def trace(self, key: str = "wake") -> str:
+        return self._trace
+
+    def tail(self, seconds: float) -> np.ndarray:
+        # reset() clears the real ring and every later frame refills it. A
+        # fake that ignored that would let a wake dump written *after* the
+        # reset pass its test, which is the one ordering bug the dump can have
+        return self._tail if self._ring_filled else np.zeros(0, dtype=np.int16)
+
     def reset(self) -> None:
-        # the real detector clears this too; a fake that keeps it drifts from
-        # WakewordProtocol at exactly the seam app.py reads after a reset
+        # the real detector clears these too; a fake that keeps them drifts
+        # from WakewordProtocol at exactly the seam app.py reads after a reset
         self.resets += 1
         self.last_trigger_score = None
+        self._ring_filled = False
 
 
 class FakePipeline:
