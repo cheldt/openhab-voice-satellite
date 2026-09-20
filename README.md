@@ -61,6 +61,7 @@ Audio I/O needs GStreamer + PyGObject; install the system packages first
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev,gst]"
 .venv/bin/pip install --no-deps 'openwakeword==0.6.0'   # see note in pyproject.toml
+.venv/bin/pip install -e ".[livekit]"                    # optional: second wakeword engine (wakeword.engine: "livekit")
 .venv/bin/python scripts/download_models.py
 cp config.example.yaml config.yaml             # edit devices + openHAB url/token
 .venv/bin/openhab-voice-satellite --list-devices
@@ -117,13 +118,16 @@ Everything lives in one YAML file — see the extensively commented
 |---|---|
 | `audio.input_device` / `output_device` | substring of a PipeWire node name or description (`--list-devices`); `null` = default node |
 | `audio.wakeup_preamble_ms` / `wakeup_preamble_idle_s` | ramped-noise lead-in that wakes powered speakers whose signal-sensing mute swallows the first sound after an idle period (details in [deploy/install.md](deploy/install.md)) |
-| `wakeword.model` | pretrained openWakeWord name or path to custom `.onnx` |
+| `wakeword.engine` | `openwakeword` (default) or `livekit` (livekit-wakeword; needs the `[livekit]` extra and a model path) |
+| `wakeword.model` | pretrained openWakeWord name or path to custom `.onnx`; for `livekit` always a path |
 | `wakeword.threshold_speaking` | raised threshold while TTS is audible (echo mitigation) |
+| `wakeword.patience` | consecutive above-threshold scores before a detection fires (default 1; 2 rejects single-frame spikes) |
 | `stt.engine` | `local` (faster-whisper), `gemini` or `deepgram` (cloud STT, falls back to local on failure) |
 | `stt.model` | `small` (default) or `base` for lower latency |
 | `stt.languages` | language candidates for detection (default `[de, en]`); a single entry skips whisper's per-utterance language-detection pass — recommended on constrained boxes |
 | `tts.default_language` | fallback language/voice when detection is inconclusive (default `de`) |
-| `openhab.verify_ssl` | set `false` for self-signed HTTPS certificates |
+| `openhab.ca_cert` | PEM bundle to trust — the way to reach a self-signed openHAB while still authenticating it |
+| `openhab.verify_ssl` | `false` disables TLS verification entirely (any certificate is accepted, exposing the API token to interception); prefer `ca_cert` |
 | `tts.engine` | `piper` (local), `gemini` or `deepgram` (cloud TTS, falls back to piper on failure) |
 | `gemini.api_key` | Google Gemini API key; env var `GEMINI_API_KEY` wins over the file |
 | `gemini.tts_voices` | prebuilt Gemini voice name per language (e.g. `de: Kore`) |

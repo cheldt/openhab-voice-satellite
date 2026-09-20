@@ -49,6 +49,10 @@ def main() -> None:
     if args.check:
         from .selftest import run_checks
 
+        # config validators warn (e.g. a speaking threshold below the idle
+        # one); a handler has to exist before load_config for that to land
+        # formatted rather than through logging's last-resort stderr handler
+        logging.basicConfig(format="%(levelname)-7s %(name)s: %(message)s", level=logging.WARNING)
         config = load_config(args.config)
         sys.exit(asyncio.run(run_checks(config)))
 
@@ -60,11 +64,14 @@ def main() -> None:
 
         sys.exit(probe_mic(config))
 
-    config = load_config(args.config)
+    # handler first, level after: the configured level lives inside the file
+    # being loaded, but load_config itself already logs (validator warnings)
     logging.basicConfig(
-        level=config.logging.level,
+        level=logging.WARNING,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
+    config = load_config(args.config)
+    logging.getLogger().setLevel(config.logging.level)
 
     from .app import App, CaptureClosedError
 

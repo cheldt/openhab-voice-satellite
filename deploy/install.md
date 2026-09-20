@@ -105,7 +105,10 @@ when a cloud engine is configured, openHAB REST)
 must print `ok`. The audio check opens the real capture pipeline and requires
 an actual sample, so it also catches a device name that PipeWire cannot link.
 The whisper line also warms the model cache, so the first real interaction is
-not slow.
+not slow. With a Deepgram engine configured the check also sends one 100 ms
+silent STT request and one one-word TTS request per configured voice, so a bad
+model or voice name fails here instead of as a silent fallback later — each
+`--check` therefore costs a fraction of a cent of Deepgram usage.
 
 ## 6. Run as a service
 
