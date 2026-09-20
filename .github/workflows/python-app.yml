@@ -41,7 +41,9 @@ jobs:
         python-version: ${{ matrix.python-version }}
         enable-cache: true
     - name: Install dependencies
-      run: uv sync --extra dev --extra gst
+      # livekit too: without it every livekit-engine test runs against the
+      # stub and the real library's constructor contract is never exercised
+      run: uv sync --extra dev --extra gst --extra livekit
     - name: Lint with flake8
       # gating: line length + complexity come from .flake8
       run: uv run flake8 . --count --statistics
