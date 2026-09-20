@@ -243,7 +243,13 @@ class App:
                     # shutdown, before App.run's exit stack closes the sink
                     await earcons.play("idle")
             finally:
-                self._pipeline_task = None
+                # only our own reference. The state is IDLE while the tail
+                # plays, so a wakeword in that window starts the next
+                # interaction and re-points _pipeline_task at it; clearing
+                # unconditionally here would orphan that task — barge-in and
+                # the shutdown cancel would then find nothing to cancel.
+                if self._pipeline_task is asyncio.current_task():
+                    self._pipeline_task = None
 
         self._pipeline_task = asyncio.create_task(_run(), name="interaction")
 
