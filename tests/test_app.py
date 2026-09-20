@@ -14,7 +14,12 @@ import numpy as np
 import pytest
 
 import openhab_voice_satellite.app as app_module
-from openhab_voice_satellite.app import App, _build_engines, _build_speaker
+from openhab_voice_satellite.app import (
+    App,
+    CaptureClosedError,
+    _build_engines,
+    _build_speaker,
+)
 from openhab_voice_satellite.config import Config
 from openhab_voice_satellite.fallback import (
     FallbackSpeaker,
@@ -58,7 +63,8 @@ class Monitor:
     async def __aexit__(self, *exc):
         if not self.task.done():  # a test may have cancelled the monitor itself
             self.queue.put_nowait(None)  # source-closed sentinel ends the monitor
-            await asyncio.wait_for(self.task, timeout=2.0)
+            with pytest.raises(CaptureClosedError):
+                await asyncio.wait_for(self.task, timeout=2.0)
 
     async def feed(self, n: int = 1) -> None:
         for _ in range(n):
@@ -185,10 +191,12 @@ async def test_speaking_flag_tracks_state():
         assert detector.speaking_flags == [False, True, True, False]
 
 
-async def test_none_frame_exits_monitor():
+async def test_none_frame_is_fatal():
+    # capture death must not exit 0: systemd only restarts on failure
     async with Monitor() as m:
-        pass  # __aexit__ sends None and awaits a clean return
-    assert m.task.done() and m.task.exception() is None
+        pass  # __aexit__ sends None and expects CaptureClosedError
+    assert m.task.done()
+    assert isinstance(m.task.exception(), CaptureClosedError)
 
 
 async def test_monitor_exit_cancels_running_interaction():
@@ -296,3 +304,15 @@ async def test_build_engines_local_passthrough():
         )
         assert transcriber is local_t
         assert speaker is local_s
+
+
+async def test_capture_close_is_fatal_so_systemd_restarts_us():
+    """A closed capture stream must not unwind quietly.
+
+    Returning here exits 0, which Restart=on-failure never restarts — a
+    mid-run PipeWire node loss would leave the satellite alive and deaf.
+    """
+    async with Monitor() as m:
+        m.queue.put_nowait(None)
+        with pytest.raises(CaptureClosedError, match="closed mid-run"):
+            await asyncio.wait_for(m.task, timeout=2.0)
