@@ -43,6 +43,15 @@ async def test_closes_both_on_exception_in_block(fake_pipelines):
     assert handles["sink"]._keepalive_task.cancelled()
 
 
+async def test_start_capture_false_leaves_the_mic_closed(fake_pipelines):
+    async with audio_io(AudioConfig(), start_capture=False) as (source, sink):
+        await asyncio.sleep(0.3)
+        assert source.stats().buffers == 0  # the graph is not feeding us yet
+        source.start()
+        frame = await asyncio.wait_for(anext(source.frames()), timeout=5.0)
+        assert len(frame) == AudioConfig().frame_samples
+
+
 async def test_closes_source_when_sink_construction_fails(fake_pipelines, monkeypatch):
     # the sink constructor raises after the source is already PLAYING
     monkeypatch.setattr(
