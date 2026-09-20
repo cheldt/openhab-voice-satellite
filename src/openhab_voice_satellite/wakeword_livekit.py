@@ -167,6 +167,11 @@ class LivekitDetector(BaseWakewordDetector):
     def _engine_reset(self) -> None:
         # the model holds no audio state — the window lives in the base's ring,
         # which reset() clears right after this. Re-priming then mutes the
-        # detector for a full 2 s, which is within 40 ms of what openWakeWord's
-        # own context window costs after a reset, so barge-in does not regress.
+        # detector for a full 2 s. That is longer than openWakeWord's post-reset
+        # behaviour: it zeroes only its first 5 frames (400 ms) and scores on
+        # noise-primed context after that, so it can catch a phrase spoken
+        # inside the 2 s that this engine cannot. Nothing the app does needs a
+        # detection that soon after a reset (the wake earcon and recording
+        # start fill the gap), so barge-in does not regress; re-waking within
+        # 2 s of a barge-in cancel is the one case this engine misses.
         self._countdown = 1
