@@ -25,7 +25,7 @@ from .pipeline import Pipeline, SpeakerProtocol, TranscriberProtocol
 from .state import Event, State
 from .stt import Transcriber
 from .vad import SpeechEndpointer
-from .wakeword import WakewordDetector
+from .wakeword import WakewordProtocol, build_detector
 
 log = logging.getLogger(__name__)
 
@@ -164,7 +164,7 @@ class App:
     async def run(self) -> None:
         config = self._config
         log.info("loading models...")
-        detector = WakewordDetector(config.wakeword)
+        detector = build_detector(config)
         endpointer = SpeechEndpointer(config.vad)
         transcriber = Transcriber(config.stt, config.tts.default_language)
 
@@ -239,7 +239,7 @@ class App:
     async def _interrupt_monitor(
         self,
         wake_queue: asyncio.Queue,
-        detector: WakewordDetector,
+        detector: WakewordProtocol,
         pipeline: Pipeline,
         sink: AudioSink,
         earcons: Earcons,

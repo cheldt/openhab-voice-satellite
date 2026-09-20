@@ -48,6 +48,21 @@ def download_openwakeword() -> None:
     print("  done (shared feature models + pretrained wakewords)")
 
 
+# the pretrained phrase livekit-wakeword ships nothing of; the library
+# bundles only the shared mel and embedding frontends. Kept in its own
+# subdirectory because models/wakeword/*.onnx is openWakeWord's namespace —
+# tooling there globs the directory flat.
+LIVEKIT_MODEL_URL = (
+    "https://raw.githubusercontent.com/livekit-examples/hello-wakeword"
+    "/main/client/models/hey_livekit.onnx"
+)
+
+
+def download_livekit(models_dir: Path) -> None:
+    print("livekit wakeword model:")
+    download(LIVEKIT_MODEL_URL, models_dir / "wakeword" / "livekit" / "hey_livekit.onnx")
+
+
 def download_piper(models_dir: Path) -> None:
     print("Piper TTS models:")
     for name, url in PIPER_FILES.items():
@@ -68,13 +83,19 @@ def main() -> None:
     args = parser.parse_args()
 
     stt_model, compute_type = "small", "int8"
+    wakeword_engine = "openwakeword"
     if args.config.exists():
         from openhab_voice_satellite.config import load_config
 
         config = load_config(args.config)
         stt_model, compute_type = config.stt.model, config.stt.compute_type
+        wakeword_engine = config.wakeword.engine
 
     download_openwakeword()
+    if wakeword_engine == "livekit":
+        download_livekit(REPO_ROOT / "models")
+    else:
+        print(f"livekit wakeword model: skipped (wakeword.engine is {wakeword_engine!r})")
     download_piper(REPO_ROOT / "models")
     warm_whisper(stt_model, compute_type)
     print("all models ready")

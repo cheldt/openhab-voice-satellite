@@ -9,11 +9,23 @@ audio:
   wakeup_preamble_idle_s: 60  # gap that counts as idle; match the speaker's mute delay (0 = preamble before every sound)
 
 wakeword:
-  model: "hey_jarvis"       # openWakeWord pretrained name or path to a custom .onnx
+  engine: "openwakeword"    # "livekit" = livekit-wakeword (needs: pip install -e '.[livekit]')
+  model: "hey_jarvis"       # openWakeWord pretrained name or path to a custom .onnx; for "livekit", always a path
   threshold: 0.5
   threshold_speaking: 0.7   # raised while TTS is audible (echo mitigation)
   stop_model: null          # optional: path to a custom-trained "stop" model (.onnx)
   stop_threshold: 0.5
+  stop_threshold_speaking: null  # null = reuse stop_threshold
+  patience: 1               # consecutive scores above threshold before firing; 2 rejects single-frame spikes
+  stop_patience: 1
+  # openWakeWord only: per-speaker verifier models. REPLACES the base score,
+  # so every threshold above must be re-checked when enabled. Unpickled at
+  # startup — treat these files as executable code.
+  verifier_model: null
+  stop_verifier_model: null
+  verifier_threshold: 0.1
+  livekit:                  # only read when engine is "livekit"
+    hop_frames: 4           # score every Nth frame; predict() rebuilds the whole 2 s window, so 1 is unaffordable on a Pi 5
 
 vad:
   threshold: 0.5

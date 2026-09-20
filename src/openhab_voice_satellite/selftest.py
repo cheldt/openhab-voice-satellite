@@ -26,11 +26,53 @@ def check_audio(config: Config) -> None:
     probe_capture(input_node, config.audio.sample_rate)
 
 
-def check_wakeword(config: Config) -> None:
-    from .wakeword import WakewordDetector
+# enough frames for the engine's context to fill and then be scored a few
+# times over: openwakeword needs 16 embeddings behind 760 ms of mel, livekit
+# is muted until a full 2 s window exists and then only scores every
+# hop_frames-th frame
+WAKEWORD_CHECK_SECONDS = 4.0
 
-    detector = WakewordDetector(config.wakeword)
-    detector.process(np.zeros(config.audio.frame_samples, dtype=np.int16))
+
+def _require_probability(score: float, what: str) -> None:
+    if not np.isfinite(score) or not 0.0 <= score <= 1.0:
+        raise ValueError(
+            f"{what} scored {score}, which is not a probability — "
+            f"thresholds cannot be read against it"
+        )
+
+
+def check_wakeword(config: Config) -> None:
+    from .wakeword import STOP, WAKE, build_detector
+
+    detector = build_detector(config)
+    frame = np.zeros(config.audio.frame_samples, dtype=np.int16)
+    # one frame proves nothing: the engine is muted until its context window
+    # fills, so a model whose scores are not probabilities at all would pass
+    # while still reporting its startup zero
+    frames = int(WAKEWORD_CHECK_SECONDS * 1000 / config.audio.frame_ms)
+    heads = [(WAKE, "wakeword model")]
+    if config.wakeword.stop_model:
+        # the stop head is read against stop_threshold at runtime exactly like
+        # the wake head, and openwakeword passes raw model output through
+        # unclamped — a stop model exported without its sigmoid otherwise
+        # passes here and then fires on nearly any speech, or never at all
+        heads.append((STOP, "stop model"))
+    scored = False
+    for _ in range(frames):
+        detector.process(frame)
+        if not getattr(detector, "scored_last_frame", True):
+            continue
+        scored = True
+        for key, what in heads:
+            _require_probability(detector.score(key), what)
+    if not scored:
+        # EdgeTrigger.last returns 0.0 on an empty history and 0.0 is a valid
+        # probability, so a detector that never scored would otherwise pass
+        # this check without having run a single inference
+        raise ValueError(
+            f"wakeword engine {config.wakeword.engine!r} scored no frame in "
+            f"{WAKEWORD_CHECK_SECONDS:.1f}s — its context window never filled"
+        )
 
 
 def check_vad(config: Config) -> None:

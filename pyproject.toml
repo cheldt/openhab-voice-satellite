@@ -43,6 +43,15 @@ dev = [
 gst = [
     "PyGObject>=3.44",
 ]
+# The second wakeword engine (wakeword.engine: "livekit"). A real extra and
+# not the --no-deps dance openwakeword needs above: livekit-wakeword's
+# metadata is honest, and its only runtime requirements are numpy and
+# onnxruntime, both already core dependencies here. Optional because
+# build_detector imports engines lazily, so an openwakeword-only install must
+# not have to carry it.
+livekit = [
+    "livekit-wakeword>=0.2.1,<0.3",
+]
 
 [project.scripts]
 openhab-voice-satellite = "openhab_voice_satellite.__main__:main"
