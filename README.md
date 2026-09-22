@@ -80,12 +80,22 @@ evidence, and it is gone by the time the recorder starts: set `OVS_DUMP_WAKE`
 to a directory and every detection also writes the 5 s that preceded it plus
 the 0.64 s that followed as `<wake|stop>-<date>-<time>-<score>.wav` (room
 audio from around a detection, so it is a debugging switch, not a default;
-the trailing part contains our own wake earcon). Replay those — or a corpus of
-deliberate wakeword recordings — with
+the trailing part contains our own wake earcon). Replay those with
 `openhab-voice-satellite --score-wav dumps/*.wav`: it prints a per-evaluation
 score trace and a grid of how many detections each `wakeword.threshold` /
 `wakeword.patience` pair would have produced, using the app's own decision
-rule. A run of evaluations that clears the bar and still fires nothing — what a
+rule.
+
+Adding `--positives wakewords/*.wav` — deliberate recordings of the wakeword —
+grades both corpora in one pass and prints `false accepts / wakewords firing`
+per cell, plus the gentlest cell that silences the false accepts without
+losing a single wakeword. That pairing is the point: a threshold picked off
+the false accepts alone cannot say what it costs. Note that the pretrained
+`hey_livekit.onnx` ships no threshold of its own — livekit's trainer picks one
+per model and the export does not carry it — so the `0.5` default is a
+placeholder, not this model's operating point, and is worth re-measuring.
+
+A run of evaluations that clears the bar and still fires nothing — what a
 raised `wakeword.patience` rejects — is logged as `near miss: 2 evaluations
 above the bar, peak 0.84` and dumped the same way, because otherwise raising
 patience only removes lines from the journal and cannot be judged from it.

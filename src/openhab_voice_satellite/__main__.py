@@ -46,7 +46,18 @@ def main() -> None:
              "the configured detector — per-evaluation score trace and how many "
              "detections each (threshold, patience) pair would have produced",
     )
+    parser.add_argument(
+        "--positives", type=Path, nargs="+", metavar="WAV",
+        help="offline: deliberate wakeword recordings, graded alongside "
+             "--score-wav's corpus — the grid then reads each cell's false "
+             "accepts against the recall that cell would cost",
+    )
     args = parser.parse_args()
+
+    if args.positives and not args.score_wav:
+        # on its own it would silently grade a positive corpus as if it were
+        # the false accepts, and every number in that table reads backwards
+        parser.error("--positives grades against --score-wav's corpus; pass both")
 
     if args.list_devices:
         _list_devices()
@@ -78,7 +89,7 @@ def main() -> None:
 
         from .score_wav import score_wav
 
-        sys.exit(score_wav(config, args.score_wav))
+        sys.exit(score_wav(config, args.score_wav, args.positives))
 
     # handler first, level after: the configured level lives inside the file
     # being loaded, but load_config itself already logs (validator warnings)

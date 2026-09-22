@@ -14,6 +14,11 @@ hysteresis and the patience window are precisely what is being tuned, so a
 reimplementation would grade the tuning against a rule the app does not run —
 and that is the reason the decision lives apart from the engines at all.
 
+Both corpora go in one pass (`--positives`) because the cell worth choosing is
+the one that silences the false accepts *and* still fires on every wakeword,
+and that is a comparison between two tables at the same coordinates — which is
+not something anyone reads correctly off two tables printed apart.
+
 Two limits the output states rather than hides: the app calls
 `detector.reset()` after each detection (on livekit a 2 s mute) while this
 replay only re-arms through the normal hysteresis, so counts above one per
@@ -35,10 +40,20 @@ from .wakeword import WAKE, EdgeTrigger, WakewordProtocol, build_detector
 log = logging.getLogger(__name__)
 
 # the range worth tabulating: below 0.5 almost nothing is rejected, above
-# 0.95 almost nothing is accepted. WakewordConfig allows patience up to 10,
-# but past 4 (320 ms at hop 1) the added latency is audible.
-TRIAL_THRESHOLDS = (0.50, 0.60, 0.70, 0.80, 0.90)
+# 0.95 almost nothing is accepted. The step is 0.05 and not 0.10 because the
+# operating points that matter fall between the round numbers — livekit
+# publishes 0.08 false accepts per hour for its own pretrained head at a
+# threshold of 0.68, and a grid offering only 0.60 or 0.70 cannot show it.
+# WakewordConfig allows patience up to 10, but past 4 (320 ms at hop 1) the
+# added latency is audible.
+TRIAL_THRESHOLDS = (0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90)
 TRIAL_PATIENCES = (1, 2, 3, 4)
+
+# printed under both grids: a count this replay cannot reproduce exactly
+UPPER_BOUND_NOTE = (
+    "  (counts above 1 per file are upper bounds: the app resets the detector\n"
+    "   after every detection, this replay only re-arms below threshold/2)"
+)
 
 
 @dataclass
@@ -134,6 +149,28 @@ def _print_unscored(replay: Replay, config: Config) -> None:
     )
 
 
+def _cell(replays: list[Replay], threshold: float, patience: int) -> tuple[int, int]:
+    """(detections, files firing at least once) for one corpus at one cell."""
+    counts = [would_fire(r.scores, threshold, patience) for r in replays]
+    return sum(counts), sum(1 for n in counts if n)
+
+
+def _header(left: int, right: int) -> str:
+    """Patience labels sitting over each cell's left-hand number.
+
+    That is the number a reader scans down a column — detections in one grid,
+    false accepts in the other — so the label belongs above it rather than
+    above the cell as a whole, which is what put it over the slash.
+
+    `left` and `right` are the cell's own two field widths, passed so the
+    header cannot drift from the row it labels: a one-character mismatch
+    compounds per cell, and by the fourth column the grid reads off by one.
+    """
+    return " thr \\ pat" + "".join(
+        f"{p:>{left}}{'':<{right + 1}}" for p in TRIAL_PATIENCES
+    )
+
+
 def _print_grid(replays: list[Replay], config: Config) -> None:
     scored = [r for r in replays if r.scores]
     if not scored:
@@ -146,34 +183,97 @@ def _print_grid(replays: list[Replay], config: Config) -> None:
         f"\nwould-fire detections/files per (threshold, patience), "
         f"{len(scored)} file(s):"
     )
-    print("  thr \\ pat" + "".join(f"{p:>9}" for p in TRIAL_PATIENCES))
+    print(_header(6, 4))
     for threshold in TRIAL_THRESHOLDS:
         cells = ""
         for patience in TRIAL_PATIENCES:
-            counts = [would_fire(r.scores, threshold, patience) for r in scored]
-            cells += f"{sum(counts):>6}/{sum(1 for n in counts if n):<3}"
+            detections, firing = _cell(scored, threshold, patience)
+            cells += f"{detections:>6}/{firing:<4}"
         print(f"      {threshold:.2f}{cells}")
     live_threshold = config.wakeword.threshold
     live_patience = config.wakeword.patience
-    per_file = [would_fire(r.scores, live_threshold, live_patience) for r in scored]
+    detections, firing = _cell(scored, live_threshold, live_patience)
     print(
         f"  configured (threshold {live_threshold:.2f}, patience {live_patience}): "
-        f"{sum(per_file)} detection(s), {sum(1 for n in per_file if n)} of "
-        f"{len(scored)} file(s) firing"
+        f"{detections} detection(s), {firing} of {len(scored)} file(s) firing"
     )
+    print(UPPER_BOUND_NOTE)
+
+
+def _print_joined_grid(
+    false_replays: list[Replay], positive_replays: list[Replay], config: Config
+) -> None:
+    """One table reading the false accepts against the recall they cost.
+
+    The two numbers in a cell are deliberately not the same statistic. A
+    false-accept corpus is counted by detections, because two firings inside
+    one dump are two interruptions; a wakeword corpus is counted by files,
+    because a recording that fires twice still only had to be spoken once,
+    and counting detections there would let one stuttering recording cover
+    for another that went silent.
+    """
+    false_scored = [r for r in false_replays if r.scores]
+    true_scored = [r for r in positive_replays if r.scores]
+    total = len(true_scored)
     print(
-        "  (counts above 1 per file are upper bounds: the app resets the detector\n"
-        "   after every detection, this replay only re-arms below threshold/2)"
+        f"\nwould-fire per (threshold, patience): false accepts / wakewords "
+        f"firing (of {total}), over {len(false_scored)} false and {total} true file(s):"
     )
+    print(_header(7, 5))
+    # lowest false accepts among the cells that still catch every wakeword.
+    # Scanning thresholds and patience ascending with a strict `<` keeps the
+    # first such cell, which is the least aggressive one — the tie worth
+    # taking, since every unseen wakeword is judged by the same bar.
+    best: tuple[int, float, int] | None = None
+    for threshold in TRIAL_THRESHOLDS:
+        cells = ""
+        for patience in TRIAL_PATIENCES:
+            accepts, _ = _cell(false_scored, threshold, patience)
+            _, caught = _cell(true_scored, threshold, patience)
+            cells += f"{accepts:>7}/{caught:<5}"
+            if caught == total and (best is None or accepts < best[0]):
+                best = (accepts, threshold, patience)
+        print(f"      {threshold:.2f}{cells}")
+
+    if best is None:
+        print(
+            "  no cell catches every wakeword: nowhere in the grid does a bar "
+            "hold all\n   of them, so this corpus cannot choose a threshold — "
+            "read the traces above\n   for the recordings the model simply "
+            "scored low, and fix the corpus or the model"
+        )
+    else:
+        accepts, threshold, patience = best
+        print(
+            f"  best: threshold {threshold:.2f}, patience {patience} — "
+            f"{accepts} false accept(s), all {total} wakeword(s) still firing"
+        )
+        speaking = config.wakeword.threshold_speaking
+        if threshold > speaking:
+            print(
+                f"  note: wakeword.threshold_speaking is {speaking:.2f}, below "
+                "that — raise it\n   too, or echo from our own playback is "
+                "judged at a lower bar than the room"
+            )
+    live_threshold = config.wakeword.threshold
+    live_patience = config.wakeword.patience
+    accepts, _ = _cell(false_scored, live_threshold, live_patience)
+    _, caught = _cell(true_scored, live_threshold, live_patience)
+    print(
+        f"  configured (threshold {live_threshold:.2f}, patience {live_patience}): "
+        f"{accepts} false accept(s), {caught} of {total} wakeword(s) firing"
+    )
+    print(UPPER_BOUND_NOTE)
 
 
-def score_wav(config: Config, paths: list[Path]) -> int:
-    """Replay every path and print the traces plus one shared grid. Exit code.
+def _replay_corpus(
+    detector: WakewordProtocol, config: Config, paths: list[Path], label: str = ""
+) -> tuple[list[Replay], bool]:
+    """Replay and trace every path; the scored replays and whether one failed.
 
     A bad file is reported and skipped rather than aborting the run — a corpus
     of field dumps will contain one — but it still sets the exit code.
     """
-    detector = build_detector(config)
     replays: list[Replay] = []
     failed = False
     for path in paths:
@@ -185,8 +285,8 @@ def score_wav(config: Config, paths: list[Path]) -> int:
             continue
         pcm_s = replay.frames * config.audio.frame_ms / 1000
         print(
-            f"\n{path} ({pcm_s:.2f}s, {replay.frames} frames, rms {replay.level}, "
-            f"{len(replay.scores)} evaluations)"
+            f"\n{label}{path} ({pcm_s:.2f}s, {replay.frames} frames, "
+            f"rms {replay.level}, {len(replay.scores)} evaluations)"
         )
         if not replay.scores:
             _print_unscored(replay, config)
@@ -194,5 +294,36 @@ def score_wav(config: Config, paths: list[Path]) -> int:
             continue
         _print_trace(replay, config)
         replays.append(replay)
-    _print_grid(replays, config)
-    return 1 if failed or not replays else 0
+    return replays, failed
+
+
+def score_wav(
+    config: Config, paths: list[Path], positives: list[Path] | None = None
+) -> int:
+    """Replay every path and print the traces plus one grid. Exit code.
+
+    With `positives` — deliberate wakeword recordings — the grid reads the
+    false accepts in `paths` against the recall raising the bar would cost.
+    Without them the one corpus is graded on its own, which answers "what
+    would have stopped this firing" but not "what does that cost".
+    """
+    detector = build_detector(config)
+    replays, failed = _replay_corpus(detector, config, paths)
+    if not positives:
+        _print_grid(replays, config)
+        return 1 if failed or not replays else 0
+
+    # the detector is reset per file either way, so the two corpora do not
+    # have to be replayed by separate detectors to stay independent
+    true_replays, true_failed = _replay_corpus(
+        detector, config, positives, "wakeword: "
+    )
+    failed = failed or true_failed
+    if replays and true_replays:
+        _print_joined_grid(replays, true_replays, config)
+    else:
+        # one side scored nothing; a joined grid would read as a clean sweep
+        # at every threshold rather than as the missing corpus it is
+        print("\nonly one corpus scored; grading it alone")
+        _print_grid(replays or true_replays, config)
+    return 1 if failed or not replays or not true_replays else 0

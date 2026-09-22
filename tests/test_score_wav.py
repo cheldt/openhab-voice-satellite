@@ -158,3 +158,109 @@ def test_a_long_enough_clip_is_scored(tmp_path, capsys, monkeypatch):
     config = make_config("livekit", model=LIVEKIT_MODEL)
     assert score_wav(config, [path]) == 0
     assert "no evaluation" not in capsys.readouterr().out
+
+
+# -- the joined grid: false accepts read against what they cost ----------
+#
+# The stub pops one score per predict() from a single queue, so a scripted
+# sequence below runs the false corpus first and the wakeword corpus after,
+# in the order the paths are passed.
+
+
+def test_the_joined_grid_prints_accepts_against_wakewords_caught(
+    tmp_path, capsys, monkeypatch
+):
+    install_openwakeword(monkeypatch)
+    StubModel.scripts = {"wake": [
+        0.02, 0.72, 0.05,   # false: a lone spike
+        0.02, 0.95, 0.93,   # wakeword: a plateau
+        0.02, 0.91, 0.88,   # wakeword: a lower plateau
+    ]}
+    false = [_wav(tmp_path, "false.wav", 3 * FRAME)]
+    true = [_wav(tmp_path, "a.wav", 3 * FRAME), _wav(tmp_path, "b.wav", 3 * FRAME)]
+    assert score_wav(_openwakeword_config(), false, true) == 0
+    out = capsys.readouterr().out
+    assert "false accepts / wakewords firing (of 2)" in out
+    row = next(
+        line for line in out.splitlines() if line.strip().startswith("0.70")
+    )
+    # patience 1 fires on the spike; patience 2 rejects it and keeps both
+    # wakewords; patience 3 is past the plateau and loses them
+    assert row.split()[1:] == ["1/2", "0/2", "0/0", "0/0"]
+
+
+def test_the_best_cell_is_the_least_aggressive_one_that_keeps_recall(
+    tmp_path, capsys, monkeypatch
+):
+    # 0.90/patience 1 also silences the spike with both wakewords intact, but
+    # every unseen wakeword is judged by the same bar, so the gentler cell is
+    # the one to report
+    install_openwakeword(monkeypatch)
+    StubModel.scripts = {"wake": [
+        0.02, 0.72, 0.05,
+        0.02, 0.95, 0.93,
+        0.02, 0.91, 0.88,
+    ]}
+    false = [_wav(tmp_path, "false.wav", 3 * FRAME)]
+    true = [_wav(tmp_path, "a.wav", 3 * FRAME), _wav(tmp_path, "b.wav", 3 * FRAME)]
+    score_wav(_openwakeword_config(), false, true)
+    out = capsys.readouterr().out
+    assert "best: threshold 0.50, patience 2" in out
+    assert "0 false accept(s), all 2 wakeword(s) still firing" in out
+
+
+def test_the_best_cell_flags_a_speaking_bar_left_below_it(tmp_path, capsys, monkeypatch):
+    # raising the idle bar past threshold_speaking judges echo from our own
+    # playback more leniently than the room, which is backwards
+    install_openwakeword(monkeypatch)
+    StubModel.scripts = {"wake": [
+        0.02, 0.65, 0.65, 0.65,   # false: a plateau patience cannot reject
+        0.02, 0.95, 0.95, 0.95,   # wakeword: comfortably above it
+    ]}
+    false = [_wav(tmp_path, "false.wav", 4 * FRAME)]
+    true = [_wav(tmp_path, "true.wav", 4 * FRAME)]
+    config = _openwakeword_config(threshold_speaking=0.60)
+    score_wav(config, false, true)
+    out = capsys.readouterr().out
+    assert "best: threshold 0.70, patience 1" in out
+    assert "wakeword.threshold_speaking is 0.60" in out
+
+
+def test_a_corpus_with_no_surviving_cell_says_the_model_is_the_problem(
+    tmp_path, capsys, monkeypatch
+):
+    install_openwakeword(monkeypatch)
+    StubModel.scripts = {"wake": [
+        0.02, 0.98, 0.97,   # false: scores higher than the real thing
+        0.02, 0.45, 0.05,   # wakeword: under every threshold in the grid
+    ]}
+    false = [_wav(tmp_path, "false.wav", 3 * FRAME)]
+    true = [_wav(tmp_path, "true.wav", 3 * FRAME)]
+    score_wav(_openwakeword_config(), false, true)
+    out = capsys.readouterr().out
+    assert "no cell catches every wakeword" in out
+    assert "best: threshold" not in out
+
+
+def test_a_wakeword_corpus_that_scores_nothing_falls_back_to_one_grid(
+    tmp_path, capsys, monkeypatch
+):
+    # a joined grid built from an empty side would read as a clean sweep at
+    # every threshold rather than as the missing corpus it is
+    install_openwakeword(monkeypatch)
+    StubModel.scripts = {"wake": [0.02, 0.91, 0.05]}
+    false = [_wav(tmp_path, "false.wav", 3 * FRAME)]
+    assert score_wav(_openwakeword_config(), false, [tmp_path / "gone.wav"]) == 1
+    out = capsys.readouterr().out
+    assert "only one corpus scored" in out
+    assert "would-fire detections/files per (threshold, patience)" in out
+
+
+def test_the_wakeword_corpus_is_labelled_in_the_traces(tmp_path, capsys, monkeypatch):
+    install_openwakeword(monkeypatch)
+    StubModel.scripts = {"wake": [0.02, 0.91, 0.05, 0.02, 0.95, 0.93]}
+    false = [_wav(tmp_path, "false.wav", 3 * FRAME)]
+    true = [_wav(tmp_path, "true.wav", 3 * FRAME)]
+    score_wav(_openwakeword_config(), false, true)
+    out = capsys.readouterr().out
+    assert "wakeword: " in out and "true.wav" in out
