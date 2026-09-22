@@ -10,7 +10,7 @@ import numpy as np
 
 from .audio.sink import AudioSink
 from .config import PiperConfig, TtsConfig
-from .tts import split_sentences, stream_synthesis
+from .tts import stream_synthesis, tts_chunks
 
 log = logging.getLogger(__name__)
 
@@ -50,11 +50,22 @@ class PiperSpeaker:
         return pcm, sample_rate
 
     async def speak(self, text: str, language: str) -> None:
-        """Speak `text`, overlapping synthesis of sentence N+1 with playback of N."""
+        """Speak `text`, overlapping synthesis of chunk N+1 with playback of N.
+
+        `tts_chunks`, not `split_sentences`: the case TTS_CHUNK_CHARS was
+        built for is a "list all items" answer that is one giant
+        comma-separated sentence, and splitting on punctuation alone hands
+        that to piper as a single synthesize() call. `_synthesize_sync`
+        materializes the whole thing before a byte can play, so pipelining
+        degenerates to nothing and the satellite sits silent in SPEAKING for
+        as long as the synthesis takes. The same applies on the fallback path,
+        where a PartialSpeechError remainder is a space-joined comma list with
+        no sentence punctuation left in it at all.
+        """
         voice = self._voices.get(language) or self._voices[self._default_language]
-        sentences = split_sentences(text)
-        if not sentences:
+        chunks = tts_chunks(text)
+        if not chunks:
             return
         await stream_synthesis(
-            sentences, lambda s: self._synthesize_sync(voice, s), self._sink
+            chunks, lambda s: self._synthesize_sync(voice, s), self._sink
         )

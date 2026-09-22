@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import uuid
 
 import aiohttp
@@ -343,3 +344,36 @@ def test_truncate_for_log_long_string_gets_marker():
     result = _truncate_for_log("a" * 250)
     assert result.startswith("a" * 200)
     assert result.endswith("… (+50 chars)")
+
+
+async def test_earcon_echo_guard_logs_what_it_drops(env, caplog):
+    """A silent drop of the speech onset is indistinguishable from silence.
+
+    The guard exists to discard our own earcon echo, but a stalled consumer
+    leaves a backlog long enough that the user's first word goes with it —
+    and the round then just reads as "no speech".
+    """
+    config, _, openhab, broadcaster = env
+    pipeline = _make_pipeline(
+        config, openhab, broadcaster, sink := BufferAudioSink(), FakeSpeaker(sink), []
+    )
+    frames: asyncio.Queue = asyncio.Queue()
+    for _ in range(40):  # ~3.2 s at 80 ms, far past the guard window
+        frames.put_nowait(np.zeros(1280, dtype=np.int16))
+    with caplog.at_level(logging.WARNING):
+        pipeline._drain_earcon_echo(frames)
+    assert "earcon echo guard dropped" in caplog.text
+
+
+async def test_earcon_echo_guard_keeps_the_sentinel(env):
+    config, _, openhab, broadcaster = env
+    pipeline = _make_pipeline(
+        config, openhab, broadcaster, sink := BufferAudioSink(), FakeSpeaker(sink), []
+    )
+    frames: asyncio.Queue = asyncio.Queue()
+    for _ in range(40):
+        frames.put_nowait(np.zeros(1280, dtype=np.int16))
+    frames.put_nowait(None)
+    pipeline._drain_earcon_echo(frames)
+    # the recorder still has to see end-of-stream
+    assert any(f is None for f in frames._queue)  # `in` would == the arrays

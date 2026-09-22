@@ -34,7 +34,21 @@ class PartialSpeechError(CloudEngineError):
 # Failures that mean "cloud unusable right now" — everything else propagates.
 # CancelledError (barge-in) is not an Exception and passes through both
 # wrappers untouched.
-FALLBACK_ERRORS = (CloudEngineError, aiohttp.ClientError, TimeoutError, json.JSONDecodeError)
+#
+# UnicodeDecodeError is in here because a response body is not ours to trust:
+# aiohttp decodes strictly (declared charset, else UTF-8), so a TLS-terminating
+# middlebox, an overridden plain-HTTP base_url or a provider edge answering in
+# ISO-8859-1 makes resp.text() raise it. It is a ValueError, so without this it
+# was the one malformed-payload shape that escaped the taxonomy entirely and
+# bypassed both wrappers — the exact "cloud unusable" case local whisper and
+# piper exist for.
+FALLBACK_ERRORS = (
+    CloudEngineError,
+    aiohttp.ClientError,
+    TimeoutError,
+    json.JSONDecodeError,
+    UnicodeDecodeError,
+)
 
 
 class FallbackTranscriber:

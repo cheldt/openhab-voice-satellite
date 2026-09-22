@@ -40,7 +40,24 @@ def main() -> None:
         help="30s field diagnostic: per-second mic RMS + wakeword score, "
              "with earcon playback and stream-link verification",
     )
+    parser.add_argument(
+        "--score-wav", type=Path, nargs="+", metavar="WAV",
+        help="offline: replay recorded WAVs (e.g. $OVS_DUMP_WAKE dumps) through "
+             "the configured detector — per-evaluation score trace and how many "
+             "detections each (threshold, patience) pair would have produced",
+    )
+    parser.add_argument(
+        "--positives", type=Path, nargs="+", metavar="WAV",
+        help="offline: deliberate wakeword recordings, graded alongside "
+             "--score-wav's corpus — the grid then reads each cell's false "
+             "accepts against the recall that cell would cost",
+    )
     args = parser.parse_args()
+
+    if args.positives and not args.score_wav:
+        # on its own it would silently grade a positive corpus as if it were
+        # the false accepts, and every number in that table reads backwards
+        parser.error("--positives grades against --score-wav's corpus; pass both")
 
     if args.list_devices:
         _list_devices()
@@ -49,6 +66,10 @@ def main() -> None:
     if args.check:
         from .selftest import run_checks
 
+        # config validators warn (e.g. a speaking threshold below the idle
+        # one); a handler has to exist before load_config for that to land
+        # formatted rather than through logging's last-resort stderr handler
+        logging.basicConfig(format="%(levelname)-7s %(name)s: %(message)s", level=logging.WARNING)
         config = load_config(args.config)
         sys.exit(asyncio.run(run_checks(config)))
 
@@ -60,19 +81,37 @@ def main() -> None:
 
         sys.exit(probe_mic(config))
 
-    config = load_config(args.config)
+    if args.score_wav:
+        # INFO: the engine logs which models it loaded and at what hop, and
+        # reading a trace against the wrong model is worse than reading none
+        logging.basicConfig(format="%(levelname)-7s %(name)s: %(message)s", level=logging.INFO)
+        config = load_config(args.config)
+
+        from .score_wav import score_wav
+
+        sys.exit(score_wav(config, args.score_wav, args.positives))
+
+    # handler first, level after: the configured level lives inside the file
+    # being loaded, but load_config itself already logs (validator warnings)
     logging.basicConfig(
-        level=config.logging.level,
+        level=logging.WARNING,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
+    config = load_config(args.config)
+    logging.getLogger().setLevel(config.logging.level)
 
-    from .app import App
+    from .app import App, CaptureClosedError
 
     app = App(config)
     try:
         asyncio.run(app.run())
     except KeyboardInterrupt:
         pass
+    except CaptureClosedError as exc:
+        # exit non-zero: the unit is Restart=on-failure, and a clean exit
+        # here would leave the satellite silently gone until someone notices
+        logging.getLogger(__name__).critical("%s — exiting for restart", exc)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

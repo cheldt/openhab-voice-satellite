@@ -150,26 +150,60 @@ class ScriptedDetector:
         self,
         detections: dict[int, str] | None = None,
         scores: dict[int, float] | None = None,
+        trace: str = "",
+        tail: np.ndarray | None = None,
+        rejections: dict[int, tuple[int, float]] | None = None,
     ) -> None:
         self.detections = detections or {}
         self.scores = scores or {}
+        self.rejections = rejections or {}
         self.frames_seen = 0
         self.speaking_flags: list[bool] = []
         self.resets = 0
         self._last_score = 0.0
+        self.last_trigger_score: float | None = None
+        self._trace = trace
+        self._tail = (
+            np.zeros(0, dtype=np.int16) if tail is None else np.asarray(tail, dtype=np.int16)
+        )
+        self._ring_filled = False
+        self.tail_seconds: list[float] = []
 
     def process(self, frame: np.ndarray, speaking: bool = False) -> str | None:
+        self._ring_filled = True  # the real detector rings every frame it sees
         i = self.frames_seen
         self.frames_seen += 1
         self.speaking_flags.append(speaking)
         self._last_score = self.scores.get(i, 0.0)
-        return self.detections.get(i)
+        detection = self.detections.get(i)
+        if detection == "wake":
+            self.last_trigger_score = self._last_score
+        return detection
 
     def score(self, key: str = "wake") -> float:
         return self._last_score
 
+    def trace(self, key: str = "wake") -> str:
+        return self._trace
+
+    def take_rejection(self, key: str = "wake") -> tuple[int, float] | None:
+        # consumed on read, like the real one: the monitor logs each rejected
+        # run once, and a fake that repeated it would hide a double log
+        return self.rejections.pop(self.frames_seen - 1, None)
+
+    def tail(self, seconds: float) -> np.ndarray:
+        self.tail_seconds.append(seconds)
+        # reset() clears the real ring and every later frame refills it. A
+        # fake that ignored that would let a wake dump written *after* the
+        # reset pass its test, which is the one ordering bug the dump can have
+        return self._tail if self._ring_filled else np.zeros(0, dtype=np.int16)
+
     def reset(self) -> None:
+        # the real detector clears these too; a fake that keeps them drifts
+        # from WakewordProtocol at exactly the seam app.py reads after a reset
         self.resets += 1
+        self.last_trigger_score = None
+        self._ring_filled = False
 
 
 class FakePipeline:
@@ -220,6 +254,8 @@ class FakeGemini:
         self.stt_text = stt_text
         self.stt_language = stt_language
         self.tts_pcm = np.arange(0, 2400, dtype=np.int16)  # short ramp
+        self.tts_raw: bytes | None = None  # raw audio bytes; overrides tts_pcm
+        self.tts_data_b64: str | None = None  # verbatim inlineData value; overrides both
         self.tts_mime = "audio/L16;codec=pcm;rate=24000"
         self.status = 200
         self.generate_statuses: list[int] = []  # FIFO per generateContent; falls back to `status`
@@ -253,7 +289,10 @@ class FakeGemini:
 
         modalities = payload.get("generationConfig", {}).get("responseModalities")
         if modalities == ["AUDIO"]:
-            data = base64.b64encode(self.tts_pcm.tobytes()).decode()
+            data = self.tts_data_b64
+            if data is None:
+                raw = self.tts_raw if self.tts_raw is not None else self.tts_pcm.tobytes()
+                data = base64.b64encode(raw).decode()
             part = {"inlineData": {"mimeType": self.tts_mime, "data": data}}
         else:
             text = self.stt_response
@@ -270,6 +309,7 @@ class FakeDeepgram:
 
     - POST /v1/listen — records query/auth/body, answers nova-shaped JSON;
       detected_language only included when the request asked for detection
+      and `stt_language` is not None (None = the API omitted the field)
     - POST /v1/speak — records query and JSON body, answers `tts_pcm` raw bytes
     - GET /v1/auth/token — key probe (self-test)
     """
@@ -284,6 +324,10 @@ class FakeDeepgram:
         self.status = 200
         self.speak_statuses: list[int] = []  # FIFO per /v1/speak call; falls back to `status`
         self.response_delay_s = 0.0
+        # raw body served by /v1/listen instead of JSON; for the undecodable
+        # payload case (a TLS-terminating middlebox or a provider edge
+        # answering in something that is not UTF-8)
+        self.listen_raw_body: bytes | None = None
 
     def build_app(self) -> web.Application:
         app = web.Application()
@@ -297,10 +341,15 @@ class FakeDeepgram:
         self.listen_requests.append((query, await request.read()))
         self.auth_headers.append(request.headers.get("Authorization"))
         await asyncio.sleep(self.response_delay_s)
+        if self.listen_raw_body is not None:
+            return web.Response(
+                body=self.listen_raw_body, status=self.status,
+                content_type="application/json",
+            )
         if self.status != 200:
             return web.json_response({"err_msg": "boom"}, status=self.status)
         channel: dict = {"alternatives": [{"transcript": self.stt_text}]}
-        if "detect_language" in request.query:
+        if "detect_language" in request.query and self.stt_language is not None:
             channel["detected_language"] = self.stt_language
         return web.json_response({"results": {"channels": [channel]}})
 
@@ -326,7 +375,7 @@ class FakeDeepgram:
 class FakeOpenHAB:
     """aiohttp app implementing the endpoints the client uses.
 
-    - GET /rest/: health ping
+    - GET /rest/voice/interpreters: the ping probe (auth + voice subsystem)
     - POST /rest/voice/interpreters: records the text and answers with the
       scripted plain-text response after `response_delay_s`
     - DELETE /rest/voice/conversations/{cid}: records the deleted id
@@ -343,17 +392,22 @@ class FakeOpenHAB:
         self.response_delay_s = response_delay_s
         self.status = 200  # set e.g. 500 to test error handling
         self.delete_status = 200
+        self.ping_status = 200  # e.g. 401 to test a rejected token
+        self.ping_headers: list[dict[str, str]] = []
         self.error_body = ""  # body sent along with a non-200 status
 
     def build_app(self) -> web.Application:
         app = web.Application()
-        app.router.add_get("/rest/", self._root)
+        app.router.add_get("/rest/voice/interpreters", self._list_interpreters)
         app.router.add_post("/rest/voice/interpreters", self._interpret)
         app.router.add_delete("/rest/voice/conversations/{cid}", self._delete_conversation)
         return app
 
-    async def _root(self, request: web.Request) -> web.Response:
-        return web.json_response({"version": "8"})
+    async def _list_interpreters(self, request: web.Request) -> web.Response:
+        self.ping_headers.append(dict(request.headers))
+        if self.ping_status != 200:
+            return web.Response(status=self.ping_status)
+        return web.json_response([{"id": "system", "label": "Rule-based"}])
 
     async def _interpret(self, request: web.Request) -> web.Response:
         self.commands.append(await request.text())

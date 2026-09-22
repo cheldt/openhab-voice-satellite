@@ -37,6 +37,24 @@ python3 -m venv --system-site-packages .venv
 .venv/bin/pip install --no-deps 'openwakeword==0.6.0'
 ```
 
+For the second wakeword engine (`wakeword.engine: "livekit"`), add the extra —
+no `--no-deps` here, its metadata is honest and needs only numpy and
+onnxruntime, which the base install already provides:
+
+```bash
+.venv/bin/pip install -e '.[livekit]'
+```
+
+Pinned `>=0.2.1,<0.3`: `livekit_ort.TESTED_VERSION` tracks the release whose
+ONNX construction sites the single-threading wrapper was checked against.
+Leaving those sessions unbound costs a measured 10x (13.5 ms against 132 ms
+per evaluation on x86) and spins a thread pool per core. Watch for
+`livekit bound N ONNX sessions, no extra OS threads` in the startup log after
+any upgrade; a warning there means a session escaped the wrapper.
+
+Do **not** install its `[listener]` extra — that pulls pyaudio/portaudio for a
+microphone loop this project does not use — nor `[train]`, which pulls torch.
+
 ## 3. Download models (~400 MB total)
 
 ```bash
@@ -87,7 +105,10 @@ when a cloud engine is configured, openHAB REST)
 must print `ok`. The audio check opens the real capture pipeline and requires
 an actual sample, so it also catches a device name that PipeWire cannot link.
 The whisper line also warms the model cache, so the first real interaction is
-not slow.
+not slow. With a Deepgram engine configured the check also sends one 100 ms
+silent STT request and one one-word TTS request per configured voice, so a bad
+model or voice name fails here instead of as a silent fallback later — each
+`--check` therefore costs a fraction of a cent of Deepgram usage.
 
 ## 6. Run as a service
 

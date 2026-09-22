@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from contextlib import AsyncExitStack
+from pathlib import Path
+from typing import TYPE_CHECKING, Callable
 
 import aiohttp
 import numpy as np
@@ -14,7 +17,8 @@ from .audio.broadcast import AudioBroadcaster
 from .audio.earcons import Earcons
 from .audio.io import audio_io, verify_links
 from .audio.sink import AudioSink
-from .audio.wav import rms
+from .audio.source import AudioSource
+from .audio.wav import rms, write_wav
 from .config import Config
 from .deepgram import DeepgramClient, DeepgramSpeaker, DeepgramTranscriber
 from .fallback import FallbackSpeaker, FallbackTranscriber, LazySpeaker
@@ -25,7 +29,10 @@ from .pipeline import Pipeline, SpeakerProtocol, TranscriberProtocol
 from .state import Event, State
 from .stt import Transcriber
 from .vad import SpeechEndpointer
-from .wakeword import WakewordDetector
+from .wakeword import WakewordProtocol, build_detector
+
+if TYPE_CHECKING:
+    from .audio.gst_source import CaptureStats
 
 log = logging.getLogger(__name__)
 
@@ -36,20 +43,186 @@ DUCK_HOLD_FRAMES = 13  # ~1 s of 80 ms frames
 MIC_STALL_WARN_S = 10.0  # no frames for this long -> loud warning
 HEARTBEAT_S = 10.0  # capture-health DEBUG line interval
 
+# audio kept behind a detection when $OVS_DUMP_WAKE names a directory. Sized
+# for replay rather than for listening: the livekit engine stays muted until
+# 2 s of window exists and EdgeTrigger holds 16 observations (~1.3 s at hop
+# 1), so under ~3.3 s the newest end of the trace cannot be reproduced
+# offline at all. Five buys the lead-in that says what was in the room first,
+# and still fits inside the detector's 10 s ring.
+WAKE_DUMP_SECONDS = 5.0
+
+# ... and how much is kept *after* it, so the replay can see the evaluations
+# `patience` would have counted. WakewordConfig caps patience at 10, but past
+# 4 (320 ms at hop 1) the added wake latency is audible, so 640 ms covers
+# every setting worth tabulating with the plateau's shape either side of it.
+WAKE_DUMP_AFTER_S = 0.64
+
+
+class CaptureClosedError(RuntimeError):
+    """The capture stream ended mid-run (bus ERROR/EOS, e.g. PipeWire node loss).
+
+    Deliberately fatal: in-process recovery would need set_state() from the
+    sync bus handler (which deadlocks, see gst_common.install_sync_handler),
+    and a wedged PipeWire stream rarely recovers its scheduling anyway. The
+    process exits non-zero so the systemd unit (Restart=on-failure) restarts
+    it with a fresh graph connection.
+    """
+
+
+def _detection_score(detector: WakewordProtocol, detection: str, score: float) -> float:
+    """The score behind a detection.
+
+    The candidate's trigger score rather than this frame's, where the engine
+    records one: on a window-scoring engine the frame that reports the
+    detection can already be a hop past the evaluation that fired it. A stop
+    reports its own live score; the wake head's last_trigger_score would be
+    stale from the accept that opened the interaction.
+    """
+    if detection == "stop":
+        return detector.score("stop")
+    trigger_score = getattr(detector, "last_trigger_score", None)
+    return score if trigger_score is None else trigger_score
+
+
+def _detection_scores(detector: WakewordProtocol, detection: str, score: float) -> str:
+    """The score behind a detection plus its run-up, as a log suffix.
+
+    The trace is what makes a false accept diagnosable from the journal alone:
+    one high evaluation between two low ones is a transient that `patience`
+    rejects for the cost of one frame, while a run of them means the head
+    genuinely scores that audio and only the threshold (or another model) can
+    help. Reading the score alone, the two are the same line.
+    """
+    key = "stop" if detection == "stop" else "wake"
+    return (
+        f"score {_detection_score(detector, detection, score):.2f}, "
+        f"trace {detector.trace(key)}"
+    )
+
+
+class _WakeDump:
+    """Writes the audio around each detection to $OVS_DUMP_WAKE, when set.
+
+    Around, not before. `detector.tail()` ends exactly on the evaluation that
+    fired, and that is the one window which cannot answer the question the
+    dump exists for: `patience` is about the evaluations that come *after* the
+    first crossing, and a file stopping at the crossing contains none of them
+    — replayed through --score-wav it reports that no patience above 1 would
+    ever have fired, for every recording, true and false alike. So the tail is
+    snapshotted at the detection and the following frames are appended until
+    WAKE_DUMP_AFTER_S has passed, then both halves are written as one file.
+
+    What the trailing half also contains is our own wake earcon, which starts
+    within it: scores read from the replay past roughly the trigger plus
+    300 ms are scores over the earcon, not over the room.
+
+    The snapshot has to be taken before `detector.reset()`, which clears the
+    very ring `tail()` reads. Off unless the env var is set — this is room
+    audio from before a detection, so it is a debugging switch, not a default.
+    """
+
+    def __init__(self, sample_rate: int, frame_samples: int) -> None:
+        self._sample_rate = sample_rate
+        self._frames_after = max(1, round(WAKE_DUMP_AFTER_S * sample_rate / frame_samples))
+        # A whole number of mic frames, or the file replays on a different
+        # grid than the one that produced the detection: 5 s is 80000
+        # samples, which is 62.5 frames, so the dump would start half a frame
+        # early and every embedding window in it would sit half an embedding
+        # stride off. That is not a rounding difference — the same audio
+        # replayed at the wrong phase scored 0.73 where the detector had seen
+        # 0.86, which reads as a dump that contradicts its own journal line.
+        tail_samples = int(WAKE_DUMP_SECONDS * sample_rate) // frame_samples * frame_samples
+        self._tail_seconds = tail_samples / sample_rate
+        self._parts: list[np.ndarray] = []
+        self._path: Path | None = None
+        self._left = 0
+
+    def feed(self, frame: np.ndarray) -> None:
+        """Collect one frame towards an armed dump, and write when full.
+
+        Called for every mic frame; a no-op unless a detection armed it. It
+        runs before the detection branch, so the frame that fired is not
+        counted twice — it is already the last frame of the snapshot.
+        """
+        if self._left <= 0:
+            return
+        self._parts.append(frame)
+        self._left -= 1
+        if self._left == 0:
+            self._write()
+
+    def arm(self, detector: WakewordProtocol, detection: str, score: float) -> None:
+        dump_dir = os.environ.get("OVS_DUMP_WAKE")
+        if not dump_dir:
+            return
+        pcm = detector.tail(self._tail_seconds)
+        if not len(pcm):  # a detection before the ring filled: no 0-byte WAVs
+            return
+        if self._left > 0:  # a second detection inside the trailing window
+            self._write()
+        # the date is in the name because a dump directory left enabled on a
+        # satellite runs for days, and %H%M%S alone would overwrite across
+        # midnight; the score is what a collected corpus gets triaged by
+        self._path = Path(dump_dir) / (
+            f"{detection}-{time.strftime('%Y%m%d-%H%M%S')}-{score:.2f}.wav"
+        )
+        self._parts = [pcm]
+        self._left = self._frames_after
+
+    def _write(self) -> None:
+        path, parts = self._path, self._parts
+        self._path, self._parts, self._left = None, [], 0
+        if path is None:
+            return
+        try:
+            write_wav(path, np.concatenate(parts), self._sample_rate)
+            log.info("wake audio dumped: %s", path)
+        except OSError:
+            # diagnostics must never cost an interaction
+            log.exception("wake audio dump failed")
+
 
 class _CaptureHealth:
     """Frame-rate/RMS bookkeeping behind the heartbeat + degraded-capture logs."""
 
-    def __init__(self, expected_fps: float) -> None:
+    def __init__(
+        self, expected_fps: float, graph: Callable[[], CaptureStats] | None = None
+    ) -> None:
         self._expected_fps = expected_fps
+        # the source's cumulative capture accounting; differenced per window
+        # so a degraded window says whether PipeWire under-fed the graph or
+        # this loop fell behind
+        self._graph = graph
+        self._graph_at_start = graph() if graph else None
         self._frames = 0
         self._rms = 0
         self._score = 0.0
         self._start = time.monotonic()
 
+    def graph_report(self) -> str:
+        """What the graph delivered in the current window, or "" without a source."""
+        if self._graph is None:
+            return "no capture accounting"
+        return self._graph().since(self._graph_at_start).describe()
+
+    def _rewind_window(self, now: float) -> None:
+        self._frames = 0
+        self._rms = 0
+        self._score = 0.0
+        self._start = now
+        if self._graph is not None:
+            self._graph_at_start = self._graph()
+
     def restart(self) -> None:
-        """Reset the window clock (after a stall, so the gap isn't counted)."""
-        self._start = time.monotonic()
+        """Reset the window clock (after a stall, so the gap isn't counted).
+
+        Every counter moves with it, not just the clock: a window that is not
+        counted must not lend anything to the next one. Leaving `_frames`
+        behind inflated the frame count against a shortened window, which
+        muted the degraded-capture warning for exactly the window after a
+        stall — the one where it matters.
+        """
+        self._rewind_window(time.monotonic())
 
     def observe(self, frame: np.ndarray, score: float) -> None:
         self._frames += 1
@@ -66,13 +239,10 @@ class _CaptureHealth:
         if self._frames < 0.8 * expected:
             log.warning(
                 "degraded capture: %d of %d expected mic frames in %.0fs "
-                "— wakeword detection will be unreliable",
-                self._frames, int(expected), now - self._start,
+                "— wakeword detection will be unreliable (%s)",
+                self._frames, int(expected), now - self._start, self.graph_report(),
             )
-        self._frames = 0
-        self._rms = 0
-        self._score = 0.0
-        self._start = now
+        self._rewind_window(now)
 
 
 class _DuckController:
@@ -164,12 +334,19 @@ class App:
     async def run(self) -> None:
         config = self._config
         log.info("loading models...")
-        detector = WakewordDetector(config.wakeword)
+        detector = build_detector(config)
         endpointer = SpeechEndpointer(config.vad)
         transcriber = Transcriber(config.stt, config.tts.default_language)
 
         async with AsyncExitStack() as stack:
-            source, sink = await stack.enter_async_context(audio_io(config.audio))
+            # capture starts once everything else is loaded: piper alone blocks
+            # this loop for ~3.5s, and a live mic stream that nobody services
+            # xruns its way out of PipeWire's scheduling for good — measured
+            # on the Pi as 17 of 140 expected frames per window, for the life
+            # of the process
+            source, sink = await stack.enter_async_context(
+                audio_io(config.audio, start_capture=False)
+            )
             earcons = Earcons(config.earcons, sink)
             speaker = _build_speaker(config, sink)
 
@@ -196,12 +373,27 @@ class App:
                 set_state=self._set_state,
             )
 
-            log.info("ready — say the wakeword (%s)", config.wakeword.model)
+            source.start()  # nothing blocking left; the monitor is next
+            # the bar and the patience window go in the line because the
+            # detection lines below print a raw score trace: a journal excerpt
+            # that does not carry what the trace was judged against cannot be
+            # graded by anyone who does not also have the config
+            log.info(
+                "ready — say the wakeword (%s via %s, threshold %.2f, "
+                "%.2f while speaking, patience %d)",
+                config.wakeword.model,
+                config.wakeword.engine,
+                config.wakeword.threshold,
+                config.wakeword.threshold_speaking,
+                config.wakeword.patience,
+            )
             link_check = asyncio.create_task(
                 verify_links(source.target, sink.target), name="verify-links"
             )
             try:
-                await self._interrupt_monitor(wake_queue, detector, pipeline, sink, earcons)
+                await self._interrupt_monitor(
+                    wake_queue, detector, pipeline, sink, earcons, source
+                )
             finally:
                 link_check.cancel()
                 await broadcaster.stop()
@@ -211,12 +403,24 @@ class App:
     ) -> None:
         async def _run() -> None:
             try:
-                event = await pipeline.run_interaction(play_wake_earcon)
+                try:
+                    event = await pipeline.run_interaction(play_wake_earcon)
+                finally:
+                    # IDLE before the earcon, so the monitor treats a wakeword
+                    # during the tail as a fresh interaction, not a barge-in
+                    self._set_state(State.IDLE)
+                if event is not Event.ERROR:
+                    # still the tracked task: the tail has to die with it at
+                    # shutdown, before App.run's exit stack closes the sink
+                    await earcons.play("idle")
             finally:
-                self._set_state(State.IDLE)
-                self._pipeline_task = None
-            if event is not Event.ERROR:
-                await earcons.play("idle")
+                # only our own reference. The state is IDLE while the tail
+                # plays, so a wakeword in that window starts the next
+                # interaction and re-points _pipeline_task at it; clearing
+                # unconditionally here would orphan that task — barge-in and
+                # the shutdown cancel would then find nothing to cancel.
+                if self._pipeline_task is asyncio.current_task():
+                    self._pipeline_task = None
 
         self._pipeline_task = asyncio.create_task(_run(), name="interaction")
 
@@ -227,10 +431,20 @@ class App:
         was_speaking = self.state is State.SPEAKING
         sink.stop()
         task.cancel()
+        # `await task` raises CancelledError for two indistinguishable reasons:
+        # the child finished unwinding, or *we* were cancelled while parked on
+        # it (Ctrl-C during a barge-in unwind), in which case Task.cancel
+        # forwarded the cancel to this very await. Swallowing both meant the
+        # shutdown cancel vanished and the monitor resumed its loop, so the
+        # first Ctrl-C did nothing. The cancelling() count is what tells them
+        # apart; the shutdown `finally` path enters with it already raised, so
+        # it stays unaffected.
+        cancels = asyncio.current_task().cancelling()
         try:
             await task
         except asyncio.CancelledError:
-            pass
+            if asyncio.current_task().cancelling() > cancels:
+                raise
         self._set_state(State.IDLE)
         self._pipeline_task = None
         log.info("interaction cancelled")
@@ -239,44 +453,98 @@ class App:
     async def _interrupt_monitor(
         self,
         wake_queue: asyncio.Queue,
-        detector: WakewordDetector,
+        detector: WakewordProtocol,
         pipeline: Pipeline,
         sink: AudioSink,
         earcons: Earcons,
+        source: AudioSource | None = None,
     ) -> None:
-        """Always-on wakeword loop; starts or cancels the interaction task."""
+        """Always-on wakeword loop; starts or cancels the interaction task.
+
+        `source` is only read for its capture accounting, so a shortfall can
+        be attributed to the graph or to this loop; None reports neither.
+        """
         audio = self._config.audio
-        health = _CaptureHealth(audio.sample_rate / audio.frame_samples)
+        graph = source.stats if source is not None else None
+        health = _CaptureHealth(audio.sample_rate / audio.frame_samples, graph)
         duck = _DuckController()
+        wake_dump = _WakeDump(audio.sample_rate, audio.frame_samples)
         try:
             while True:
                 try:
-                    frame = await asyncio.wait_for(wake_queue.get(), timeout=MIC_STALL_WARN_S)
+                    # asyncio.timeout, not wait_for: on 3.11 (the deployment
+                    # target) wait_for swallows an external cancel that races
+                    # a completed inner await (gh-86296), and this loop gets a
+                    # completed get() every ~80 ms while being the coroutine
+                    # shutdown's cancel has to reach. Same reason as
+                    # recorder._next_frame and gst_sink._await_playout.
+                    async with asyncio.timeout(MIC_STALL_WARN_S):
+                        frame = await wake_queue.get()
                 except asyncio.TimeoutError:
                     log.warning(
-                        "no mic frames for %.0fs — capture stream stalled?", MIC_STALL_WARN_S
+                        "no mic frames for %.0fs — capture stream stalled? (%s)",
+                        MIC_STALL_WARN_S, health.graph_report(),
                     )
                     health.restart()
                     continue
                 if frame is None:
-                    log.info("audio source closed, monitor exiting")
-                    return
+                    raise CaptureClosedError(
+                        f"audio capture stream closed mid-run ({health.graph_report()})"
+                    )
 
+                wake_dump.feed(frame)
                 speaking = self.state in (State.THINKING, State.SPEAKING)
                 detection = detector.process(frame, speaking=speaking)
                 score = detector.score("wake")
                 health.observe(frame, score)
+                # two gates on purpose: the threshold raise above covers
+                # everything audible (earcons included), ducking covers TTS
+                # only — earcons are too short to duck, and one started
+                # between frames may begin ducked until the next update
                 duck.update(self.state is State.SPEAKING, score, sink)
 
                 if detection is None:
+                    # a run that cleared the bar and still fired nothing is
+                    # what a raised `patience` leaves behind, and it is
+                    # otherwise invisible: the accepts it prevents simply
+                    # stop being logged, so the setting cannot be judged
+                    near_miss = detector.take_rejection()
+                    if near_miss is not None:
+                        length, peak = near_miss
+                        log.info(
+                            "near miss: %d evaluation%s above the bar, peak %.2f, trace %s",
+                            length, "" if length == 1 else "s", peak, detector.trace(),
+                        )
+                        wake_dump.arm(detector, "nearmiss", peak)
                     continue
 
+                # before either branch: both reset() the detector, which drops
+                # the ring the snapshot reads
+                wake_dump.arm(
+                    detector, detection, _detection_score(detector, detection, score)
+                )
+
                 if self.state is State.IDLE and detection == "wake":
-                    log.info("wakeword detected (score %.2f)", score)
+                    log.info(
+                        "wakeword detected (%s)", _detection_scores(detector, detection, score)
+                    )
                     detector.reset()
                     self._start_pipeline(pipeline, earcons)
                 elif self.state in (State.LISTENING, State.THINKING, State.SPEAKING):
-                    # wakeword or stop-word during an interaction = barge-in
+                    # wakeword or stop-word during an interaction = barge-in.
+                    # Logged before the cancel, with the score that caused it
+                    # and whether our own output was audible at the time:
+                    # without those, a deliberate interruption and the
+                    # assistant self-triggering on its own TTS echo are the
+                    # same "interaction cancelled" line in the journal, and
+                    # the echo case is the one the raised speaking threshold
+                    # exists to prevent — so it is the one worth seeing.
+                    log.info(
+                        "barge-in: %s during %s (%s%s)",
+                        detection, self.state.name,
+                        _detection_scores(detector, detection, score),
+                        ", our output was audible" if speaking else "",
+                    )
                     was_speaking = await self._cancel_pipeline(sink)
                     duck.release(sink)
                     detector.reset()

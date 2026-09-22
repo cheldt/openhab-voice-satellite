@@ -61,6 +61,7 @@ Audio I/O needs GStreamer + PyGObject; install the system packages first
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev,gst]"
 .venv/bin/pip install --no-deps 'openwakeword==0.6.0'   # see note in pyproject.toml
+.venv/bin/pip install -e ".[livekit]"                    # optional: second wakeword engine (wakeword.engine: "livekit")
 .venv/bin/python scripts/download_models.py
 cp config.example.yaml config.yaml             # edit devices + openHAB url/token
 .venv/bin/openhab-voice-satellite --list-devices
@@ -73,6 +74,34 @@ If the wakeword or audio path misbehaves in the field,
 RMS/peak and wakeword score, earcon playback through the configured output,
 stream-link verification, and a `diagnose_capture.wav` dump of exactly what
 the app heard.
+
+For a false accept, the audio that actually fired the wakeword head is the
+evidence, and it is gone by the time the recorder starts: set `OVS_DUMP_WAKE`
+to a directory and every detection also writes the 5 s that preceded it plus
+the 0.64 s that followed as `<wake|stop>-<date>-<time>-<score>.wav` (room
+audio from around a detection, so it is a debugging switch, not a default;
+the trailing part contains our own wake earcon). Replay those with
+`openhab-voice-satellite --score-wav dumps/*.wav`: it prints a per-evaluation
+score trace and a grid of how many detections each `wakeword.threshold` /
+`wakeword.patience` pair would have produced, using the app's own decision
+rule.
+
+Adding `--positives wakewords/*.wav` — deliberate recordings of the wakeword —
+grades both corpora in one pass and prints `false accepts / wakewords firing`
+per cell, plus the gentlest cell that silences the false accepts without
+losing a single wakeword. That pairing is the point: a threshold picked off
+the false accepts alone cannot say what it costs. Note that the pretrained
+`hey_livekit.onnx` ships no threshold of its own — livekit's trainer picks one
+per model and the export does not carry it — so the `0.5` default is a
+placeholder, not this model's operating point, and is worth re-measuring.
+
+A run of evaluations that clears the bar and still fires nothing — what a
+raised `wakeword.patience` rejects — is logged as `near miss: 2 evaluations
+above the bar, peak 0.84` and dumped the same way, because otherwise raising
+patience only removes lines from the journal and cannot be judged from it.
+Every detection also logs its recent score history (`trace 0.01 0.02
+0.85*`, `*` = cleared the bar that applied on that frame), which is what
+separates a one-evaluation transient from a phrase the head genuinely liked.
 
 Tests: `.venv/bin/pytest` (fast; the GStreamer tests skip without PyGObject).
 Recorded utterances can be dumped for debugging by setting the
@@ -117,13 +146,16 @@ Everything lives in one YAML file — see the extensively commented
 |---|---|
 | `audio.input_device` / `output_device` | substring of a PipeWire node name or description (`--list-devices`); `null` = default node |
 | `audio.wakeup_preamble_ms` / `wakeup_preamble_idle_s` | ramped-noise lead-in that wakes powered speakers whose signal-sensing mute swallows the first sound after an idle period (details in [deploy/install.md](deploy/install.md)) |
-| `wakeword.model` | pretrained openWakeWord name or path to custom `.onnx` |
+| `wakeword.engine` | `openwakeword` (default) or `livekit` (livekit-wakeword; needs the `[livekit]` extra and a model path) |
+| `wakeword.model` | pretrained openWakeWord name or path to custom `.onnx`; for `livekit` always a path |
 | `wakeword.threshold_speaking` | raised threshold while TTS is audible (echo mitigation) |
+| `wakeword.patience` | consecutive above-threshold scores before a detection fires (default 1; 2 rejects single-frame spikes) |
 | `stt.engine` | `local` (faster-whisper), `gemini` or `deepgram` (cloud STT, falls back to local on failure) |
 | `stt.model` | `small` (default) or `base` for lower latency |
 | `stt.languages` | language candidates for detection (default `[de, en]`); a single entry skips whisper's per-utterance language-detection pass — recommended on constrained boxes |
 | `tts.default_language` | fallback language/voice when detection is inconclusive (default `de`) |
-| `openhab.verify_ssl` | set `false` for self-signed HTTPS certificates |
+| `openhab.ca_cert` | PEM bundle to trust — the way to reach a self-signed openHAB while still authenticating it |
+| `openhab.verify_ssl` | `false` disables TLS verification entirely (any certificate is accepted, exposing the API token to interception); prefer `ca_cert` |
 | `tts.engine` | `piper` (local), `gemini` or `deepgram` (cloud TTS, falls back to piper on failure) |
 | `gemini.api_key` | Google Gemini API key; env var `GEMINI_API_KEY` wins over the file |
 | `gemini.tts_voices` | prebuilt Gemini voice name per language (e.g. `de: Kore`) |

@@ -1,6 +1,8 @@
 import pytest
 
-from openhab_voice_satellite.config import Config, load_config
+from pydantic import ValidationError
+
+from openhab_voice_satellite.config import Config, WakewordConfig, load_config
 
 
 def test_load_yaml(tmp_path):
@@ -145,3 +147,145 @@ def test_empty_languages_rejected():
 def test_zero_followup_timeout_rejected():
     with pytest.raises(ValueError):
         Config.model_validate({"dialog": {"followup_timeout_s": 0}})
+
+
+def test_cloud_tts_default_language_must_have_cloud_voice():
+    with pytest.raises(ValueError, match="gemini.tts_voices"):
+        Config.model_validate(
+            {
+                "tts": {"engine": "gemini", "default_language": "de"},
+                "gemini": {"api_key": "k", "tts_voices": {"en": "Puck"}},
+            }
+        )
+    with pytest.raises(ValueError, match="deepgram.tts_voices"):
+        Config.model_validate(
+            {
+                "tts": {"engine": "deepgram", "default_language": "de"},
+                "deepgram": {"api_key": "k", "tts_voices": {"en": "aura-2-thalia-en"}},
+            }
+        )
+    # default language covered -> valid; STT-only cloud needs no TTS voice
+    Config.model_validate(
+        {
+            "tts": {"engine": "gemini", "default_language": "de"},
+            "gemini": {"api_key": "k", "tts_voices": {"de": "Kore"}},
+        }
+    )
+    Config.model_validate(
+        {
+            "stt": {"engine": "deepgram"},
+            "deepgram": {"api_key": "k", "tts_voices": {}},
+        }
+    )
+
+
+# --- bounds: fields that used to accept nonsense their siblings reject -----
+
+
+@pytest.mark.parametrize("section, values", [
+    ("vad", {"silence_ms": 0}),
+    ("vad", {"silence_ms": -500}),
+    ("vad", {"no_speech_timeout_s": 0}),
+    ("vad", {"no_speech_timeout_s": -1}),
+    ("vad", {"max_utterance_s": 0}),
+    ("audio", {"frame_ms": 0}),
+    ("audio", {"frame_ms": 40}),   # legal-looking, but under one oww chunk
+    ("audio", {"frame_ms": 120}),  # not a multiple of 80
+    ("stt", {"cpu_threads": 0}),   # ctranslate2 reads 0 as "all cores"
+])
+def test_nonsense_values_are_rejected_at_load(section, values):
+    with pytest.raises(ValueError):
+        Config.model_validate({section: values})
+
+
+def test_the_documented_frame_sizes_still_validate():
+    # 80 ms is the shipped value; multiples of it stay legal
+    for frame_ms in (80, 160, 240):
+        assert Config.model_validate(
+            {"audio": {"frame_ms": frame_ms}}
+        ).audio.frame_ms == frame_ms
+
+
+# --- stt.model: a name, a repo id, or a path -------------------------------
+
+
+def test_stt_model_directory_resolves_against_the_config_file(tmp_path):
+    (tmp_path / "models" / "whisper-de-ct2").mkdir(parents=True)
+    path = tmp_path / "config.yaml"
+    path.write_text('stt:\n  model: "models/whisper-de-ct2"\n')
+    assert load_config(path).stt.model == str(tmp_path / "models/whisper-de-ct2")
+
+
+@pytest.mark.parametrize("model", ["small", "Systran/faster-whisper-small"])
+def test_stt_model_names_and_repo_ids_pass_through_verbatim(tmp_path, model):
+    # a repo id contains a separator but is not a path; rewriting it would
+    # hand faster-whisper an absolute path it then treats as a repo id
+    path = tmp_path / "config.yaml"
+    path.write_text(f'stt:\n  model: "{model}"\n')
+    assert load_config(path).stt.model == model
+
+
+def test_openhab_ca_cert_resolves_against_the_config_file(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text('openhab:\n  ca_cert: "certs/openhab-ca.pem"\n')
+    assert load_config(path).openhab.ca_cert == str(tmp_path / "certs/openhab-ca.pem")
+
+
+# -- wakeword engine selection ------------------------------------------
+
+
+def test_livekit_rejects_the_openwakeword_model_default():
+    """'hey_jarvis' is an openwakeword phrase name, not a path.
+
+    Left unset it would otherwise surface as a missing-file error from inside
+    the engine, naming a path the user never wrote.
+    """
+    with pytest.raises(ValidationError, match="openwakeword default"):
+        WakewordConfig(engine="livekit")
+
+
+def test_livekit_rejects_openwakeword_verifiers():
+    """Silently-ignored settings are the failure this guards against.
+
+    Custom verifiers are an openwakeword feature; livekit has no equivalent,
+    so the setting would do nothing at all and the thresholds tuned around it
+    would be wrong.
+    """
+    with pytest.raises(ValidationError, match="verifier_model"):
+        WakewordConfig(engine="livekit", model="m.onnx", verifier_model="v.pkl")
+    with pytest.raises(ValidationError, match="stop_verifier_model"):
+        WakewordConfig(engine="livekit", model="m.onnx", stop_verifier_model="v.pkl")
+
+
+def test_livekit_accepts_a_model_path():
+    config = WakewordConfig(engine="livekit", model="models/wakeword/livekit/x.onnx")
+    assert config.livekit.hop_frames == 1  # the frontend streams; a hop only adds latency
+
+
+def test_openwakeword_keeps_the_pretrained_name_default():
+    assert WakewordConfig().engine == "openwakeword"
+    assert WakewordConfig().model == "hey_jarvis"
+
+
+def test_unknown_engine_is_rejected():
+    with pytest.raises(ValidationError):
+        WakewordConfig(engine="porcupine")
+
+
+def test_livekit_model_paths_resolve_whatever_their_suffix(tmp_path):
+    # livekit has no pretrained-name form, so a suffix-less model value is
+    # still a path and must become config-relative like the .onnx case
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        'wakeword:\n  engine: "livekit"\n  model: "models/lk/hey"\n'
+        '  stop_model: "models/lk/stop.onnx"\n'
+    )
+    config = load_config(path).wakeword
+    assert config.model == str(tmp_path / "models/lk/hey")
+    assert config.stop_model == str(tmp_path / "models/lk/stop.onnx")
+
+
+def test_openwakeword_pretrained_names_still_pass_through(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text('wakeword:\n  model: "hey_jarvis"\n')
+    assert load_config(path).wakeword.model == "hey_jarvis"

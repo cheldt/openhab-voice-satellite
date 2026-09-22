@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Annotated, ClassVar, Literal
 
 import yaml
 from pydantic import AfterValidator, BaseModel, Field, field_validator, model_validator
+
+log = logging.getLogger(__name__)
 
 # Capture rate is not configurable: Silero VAD, openWakeWord and whisper are
 # all hardwired to 16 kHz.
@@ -29,7 +32,12 @@ class AudioConfig(BaseModel):
     # ClassVar keeps `config.audio.sample_rate` reads working while pydantic
     # ignores the key in old config files.
     sample_rate: ClassVar[int] = SAMPLE_RATE
-    frame_ms: int = 80
+    # openWakeWord only produces a new prediction per accumulated 1280
+    # samples (80 ms) and returns the *previous* score for anything shorter.
+    # A smaller or non-multiple frame therefore feeds EdgeTrigger duplicated
+    # scores, so `patience` counts one inference twice and the single-frame
+    # transients it exists to reject fire detections.
+    frame_ms: int = Field(80, ge=80)
     # ramped noise before a sound that follows an idle period; wakes powered
     # speakers whose signal-sensing mute ignores the keep-alive dither.
     # 0 = off.
@@ -38,24 +46,135 @@ class AudioConfig(BaseModel):
     # how fast the speaker's mute kicks in (0 = before every sound)
     wakeup_preamble_idle_s: float = Field(60.0, ge=0.0)
 
+    @field_validator("frame_ms")
+    @classmethod
+    def _whole_oww_chunks(cls, v: int) -> int:
+        if v % 80:
+            raise ValueError(
+                f"audio.frame_ms must be a multiple of 80 (one 1280-sample "
+                f"openWakeWord chunk at 16 kHz), got {v}"
+            )
+        return v
+
     @property
     def frame_samples(self) -> int:
         return self.sample_rate * self.frame_ms // 1000
 
 
+class LivekitConfig(BaseModel):
+    # Run the classifier head on every Nth frame only. The engine streams
+    # livekit's frontend itself (one mel chunk and one speech embedding per
+    # frame, ~4 ms on a Pi 5), and that part has to run on every frame
+    # regardless, so a hop above 1 saves only the ~0.4 ms head run. What it
+    # costs: `patience` counts engine evaluations rather than mic frames, and
+    # a detection is delayed by up to (hop_frames - 1) * audio.frame_ms. Kept
+    # for configs written when predict() rebuilt the whole 2 s window per
+    # call (65 ms on the Pi) and 4 was the only affordable setting.
+    hop_frames: int = Field(1, ge=1, le=12)
+
+
 class WakewordConfig(BaseModel):
+    # "openwakeword": pretrained phrase name or a custom .onnx.
+    # "livekit": path to a livekit-wakeword .onnx classifier; it ships no
+    # pretrained phrase library, so there is no name form.
+    engine: Literal["openwakeword", "livekit"] = "openwakeword"
     model: str = "hey_jarvis"
     threshold: float = Field(0.5, ge=0.0, le=1.0)
     threshold_speaking: float = Field(0.7, ge=0.0, le=1.0)
     stop_model: str | None = None
     stop_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    # None = reuse stop_threshold. The stop model runs during playback by
+    # definition and usually carries the lowest threshold in the system, so
+    # it is the first place echo false-accepts show up.
+    stop_threshold_speaking: float | None = Field(None, ge=0.0, le=1.0)
+    # consecutive observations above threshold before a detection fires. 1
+    # keeps the historical single-frame trigger; 2 costs one observation of
+    # latency and rejects the transient spikes that make up most false
+    # accepts. Counts mic frames on openwakeword and engine evaluations on
+    # livekit — see LivekitConfig.hop_frames.
+    patience: int = Field(1, ge=1, le=10)
+    stop_patience: int = Field(1, ge=1, le=10)
+    # optional per-speaker verifier models (openwakeword custom verifiers).
+    # These are unpickled at startup: treat them like executable code.
+    verifier_model: str | None = None
+    stop_verifier_model: str | None = None
+    verifier_threshold: float = Field(0.1, ge=0.0, le=1.0)
+    livekit: LivekitConfig = Field(default_factory=LivekitConfig)
+
+    @property
+    def effective_stop_threshold_speaking(self) -> float:
+        if self.stop_threshold_speaking is None:
+            return self.stop_threshold
+        return self.stop_threshold_speaking
+
+    @model_validator(mode="after")
+    def _speaking_thresholds_are_raised(self) -> WakewordConfig:
+        """Warn when the speaking threshold sits below the idle one.
+
+        The speaking variants exist to raise the bar while our own output is
+        audible; setting one lower makes the detector easiest to trigger
+        exactly when the room contains our TTS. Legal — a lower bar is how you
+        would deliberately favour barge-in — so this warns rather than raises,
+        but it is almost always a leftover from tuning the idle threshold up.
+        """
+        for name, idle, speaking in (
+            ("threshold", self.threshold, self.threshold_speaking),
+            (
+                "stop_threshold",
+                self.stop_threshold,
+                self.effective_stop_threshold_speaking,
+            ),
+        ):
+            if speaking < idle:
+                log.warning(
+                    "wakeword.%s_speaking (%.2f) is below wakeword.%s (%.2f): "
+                    "the bar drops while our own output is audible, so echo is "
+                    "more likely to trigger a detection than room speech is",
+                    name,
+                    speaking,
+                    name,
+                    idle,
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _engine_supports_settings(self) -> WakewordConfig:
+        """Reject settings the selected engine would silently ignore."""
+        if self.engine == "livekit":
+            unsupported = [
+                name
+                for name in ("verifier_model", "stop_verifier_model")
+                if getattr(self, name)
+            ]
+            if unsupported:
+                raise ValueError(
+                    f"wakeword.{', wakeword.'.join(unsupported)} "
+                    "only applies to engine 'openwakeword' — livekit has no "
+                    "per-speaker verifier, so the setting would do nothing"
+                )
+            if self.model == type(self).model_fields["model"].default:
+                # the default is an openwakeword pretrained phrase name;
+                # livekit ships no phrase library, so leaving it unset would
+                # fail later as a confusing missing-file error
+                raise ValueError(
+                    f"wakeword.model is still the openwakeword default "
+                    f"{self.model!r}; engine 'livekit' needs a path to a "
+                    "classifier .onnx"
+                )
+        return self
 
 
 class VadConfig(BaseModel):
     threshold: float = Field(0.5, ge=0.0, le=1.0)
-    silence_ms: int = 1200
-    no_speech_timeout_s: float = 8.0
-    max_utterance_s: float = 15.0
+    # all three are gt=0 for the same reason the sibling fields carry bounds:
+    # nothing downstream treats a non-positive value as a disable switch, it
+    # just breaks. silence_ms <= 0 endpoints every utterance on the first VAD
+    # chunk after speech starts (vad.endpoint_reached: 0 >= 0), so whisper
+    # receives a fraction of a word and every command fails with no hint that
+    # the config caused it.
+    silence_ms: int = Field(1200, gt=0)
+    no_speech_timeout_s: float = Field(8.0, gt=0.0)
+    max_utterance_s: float = Field(15.0, gt=0.0)
 
 
 class SttConfig(BaseModel):
@@ -64,8 +183,11 @@ class SttConfig(BaseModel):
     compute_type: str = "int8"
     # 3, not 4: ctranslate2 runs with the GIL released and saturates its
     # threads; on the 4-core Pi 5 one core must stay free or the 80 ms
-    # wakeword cadence starves during THINKING (barge-in goes deaf)
-    cpu_threads: int = 3
+    # wakeword cadence starves during THINKING (barge-in goes deaf).
+    # ge=1 because ctranslate2 reads 0 as "auto" = every core, which slips
+    # past the saturation advisory in stt.py while causing exactly the
+    # starvation that advisory exists to flag.
+    cpu_threads: int = Field(3, ge=1)
     beam_size: int = Field(1, ge=1)
     languages: list[str] = Field(default_factory=lambda: ["de", "en"])
 
@@ -82,7 +204,13 @@ class OpenHABConfig(BaseModel):
     api_token: str | None = None
     llm_tools: str | None = "item-send-command"  # ?llmTools= param; null = omit
     response_timeout_s: float = 30.0
-    verify_ssl: bool = True  # False accepts self-signed certificates
+    # PEM bundle to trust in addition to nothing else — the way to reach a
+    # self-signed openHAB while still authenticating it. Wins over verify_ssl.
+    ca_cert: str | None = None
+    # False disables certificate *and* hostname verification entirely: any
+    # certificate is accepted, so the bearer token below and every voice
+    # command travel over TLS that authenticates nobody. Prefer ca_cert.
+    verify_ssl: bool = True
 
     @property
     def token(self) -> str | None:
@@ -198,6 +326,20 @@ class Config(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _cloud_tts_default_voice(self) -> Config:
+        # mirror of _tts_default_voice for the selected cloud TTS engine:
+        # pick_voice falls back to the default language's voice, so a map
+        # missing it makes every utterance a silent local fallback
+        voices = {"gemini": self.gemini.tts_voices, "deepgram": self.deepgram.tts_voices}
+        engine = self.tts.engine
+        if engine in voices and self.tts.default_language not in voices[engine]:
+            raise ValueError(
+                f"tts.default_language {self.tts.default_language!r} has no "
+                f"{engine}.tts_voices voice configured"
+            )
+        return self
+
 
 def _resolve_config_paths(config: Config, base: Path) -> Config:
     """Rewrite config-relative paths to absolute ones, relative to `base`.
@@ -209,6 +351,25 @@ def _resolve_config_paths(config: Config, base: Path) -> Config:
     config.piper.voices = {
         lang: _resolve_path(p, base) for lang, p in config.piper.voices.items()
     }
+    wakeword = config.wakeword
+    # only path-shaped values: pretrained openwakeword phrases ("hey_jarvis")
+    # must pass through verbatim. livekit has no name form at all, so its
+    # model values are paths whatever their suffix.
+    for field in ("model", "stop_model", "verifier_model", "stop_verifier_model"):
+        value = getattr(wakeword, field)
+        if not value:
+            continue
+        always_path = wakeword.engine == "livekit" and field in ("model", "stop_model")
+        if always_path or value.endswith((".onnx", ".tflite", ".pkl")):
+            setattr(wakeword, field, _resolve_path(value, base))
+    if config.openhab.ca_cert:
+        config.openhab.ca_cert = _resolve_path(config.openhab.ca_cert, base)
+    # stt.model is a faster-whisper *name* ("small"), a HuggingFace repo id
+    # ("org/model") or a local CTranslate2 directory, and only the last is a
+    # path. Resolve exactly that case: rewriting anything separator-shaped
+    # would turn a repo id into a bogus absolute path.
+    if (base / config.stt.model).is_dir():
+        config.stt.model = _resolve_path(config.stt.model, base)
     earcons = config.earcons
     earcons.wake, earcons.ack, earcons.error, earcons.idle = (
         _resolve_path(p, base)
