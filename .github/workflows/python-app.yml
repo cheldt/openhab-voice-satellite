@@ -27,6 +27,11 @@ jobs:
     # write access to this workspace and the job's GITHUB_TOKEN (see the
     # tj-actions/changed-files tag repoint, March 2025). Bump deliberately.
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+    - name: Read runner image version
+      id: image
+      # ImageOS/ImageVersion are process env vars, not in the `env`
+      # expression context: ${{ env.ImageVersion }} is empty
+      run: echo "version=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
     - name: Cache GStreamer and GObject introspection debs
       id: apt-cache
       # one key for every matrix leg: the packages don't depend on the
@@ -36,7 +41,7 @@ jobs:
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
       with:
         path: ~/apt-debs
-        key: apt-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('.github/workflows/python-app.yml') }}
+        key: apt-${{ steps.image.outputs.version }}-${{ hashFiles('.github/workflows/python-app.yml') }}
     - name: Install GStreamer and GObject introspection
       # runner has no PipeWire daemon: gst tests only construct pipelines
       # from fake elements; anything needing live audio is marked/skipped
