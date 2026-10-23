@@ -27,14 +27,38 @@ jobs:
     # write access to this workspace and the job's GITHUB_TOKEN (see the
     # tj-actions/changed-files tag repoint, March 2025). Bump deliberately.
     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+    - name: Cache GStreamer and GObject introspection debs
+      id: apt-cache
+      # one key for every matrix leg: the packages don't depend on the
+      # Python version. ImageVersion in the key because the debs must match
+      # the runner image's installed libraries; a new image starts fresh.
+      # The workflow hash invalidates it when the package list changes.
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+      with:
+        path: ~/apt-debs
+        key: apt-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ hashFiles('.github/workflows/python-app.yml') }}
     - name: Install GStreamer and GObject introspection
       # runner has no PipeWire daemon: gst tests only construct pipelines
       # from fake elements; anything needing live audio is marked/skipped
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libgirepository-2.0-dev libcairo2-dev \
-          gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+      env:
+        CACHE_HIT: ${{ steps.apt-cache.outputs.cache-hit }}
+        PKGS: >-
+          libgirepository-2.0-dev libcairo2-dev
+          gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0
           gstreamer1.0-plugins-base gstreamer1.0-pipewire
+      run: |
+        if [ "$CACHE_HIT" = "true" ]; then
+          # no apt-get update: local debs resolve against each other and
+          # the image's installed packages, which is what they were
+          # downloaded against (same ImageVersion)
+          sudo apt-get install -y ~/apt-debs/*.deb
+        else
+          mkdir -p ~/apt-debs/partial
+          sudo apt-get update
+          sudo apt-get install -y -o Dir::Cache::Archives="$HOME/apt-debs" \
+            -o APT::Keep-Downloaded-Packages=true $PKGS
+          sudo rm -rf ~/apt-debs/partial ~/apt-debs/lock
+        fi
     - name: Install uv
       uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
       with:
