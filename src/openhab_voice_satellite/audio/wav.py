@@ -31,7 +31,9 @@ def pcm_to_wav_bytes(pcm: np.ndarray, sample_rate: int) -> bytes:
 
 
 def write_wav(path: Path, pcm: np.ndarray, sample_rate: int) -> None:
-    with wave.open(str(path), "wb") as wav:
+    # opened here, not by wave: when wave.open(str) fails to create the file
+    # it leaves a half-built Wave_write whose __del__ raises AttributeError
+    with open(path, "wb") as f, wave.open(f, "wb") as wav:
         wav.setnchannels(1)
         wav.setsampwidth(2)
         wav.setframerate(sample_rate)
