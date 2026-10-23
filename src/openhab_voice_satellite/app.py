@@ -100,6 +100,24 @@ def _detection_scores(detector: WakewordProtocol, detection: str, score: float) 
     )
 
 
+def _report_near_miss(detector: WakewordProtocol, wake_dump: _WakeDump) -> None:
+    """Logs, and dumps, a run that cleared the bar and still fired nothing.
+
+    That is what a raised `patience` leaves behind, and it is otherwise
+    invisible: the accepts it prevents simply stop being logged, so the
+    setting cannot be judged.
+    """
+    near_miss = detector.take_rejection()
+    if near_miss is None:
+        return
+    length, peak = near_miss
+    log.info(
+        "near miss: %d evaluation%s above the bar, peak %.2f, trace %s",
+        length, "" if length == 1 else "s", peak, detector.trace(),
+    )
+    wake_dump.arm(detector, "nearmiss", peak)
+
+
 class _WakeDump:
     """Writes the audio around each detection to $OVS_DUMP_WAKE, when set.
 
@@ -504,18 +522,7 @@ class App:
                 duck.update(self.state is State.SPEAKING, score, sink)
 
                 if detection is None:
-                    # a run that cleared the bar and still fired nothing is
-                    # what a raised `patience` leaves behind, and it is
-                    # otherwise invisible: the accepts it prevents simply
-                    # stop being logged, so the setting cannot be judged
-                    near_miss = detector.take_rejection()
-                    if near_miss is not None:
-                        length, peak = near_miss
-                        log.info(
-                            "near miss: %d evaluation%s above the bar, peak %.2f, trace %s",
-                            length, "" if length == 1 else "s", peak, detector.trace(),
-                        )
-                        wake_dump.arm(detector, "nearmiss", peak)
+                    _report_near_miss(detector, wake_dump)
                     continue
 
                 # before either branch: both reset() the detector, which drops
