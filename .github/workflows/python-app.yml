@@ -53,10 +53,12 @@ jobs:
           gstreamer1.0-plugins-base gstreamer1.0-pipewire
       run: |
         if [ "$CACHE_HIT" = "true" ]; then
-          # no apt-get update: local debs resolve against each other and
-          # the image's installed packages, which is what they were
-          # downloaded against (same ImageVersion)
-          sudo apt-get install -y ~/apt-debs/*.deb
+          # dpkg, not apt-get install ./*.deb: the image ships stale
+          # package lists, and apt fetches from the mirror any deb whose
+          # version those lists also know. The cached set is complete
+          # against this ImageVersion's installed packages, so dpkg needs
+          # no network
+          sudo dpkg -i ~/apt-debs/*.deb
         else
           mkdir -p ~/apt-debs/partial
           sudo apt-get update
